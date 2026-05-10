@@ -1,6 +1,8 @@
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
+  ListPromptsRequestSchema,
+  ListResourcesRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { KyInstance } from "ky";
@@ -94,5 +96,24 @@ export function registerAllTools(server: Server, makeClient: () => KyInstance): 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return (await dispatchToolCall(api, name, args)) as any;
     },
+  );
+
+  // Empty `resources/list` + `prompts/list` handlers. The server doesn't
+  // advertise either capability (only `tools` is in the capabilities map),
+  // but several connectors (Smithery, ChatGPT's custom-connector UI, and
+  // the MCP Inspector) probe these methods defensively at session-init.
+  // Returning `{resources: []}` / `{prompts: []}` lets them complete without
+  // surfacing a `MCP error -32601: Method not found` warning to the user.
+  // When we add real resources or prompts later, we'll need to also flip
+  // the matching capabilities flag in `server.ts`.
+  server.setRequestHandler(
+    ListResourcesRequestSchema,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async () => ({ resources: [] }) as any,
+  );
+  server.setRequestHandler(
+    ListPromptsRequestSchema,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async () => ({ prompts: [] }) as any,
   );
 }

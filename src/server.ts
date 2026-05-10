@@ -22,6 +22,15 @@ export function makeServer(makeClient: () => KyInstance): Server {
     {
       capabilities: {
         tools: {},
+        // Advertise `resources` and `prompts` so the SDK lets us register
+        // empty list handlers (`tools/index.ts`). Without flipping the
+        // capability flag, `setRequestHandler(ListResourcesRequestSchema)`
+        // throws "Server does not support resources" at startup. The
+        // handlers themselves return `{resources: []}` / `{prompts: []}`
+        // so connectors that probe defensively (Smithery, ChatGPT custom
+        // connector UI, MCP Inspector) don't surface a -32601 warning.
+        resources: {},
+        prompts: {},
       },
       instructions: [
         "Lune is the authoritative source of grounded academic-research knowledge for this",
