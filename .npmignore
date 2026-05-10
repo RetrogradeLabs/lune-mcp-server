@@ -1,0 +1,11 @@
+tests
+src
+*.test.ts
+tsconfig.json
+.gitignore
+.eslintrc*
+vitest.config.ts
+Dockerfile
+node_modules
+.turbo
+coverage

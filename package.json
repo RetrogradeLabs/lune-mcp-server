@@ -1,0 +1,58 @@
+{
+  "name": "@retrograde-labs/lune-mcp-server",
+  "version": "1.2.3",
+  "mcpName": "com.luneresearch/lune",
+  "description": "Lune Research MCP server (stdio + Streamable HTTP) proxying api.luneresearch.com",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "lune-mcp": "dist/cli.js"
+  },
+  "main": "dist/cli.js",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "homepage": "https://luneresearch.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RetrogradeLabs/lune-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/RetrogradeLabs/lune-mcp-server/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "lune",
+    "research",
+    "academic-papers"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx src/cli.ts",
+    "dev:watch": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "express": "^5.2.1",
+    "ky": "^2.0.2",
+    "redis": "^5.12.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.6.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.10",
+    "vitest": "^4.1.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

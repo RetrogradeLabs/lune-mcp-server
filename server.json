@@ -1,0 +1,50 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.luneresearch/lune",
+  "title": "Lune Research",
+  "description": "Search peer-reviewed papers and research methodology guidance from your AI agent.",
+  "version": "1.2.3",
+  "websiteUrl": "https://luneresearch.com",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@retrograde-labs/lune-mcp-server",
+      "version": "1.2.3",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "LUNE_API_KEY",
+          "description": "Lune personal access token. Generate one at https://luneresearch.com/dashboard/credentials.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.luneresearch.com/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer token. Use a Lune PAT or an OAuth access token from https://luneresearch.com/dashboard/credentials.",
+          "isRequired": true,
+          "isSecret": true,
+          "value": "Bearer {api_key}",
+          "variables": {
+            "api_key": {
+              "description": "Lune personal access token (lune_...).",
+              "isRequired": true,
+              "isSecret": true,
+              "format": "string"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
