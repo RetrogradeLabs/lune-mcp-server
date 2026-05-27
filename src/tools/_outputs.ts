@@ -12,7 +12,13 @@
 import { z } from "zod";
 
 const PaperOut = z.object({
-  paper_id: z.string().describe("Lune paper UUID; pass into `get_paper` and `get_paper_fulltext`."),
+  paper_id: z
+    .string()
+    .describe(
+      "Lune paper UUID. An internal handle for fetching a paper's FULL TEXT via " +
+        "get_paper_fulltext (or richer metadata via get_paper); do NOT show it " +
+        "to the user. Cite papers by title, authors, and venue instead.",
+    ),
   title: z.string(),
   authors: z.array(z.string()),
   year: z.number().int().optional(),
@@ -76,8 +82,31 @@ const DrainPaperOut = PaperOut.extend({
   occurred_at: z.string().optional().describe("Timestamp the paper was indexed."),
 });
 
+const MatchedContextOut = z.object({
+  section: z
+    .string()
+    .optional()
+    .describe("Section the chunk came from (e.g. Methods, Results)."),
+  text: z.string().describe("The exact matched text span from the paper."),
+  score: z.number().optional().describe("Retriever relevance score for the chunk."),
+});
+
+// Search hits optionally carry `contexts` (the matched text chunks inside the
+// paper) when the caller passes `should_include_context: true`. The field is
+// optional so the default (contexts-off) response still validates.
+const SearchHitOut = PaperOut.extend({
+  contexts: z
+    .array(MatchedContextOut)
+    .optional()
+    .describe(
+      "Present only when should_include_context is true: the exact matched " +
+        "text spans inside this paper. Use these to ground an answer; for the " +
+        "complete text, call get_paper_fulltext with the paper_id.",
+    ),
+});
+
 export const SearchPapersOutput = z.object({
-  results: z.array(PaperOut),
+  results: z.array(SearchHitOut),
 });
 
 export const GetPaperOutput = PaperOut;

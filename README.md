@@ -2,33 +2,30 @@
 
 <!-- mcp-name: com.luneresearch/lune -->
 
-[![npm](https://img.shields.io/npm/v/@retrograde-labs/lune-mcp-server.svg)](https://www.npmjs.com/package/@retrograde-labs/lune-mcp-server)
-[![MCP Registry](https://img.shields.io/badge/MCP_Registry-com.luneresearch/lune-blue)](https://registry.modelcontextprotocol.io/v0.1/servers?search=com.luneresearch/lune)
+Official Model Context Protocol server for [Lune Research](https://luneresearch.com).
 
-Official [Model Context Protocol](https://modelcontextprotocol.io/) server for [Lune Research](https://luneresearch.com). Twelve tools for searching, retrieving, and subscribing to academic papers across security, ML, NLP, CV, and systems venues.
-
-Two transports:
+Exposes 12 tools for searching, retrieving, and subscribing to academic papers across security, ML, NLP, CV, and systems venues. Two transports:
 
 - **stdio**: run locally via `npx @retrograde-labs/lune-mcp-server`. Reads `LUNE_API_KEY` from the environment.
 - **Streamable HTTP**: hosted at `https://mcp.luneresearch.com/mcp`. Pass your PAT or OAuth token as `Authorization: Bearer ...`.
 
-Get a token at [luneresearch.com/dashboard/credentials](https://luneresearch.com/dashboard/credentials).
+## Quick start (Claude Desktop, Cursor, etc.)
 
-## Quick start
-
-The fastest path is the [dashboard installer](https://luneresearch.com/dashboard/install): pick your AI app, click a button, and you're done. Manual installs follow.
-
-### Claude Code
-
-```sh
-claude mcp add lune --transport http \
-  https://mcp.luneresearch.com/mcp \
-  --header "Authorization: Bearer <YOUR_TOKEN>"
+```json
+{
+  "mcpServers": {
+    "lune-research": {
+      "command": "npx",
+      "args": ["-y", "@retrograde-labs/lune-mcp-server"],
+      "env": {
+        "LUNE_API_KEY": "lune_your_personal_access_token"
+      }
+    }
+  }
+}
 ```
 
-### Claude Desktop, Cursor, VS Code, OpenCode, Codex, Gemini CLI, Windsurf, Zed
-
-See the dashboard installer for per-client recipes verified against each client's official docs. The schemas vary subtly (e.g. VS Code uses `type: "http"`, Cursor omits `type`, Gemini CLI uses `httpUrl`, Zed uses `context_servers`).
+Get your token at https://luneresearch.com/dashboard/credentials.
 
 ## Tools
 
@@ -47,34 +44,6 @@ See the dashboard installer for per-client recipes verified against each client'
 | `unsubscribe_from_conference_updates` | Stop receiving updates for a conference |
 | `check_for_conference_updates` | Pull new papers since the last check |
 
-## Authentication
-
-The hosted Streamable HTTP transport at `mcp.luneresearch.com/mcp` supports both:
-
-- **OAuth 2.1 + Dynamic Client Registration**, advertised via `https://mcp.luneresearch.com/.well-known/oauth-protected-resource`. Authorization server is `api.luneresearch.com`. Clients (Claude Desktop, ChatGPT custom connectors) handle the flow automatically.
-- **Personal Access Tokens** (`lune_*`), passed as `Authorization: Bearer ...`. Mint at [luneresearch.com/dashboard/credentials](https://luneresearch.com/dashboard/credentials).
-
-## MCP Registry
-
-Published as `com.luneresearch/lune` at [registry.modelcontextprotocol.io](https://registry.modelcontextprotocol.io/v0.1/servers?search=com.luneresearch/lune). DNS-authenticated under the `luneresearch.com` namespace.
-
-## Development
-
-```sh
-pnpm install
-pnpm dev:watch        # tsup --watch
-pnpm test
-pnpm typecheck
-```
-
-Tests are unit + integration (`tests/`); no live network calls.
-
-The hosted variant runs on ECS Fargate behind ALB. The npm-distributed binary (`lune-mcp`) is the same image entrypoint defaulting to stdio.
-
-## Releases
-
-The npm package is built with [tsup](https://tsup.egoist.dev/). Version is stamped into the bundle at build time from `package.json` via `tsup.config.ts`'s `define`; the same version is asserted at `serverInfo.version` in the MCP `initialize` response and at `/health`.
-
 ## License
 
-[MIT](./LICENSE) © Retrograde Labs
+MIT

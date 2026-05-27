@@ -88,7 +88,7 @@ export function registerAllTools(server: Server, makeClient: () => KyInstance): 
 
   server.setRequestHandler(
     CallToolRequestSchema,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     async (req: { params: { name: string; arguments?: Record<string, unknown> } }) => {
       const api = makeClient();
       const name = req.params.name;

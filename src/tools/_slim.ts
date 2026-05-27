@@ -40,6 +40,12 @@ export function slimConferenceList(list: unknown) {
   };
 }
 
+interface RawMatchedChunk {
+  section_name?: string | null;
+  text?: string | null;
+  score?: number | null;
+}
+
 interface RawPaper {
   id?: string;
   paper_id?: string;
@@ -53,6 +59,7 @@ interface RawPaper {
   url?: string | null;
   citation_count?: number;
   conference?: RawConference | string | null;
+  matched_chunks?: RawMatchedChunk[] | null;
 }
 
 export function slimPaper(p: RawPaper) {
@@ -74,14 +81,46 @@ export function slimPaper(p: RawPaper) {
   };
 }
 
+/**
+ * Project the API's per-hit `matched_chunks` (the actual text spans inside the
+ * paper that matched the query, scored by the hybrid retriever) into the slim
+ * `contexts` shape surfaced to the agent. Empty/absent chunks collapse to an
+ * empty array so the field is always present and predictable when requested.
+ */
+function slimContexts(chunks: RawMatchedChunk[] | null | undefined) {
+  if (!Array.isArray(chunks)) return [];
+  return chunks
+    .filter((c) => c && typeof c.text === "string" && c.text.length > 0)
+    .map((c) => ({
+      section: c.section_name || undefined,
+      text: c.text as string,
+      score: typeof c.score === "number" ? c.score : undefined,
+    }));
+}
+
 interface RawSearchResponse {
   results?: RawPaper[] | unknown;
 }
 
-export function slimSearchResponse(r: RawSearchResponse | unknown) {
+/**
+ * Slim the hybrid-search response. When `includeContexts` is true, each hit
+ * carries a `contexts` array (its `matched_chunks` from the API: the exact
+ * matched text spans). When false (the default), contexts are dropped so the
+ * payload stays the slim title/abstract envelope it has always been.
+ */
+export function slimSearchResponse(
+  r: RawSearchResponse | unknown,
+  includeContexts = false,
+) {
   const obj = (r ?? {}) as RawSearchResponse;
   const results = Array.isArray(obj.results) ? obj.results : [];
-  return { results: results.map((p) => slimPaper(p)) };
+  return {
+    results: results.map((p) =>
+      includeContexts
+        ? { ...slimPaper(p), contexts: slimContexts(p.matched_chunks) }
+        : slimPaper(p),
+    ),
+  };
 }
 
 interface RawPaperDetail extends RawPaper {

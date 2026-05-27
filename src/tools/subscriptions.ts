@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { KyInstance } from "ky";
-import { rethrowHttpError } from "../errors.js";
+import { httpErrorToToolResult } from "../errors.js";
 import {
   structuredJson,
   type ToolAnnotations,
@@ -47,7 +47,7 @@ const CreateIn = z.object({
     .string()
     .min(1)
     .describe("UUID of the conference (from `list_conferences`)."),
-  email: z.string().email().optional().describe("Override the org's default delivery email."),
+  email: z.email().optional().describe("Override the org's default delivery email."),
   notify_email: z.boolean().default(true).optional(),
   notify_in_app: z.boolean().default(true).optional(),
 });
@@ -139,10 +139,15 @@ export async function callSubsTool(
       }
       case "subscribe_to_conference_updates": {
         const a = CreateIn.parse(args);
-        const body: Record<string, unknown> = { conference_id: a.conference_id };
+        // `notify_email` / `notify_in_app` always materialise from zod 4
+        // defaults (true). `email` is purely optional and stays absent when
+        // omitted by the caller.
+        const body: Record<string, unknown> = {
+          conference_id: a.conference_id,
+          notify_email: a.notify_email,
+          notify_in_app: a.notify_in_app,
+        };
         if (a.email !== undefined) body.email = a.email;
-        if (a.notify_email !== undefined) body.notify_email = a.notify_email;
-        if (a.notify_in_app !== undefined) body.notify_in_app = a.notify_in_app;
         const r = await api.post("subscriptions", { json: body }).json();
         return structuredJson(slimSubscription(r as Parameters<typeof slimSubscription>[0]));
       }
@@ -153,7 +158,10 @@ export async function callSubsTool(
       }
       case "check_for_conference_updates": {
         const a = DrainIn.parse(args);
-        const sp: Record<string, string | number> = { limit: a.limit ?? 20 };
+        // zod 4 materialises the limit default even on `.optional()`, so
+        // `a.limit` is guaranteed defined at runtime; the assertion narrows
+        // away the residual TS `| undefined`.
+        const sp: Record<string, string | number> = { limit: a.limit as number };
         if (a.since) sp.since = a.since;
         const r = await api
           .get(`subscriptions/${encodeURIComponent(a.subscription_id)}/drain`, {
@@ -166,7 +174,9 @@ export async function callSubsTool(
         throw new Error(`unknown subscription tool: ${name}`);
     }
   } catch (e) {
-    await rethrowHttpError(e);
-    throw e;
+    // Upstream Lune-API failures resolve to a `{ isError: true }` tool result
+    // (actionable, in-context); non-HTTP errors (zod, unknown-tool) re-throw
+    // as JSON-RPC protocol errors. See `httpErrorToToolResult`.
+    return await httpErrorToToolResult(e);
   }
 }

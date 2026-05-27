@@ -2,7 +2,7 @@ import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import type { KyInstance } from "ky";
 import { cachedJson } from "../api/cached-fetch.js";
-import { LuneErrorCode, rethrowHttpError } from "../errors.js";
+import { httpErrorToToolResult, LuneErrorCode } from "../errors.js";
 import {
   type ConferenceCandidate,
   resolveConferenceShortName,
@@ -63,6 +63,19 @@ const SearchInput = z.object({
     .describe('Filter by conference short name, e.g. "CCS", "NeurIPS".'),
   year: z.number().int().min(1990).max(2100).optional(),
   limit: z.number().int().min(1).max(50).default(10).optional(),
+  should_include_context: z
+    .boolean()
+    .default(false)
+    .optional()
+    .describe(
+      "Pass true to return the exact contexts (the matched text chunks) inside " +
+        "each matched paper, as a `contexts` array per result: the specific " +
+        "spans of the paper that matched your query, so you can ground an " +
+        "answer or quote without a follow-up fetch. Leave false (default) to " +
+        "get the slim title + abstract envelope only. Prefer true when the " +
+        "user wants evidence, exact wording, or a grounded answer; for the " +
+        "complete paper text call get_paper_fulltext with the paper_id.",
+    ),
 });
 
 const PaperIdInput = z.object({
@@ -171,7 +184,12 @@ export const PAPER_TOOLS: ToolDef[] = [
       "“how does stochastic depth interact with batch normalization in deep residual " +
       "networks”. Returns up to `limit` papers ranked by relevance, each with title, " +
       "authors, abstract, AI TL;DR, conference, year, and a Lune `paper_id` for follow-up " +
-      "tools.",
+      "tools. Passing `should_include_context: true` additionally returns the exact " +
+      "contexts (the matched text chunks) inside each matched paper, so you can ground or " +
+      "quote an answer directly from the spans that matched. The `paper_id` is an internal " +
+      "handle for YOU to fetch a paper's full text (via `get_paper_fulltext` or richer " +
+      "metadata via `get_paper`); it is not meant to be shown directly to the user, cite " +
+      "papers by title, authors, and venue instead.",
     inputSchema: SearchInput,
     outputSchema: SearchPapersOutput,
     annotations: READ_ONLY_OPEN,
@@ -304,17 +322,21 @@ export async function callPaperTool(
       case "search_papers": {
         const a = SearchInput.parse(args);
         // The catalog's body field is `conference_short_name`; surface as `conference` to the agent.
-        const body: Record<string, unknown> = { query: a.query };
+        const body: Record<string, unknown> = { query: a.query, limit: a.limit };
         if (a.conference) {
           body.conference_short_name = await _resolveConferenceArg(api, a.conference);
         }
         if (a.year) body.year = a.year;
-        if (a.limit) body.limit = a.limit;
+        // `should_include_context` is an MCP-boundary projection knob, NOT an
+        // API request field: the /search response already carries
+        // `matched_chunks` per hit, and the API's SearchRequest is
+        // `extra="forbid"` (an unknown body field 422s). So we never send the
+        // flag upstream; we only decide here whether to surface the contexts.
         const r = await cachedJson(api, "post", "search", {
           json: body,
           defaultTtlMs: TTL_SEARCH,
         });
-        return structuredJson(slimSearchResponse(r));
+        return structuredJson(slimSearchResponse(r, a.should_include_context));
       }
       case "get_paper": {
         const a = PaperIdInput.parse(args);
@@ -325,18 +347,17 @@ export async function callPaperTool(
       }
       case "get_paper_fulltext": {
         const a = FullTextInput.parse(args);
-        const format = a.format ?? "markdown";
         const r = await cachedJson<{ body?: string; sections?: unknown }>(
           api,
           "get",
           `papers/${encodeURIComponent(a.paper_id)}/fulltext`,
           {
-            searchParams: { format },
+            searchParams: { format: a.format },
             defaultTtlMs: TTL_FULLTEXT,
           },
         );
         // Markdown response carries a `body` field; JSON form carries `sections`.
-        if (format === "markdown" && typeof r.body === "string") return plainText(r.body);
+        if (a.format === "markdown" && typeof r.body === "string") return plainText(r.body);
         return structuredJson(r as Record<string, unknown>);
       }
       case "get_paper_citations": {
@@ -346,7 +367,7 @@ export async function callPaperTool(
           "get",
           `papers/${encodeURIComponent(a.paper_id)}/citations`,
           {
-            searchParams: { direction: a.direction ?? "cited_by" },
+            searchParams: { direction: a.direction },
             defaultTtlMs: TTL_CITATIONS,
           },
         );
@@ -365,9 +386,13 @@ export async function callPaperTool(
       case "get_conference_papers": {
         const a = ConfPapersInput.parse(args);
         const conference = await _resolveConferenceArg(api, a.conference);
+        // zod 4 materialises both `.default()`s even on `.optional()` fields,
+        // so `a.limit` / `a.offset` are guaranteed defined at runtime; the
+        // assertions narrow away the residual TS `| undefined` carried by
+        // `.optional()`.
         const sp: Record<string, string | number> = {
-          limit: a.limit ?? 20,
-          offset: a.offset ?? 0,
+          limit: a.limit as number,
+          offset: a.offset as number,
         };
         if (a.year) sp.year = a.year;
         const r = await cachedJson(
@@ -385,7 +410,11 @@ export async function callPaperTool(
         throw new Error(`unknown paper tool: ${name}`);
     }
   } catch (e) {
-    await rethrowHttpError(e);
-    throw e; // unreachable; rethrowHttpError always throws
+    // Upstream Lune-API failures (401/402/403/404/429/5xx/...) resolve to a
+    // `{ isError: true }` tool result so the agent gets the actionable
+    // message in-context. Non-HTTP errors (zod validation, the fuzzy
+    // `InvalidParams`, the `unknown paper tool` guard) are re-thrown as
+    // JSON-RPC protocol errors.
+    return await httpErrorToToolResult(e);
   }
 }

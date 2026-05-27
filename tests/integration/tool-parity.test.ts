@@ -42,6 +42,26 @@ describe("tool catalog parity", () => {
     expect(drain?.description).toMatch(/cursor|next_cursor/i);
   });
 
+  it("search_papers advertises the should_include_context + paper_id agent hints", () => {
+    const r = listToolsResponse();
+    const search = r.tools.find((t) => t.name === "search_papers")!;
+    // Hint 1: should_include_context true returns the matched text chunks.
+    expect(search.description).toMatch(/should_include_context/);
+    expect(search.description).toMatch(/contexts|matched text chunks/i);
+    // Hint 2: paper_id is for fetching full text, not for showing to the user.
+    expect(search.description).toMatch(/get_paper_fulltext/);
+    expect(search.description).toMatch(/not (meant to be|be) shown directly to the user/i);
+
+    // The flag is also exposed on the input schema with a default of false.
+    const schema = search.inputSchema as {
+      properties?: { should_include_context?: { type?: string; default?: boolean; description?: string } };
+    };
+    const flag = schema.properties?.should_include_context;
+    expect(flag?.type).toBe("boolean");
+    expect(flag?.default).toBe(false);
+    expect(flag?.description).toMatch(/matched text chunks|exact contexts/i);
+  });
+
   it("stdio and HTTP transports share the same tool catalog (single source of truth)", () => {
     // Both transports call registerAllTools() which delegates to listToolsResponse().
     // Calling it twice should be deterministic.

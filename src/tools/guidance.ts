@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { KyInstance } from "ky";
 import { cachedJson } from "../api/cached-fetch.js";
-import { rethrowHttpError } from "../errors.js";
+import { httpErrorToToolResult } from "../errors.js";
 import {
   structuredJson,
   type ToolAnnotations,
@@ -79,7 +79,7 @@ export async function callGuidanceTool(
       case "search_research_guidance": {
         const a = SearchIn.parse(args);
         const r = await cachedJson(api, "post", "research-guidance/search", {
-          json: { query: a.query, limit: a.limit ?? 5 },
+          json: { query: a.query, limit: a.limit },
           defaultTtlMs: TTL_GUIDANCE_SEARCH,
         });
         return structuredJson(slimGuidanceSearch(r));
@@ -98,7 +98,9 @@ export async function callGuidanceTool(
         throw new Error(`unknown guidance tool: ${name}`);
     }
   } catch (e) {
-    await rethrowHttpError(e);
-    throw e;
+    // Upstream Lune-API failures resolve to a `{ isError: true }` tool result
+    // (actionable, in-context); non-HTTP errors (zod, unknown-tool) re-throw
+    // as JSON-RPC protocol errors. See `httpErrorToToolResult`.
+    return await httpErrorToToolResult(e);
   }
 }

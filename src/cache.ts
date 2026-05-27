@@ -57,7 +57,10 @@ export class InProcessTTLCache implements Cache {
 
   async set(key: string, value: unknown, ttlMs?: number): Promise<void> {
     if (this.store.size >= this.maxSize && !this.store.has(key)) {
+      // store.size >= maxSize ⇒ store is non-empty ⇒ `oldest` is defined.
+      // TS narrows the IteratorResult shape but can't prove it at runtime.
       const oldest = this.store.keys().next().value;
+      /* v8 ignore next */
       if (oldest !== undefined) this.store.delete(oldest);
     }
     this.store.set(key, {

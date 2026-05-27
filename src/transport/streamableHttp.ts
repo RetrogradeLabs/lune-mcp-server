@@ -55,7 +55,12 @@ function sendProtectedResourceMetadata(res: Response, resource: string): void {
 }
 
 function readSessionId(req: Request): string | undefined {
+  // Node collapses duplicate non-cookie headers into a comma-joined string,
+  // so `req.headers['mcp-session-id']` is always `string | undefined` at
+  // runtime; the `string[]` branch in `IncomingHttpHeaders` is a defensive
+  // TS shape that never materialises here.
   const v = req.headers[SESSION_HEADER];
+  /* v8 ignore next */
   if (Array.isArray(v)) return v[0];
   return v;
 }
@@ -209,7 +214,14 @@ export function buildHttpApp(): Express {
       });
 
       transport.onclose = () => {
+        // `onsessioninitialized` fires synchronously inside `handleRequest`,
+        // before any path that triggers `onclose`, so both `createdSessionId`
+        // and `transport.sessionId` are populated together. The
+        // `transport.sessionId` fallback is here only for the pathological
+        // case where the transport closes before `onsessioninitialized` set
+        // our captured id but after the SDK generated its own.
         if (createdSessionId) sessions.delete(createdSessionId);
+        /* v8 ignore next */
         else if (transport.sessionId) sessions.delete(transport.sessionId);
       };
 

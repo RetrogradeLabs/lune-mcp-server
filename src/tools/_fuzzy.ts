@@ -124,8 +124,11 @@ export function resolveConferenceShortName(
     return { kind: "ambiguous", candidates: fullExact.map((c) => c.short_name) };
   }
 
-  // 3a. Token-prefix match against short_name only.
+  // 3a. Token-prefix match against short_name only. `inputN` is already
+  // confirmed non-empty above, so `_tokens(input)` always returns ≥ 1
+  // token; the empty-array branch is defensive belt-and-suspenders.
   const inputTokens = _tokens(input);
+  /* v8 ignore next */
   if (inputTokens.length === 0) return { kind: "none" };
 
   const shortStage = _tryStage(inputTokens, candidates, (c) => c.short_name);

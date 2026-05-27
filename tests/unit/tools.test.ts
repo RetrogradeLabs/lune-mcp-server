@@ -3,7 +3,6 @@ import type { KyInstance } from "ky";
 import { callPaperTool } from "../../src/tools/papers.js";
 import { callGuidanceTool } from "../../src/tools/guidance.js";
 import { callSubsTool } from "../../src/tools/subscriptions.js";
-import { LuneErrorCode } from "../../src/errors.js";
 import { TOOL_RESPONSE_CACHE } from "../../src/cache.js";
 
 // The tool cache is module-singleton, so tests would otherwise share state
@@ -154,17 +153,106 @@ describe("paper tools", () => {
     });
   });
 
-  it("rejects invalid input via zod", async () => {
+  it("rejects invalid input via zod (stays a thrown protocol error)", async () => {
+    // Malformed input is a Protocol Error per the MCP spec: the zod parse
+    // throws before any API call, so it propagates as a JSON-RPC error
+    // rather than an isError tool result.
     const { ky } = fakeKy();
     await expect(callPaperTool(ky, "search_papers", { query: "" })).rejects.toThrow();
   });
 
-  it("translates 401 from API into MCP unauthorized", async () => {
+  it("surfaces a 401 from the API as an isError tool result (not a throw)", async () => {
+    // Upstream API failures are Tool Execution Errors: the agent must see the
+    // actionable message in-context, so the handler returns isError instead
+    // of throwing a JSON-RPC protocol error the client would discard.
     const { ky, setError } = fakeKy();
     setError(401, { detail: "expired" });
-    await expect(callPaperTool(ky, "get_paper", { paper_id: "p1" })).rejects.toMatchObject({
-      code: LuneErrorCode.Unauthorized,
+    const r = await callPaperTool(ky, "get_paper", { paper_id: "p1" });
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toMatch(/unauthorized|rotate|lune login/i);
+  });
+
+  it("surfaces a 429 (L1 concurrency) as a retryable isError tool result", async () => {
+    const { ky, setError } = fakeKy();
+    setError(429, { error: "rate_limited", retry_after_seconds: 1 });
+    const r = await callPaperTool(ky, "search_papers", { query: "diffusion guidance" });
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toMatch(/rate limited/i);
+    expect(r.content[0]!.text).toContain("retry_after_seconds=1");
+  });
+
+  it("surfaces a 402 (quota/credits exhausted) as an isError tool result with buy-credits guidance", async () => {
+    const { ky, setError } = fakeKy();
+    setError(402, {
+      error: "out_of_credits",
+      buy_credits_url: "https://lune/dashboard/settings/billing",
     });
+    const r = await callPaperTool(ky, "search_papers", { query: "side channels" });
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toContain("Quota exhausted");
+    expect(r.content[0]!.text).toContain("buy_credits_url=https://lune/dashboard/settings/billing");
+  });
+
+  it("search_papers omits contexts by default (should_include_context unset)", async () => {
+    const { ky, setResponse } = fakeKy();
+    setResponse({
+      results: [
+        {
+          id: "p1",
+          title: "Foo",
+          matched_chunks: [{ section_name: "Methods", text: "we trained", score: 0.9 }],
+        },
+      ],
+    });
+    const r = await callPaperTool(ky, "search_papers", { query: "training tricks" });
+    const parsed = JSON.parse(r.content[0]!.text) as {
+      results: Array<Record<string, unknown>>;
+    };
+    expect(parsed.results[0]!.paper_id).toBe("p1");
+    expect("contexts" in parsed.results[0]!).toBe(false);
+  });
+
+  it("search_papers returns matched contexts when should_include_context is true", async () => {
+    const { ky, setResponse } = fakeKy();
+    setResponse({
+      results: [
+        {
+          id: "p1",
+          title: "Foo",
+          matched_chunks: [
+            { section_name: "Methods", text: "we trained on 8 GPUs", score: 0.91 },
+            { section_name: "", text: "", score: 0 }, // empty chunk dropped
+          ],
+        },
+      ],
+    });
+    const r = await callPaperTool(ky, "search_papers", {
+      query: "training setup",
+      should_include_context: true,
+    });
+    const parsed = JSON.parse(r.content[0]!.text) as {
+      results: Array<{ contexts: Array<Record<string, unknown>> }>;
+    };
+    expect(parsed.results[0]!.contexts).toEqual([
+      { section: "Methods", text: "we trained on 8 GPUs", score: 0.91 },
+    ]);
+    // structuredContent mirrors the text content for schema-validating clients.
+    const sc = r.structuredContent as { results: Array<{ contexts: unknown[] }> };
+    expect(sc.results[0]!.contexts).toHaveLength(1);
+  });
+
+  it("does NOT forward should_include_context to the API request body", async () => {
+    // The API's SearchRequest is extra=forbid; the flag is an MCP-side
+    // projection knob, so it must never reach the upstream body.
+    const { ky, calls, setResponse } = fakeKy();
+    setResponse({ results: [] });
+    await callPaperTool(ky, "search_papers", {
+      query: "x",
+      should_include_context: true,
+    });
+    const c = calls.find((x) => x.url === "search")!;
+    const body = (c.opts as { json: Record<string, unknown> }).json;
+    expect("should_include_context" in body).toBe(false);
   });
 });
 

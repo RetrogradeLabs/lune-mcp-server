@@ -181,3 +181,75 @@ describe("resolveConferenceShortName: non-matches", () => {
     });
   });
 });
+
+describe("resolveConferenceShortName: full_name exact match", () => {
+  it("returns the short_name on an exact, case-insensitive full_name hit", () => {
+    // Stage 2: the input matches a full_name verbatim (not a short_name).
+    expect(
+      resolveConferenceShortName(
+        "neural information processing systems",
+        CONFERENCES,
+      ),
+    ).toEqual({ kind: "match", short_name: "NeurIPS" });
+  });
+
+  it("flags ambiguity when two candidates share an identical full_name", () => {
+    // Stage 2 with a duplicate full_name → `fullExact.length > 1`.
+    const corpus: ConferenceCandidate[] = [
+      { short_name: "AAA", full_name: "Shared Long Name" },
+      { short_name: "BBB", full_name: "Shared Long Name" },
+    ];
+    const result = resolveConferenceShortName("shared long name", corpus);
+    expect(result.kind).toBe("ambiguous");
+    if (result.kind === "ambiguous") {
+      expect(result.candidates.sort()).toEqual(["AAA", "BBB"]);
+    }
+  });
+});
+
+describe("resolveConferenceShortName: degenerate candidates", () => {
+  it("skips a candidate whose short_name tokenises to nothing in stage 3a", () => {
+    // The input misses stages 1 + 2, so it reaches the prefix stage. The
+    // first candidate's short_name is pure punctuation → zero target
+    // tokens → `continue`d. The real prefix match still wins.
+    const corpus: ConferenceCandidate[] = [
+      { short_name: "!!!", full_name: "@@@" },
+      { short_name: "ICML", full_name: "International Conference on Machine Learning" },
+    ];
+    expect(resolveConferenceShortName("icm", corpus)).toEqual({
+      kind: "match",
+      short_name: "ICML",
+    });
+  });
+
+  it("widens to stage 3b and tolerates a null full_name in the combined selector", () => {
+    // `repres` matches no short_name token (stage 3a finds nothing), so
+    // stage 3b builds `${short_name} ${full_name ?? ""}` for each
+    // candidate. The `?? ""` arm fires for the null-full_name entry.
+    const corpus: ConferenceCandidate[] = [
+      { short_name: "ZZZ", full_name: null },
+      {
+        short_name: "ICLR",
+        full_name: "International Conference on Learning Representations",
+      },
+    ];
+    expect(resolveConferenceShortName("repres", corpus)).toEqual({
+      kind: "match",
+      short_name: "ICLR",
+    });
+  });
+
+  it("picks the most-specific candidate when a later match is smaller", () => {
+    // `lin` prefix-matches both "Computational Linguistics Workshop" (3
+    // tokens) and "Linguistics" (1 token). The smaller target wins, which
+    // forces the `m.targetSize < minSize` update on a later iteration.
+    const corpus: ConferenceCandidate[] = [
+      { short_name: "Computational Linguistics Workshop", full_name: "x" },
+      { short_name: "Linguistics", full_name: "y" },
+    ];
+    expect(resolveConferenceShortName("lin", corpus)).toEqual({
+      kind: "match",
+      short_name: "Linguistics",
+    });
+  });
+});

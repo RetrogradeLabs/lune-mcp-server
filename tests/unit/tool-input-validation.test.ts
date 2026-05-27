@@ -149,6 +149,28 @@ describe("search_papers input validation", () => {
       calls,
     );
   });
+
+  it("rejects a non-boolean should_include_context", async () => {
+    const { ky, calls } = fakeKy();
+    await expectZodReject(
+      () =>
+        callPaperTool(ky, "search_papers", {
+          query: "x",
+          should_include_context: "yes" as unknown as boolean,
+        }),
+      calls,
+    );
+  });
+
+  it("accepts should_include_context=true", async () => {
+    const { ky, calls, setResponse } = fakeKy();
+    setResponse({ results: [] });
+    await callPaperTool(ky, "search_papers", {
+      query: "x",
+      should_include_context: true,
+    });
+    expect(calls).toHaveLength(1);
+  });
 });
 
 // ─── get_paper ──────────────────────────────────────────────────────────────
