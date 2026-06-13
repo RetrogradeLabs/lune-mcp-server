@@ -1,6 +1,6 @@
 {
   "name": "@retrograde-labs/lune-mcp-server",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "mcpName": "com.luneresearch/lune",
   "description": "Lune Research MCP server (stdio + Streamable HTTP) proxying api.luneresearch.com",
   "license": "MIT",
