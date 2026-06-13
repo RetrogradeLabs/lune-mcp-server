@@ -1,7 +1,6 @@
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
-  ListPromptsRequestSchema,
   ListResourcesRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
@@ -53,6 +52,8 @@ export function listToolsResponse() {
         inputSchema,
         ...(outputSchema ? { outputSchema } : {}),
         annotations: t.annotations,
+        // `_meta` passthrough (e.g. `anthropic/alwaysLoad` on entry tools).
+        ...(t.meta ? { _meta: t.meta } : {}),
       };
     }),
   };
@@ -98,22 +99,16 @@ export function registerAllTools(server: Server, makeClient: () => KyInstance): 
     },
   );
 
-  // Empty `resources/list` + `prompts/list` handlers. The server doesn't
-  // advertise either capability (only `tools` is in the capabilities map),
-  // but several connectors (Smithery, ChatGPT's custom-connector UI, and
-  // the MCP Inspector) probe these methods defensively at session-init.
-  // Returning `{resources: []}` / `{prompts: []}` lets them complete without
-  // surfacing a `MCP error -32601: Method not found` warning to the user.
-  // When we add real resources or prompts later, we'll need to also flip
-  // the matching capabilities flag in `server.ts`.
+  // Empty `resources/list` handler. The server advertises the `resources`
+  // capability (so the SDK permits the handler) but exposes none yet; several
+  // connectors (Smithery, ChatGPT's custom-connector UI, the MCP Inspector)
+  // probe it defensively at session-init, and `{resources: []}` lets them
+  // complete without a `-32601 Method not found` warning. Real `prompts/list`
+  // + `prompts/get` handlers are wired separately in `registerPrompts`
+  // (`prompts.ts`); when we add real resources, mirror that pattern here.
   server.setRequestHandler(
     ListResourcesRequestSchema,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async () => ({ resources: [] }) as any,
-  );
-  server.setRequestHandler(
-    ListPromptsRequestSchema,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async () => ({ prompts: [] }) as any,
   );
 }

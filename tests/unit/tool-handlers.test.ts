@@ -4,7 +4,7 @@
  * `tools.test.ts` covers the happy paths; this file targets the remaining
  * branches: the fuzzy conference-argument resolver (`match` / `ambiguous`
  * / `none` / unreachable-endpoint), the optional-field assembly in
- * `subscribe_to_conference_updates`, and the `unknown tool` default arms
+ * `subscribe_conference`, and the `unknown tool` default arms
  * of every handler.
  */
 import { beforeEach, describe, expect, it } from "vitest";
@@ -157,11 +157,11 @@ describe("_resolveConferenceArg via get_conference_papers", () => {
   });
 });
 
-describe("subscribe_to_conference_updates field assembly", () => {
+describe("subscribe_conference field assembly", () => {
   it("includes the email override on the request body when provided", async () => {
     const { ky, calls } = routedKy({ post: { subscriptions: { id: "s1" } } });
-    await callSubsTool(ky, "subscribe_to_conference_updates", {
-      conference_id: "conf-uuid",
+    await callSubsTool(ky, "subscribe_conference", {
+      conference: "NeurIPS",
       email: "override@example.com",
     });
     const body = (calls[0]!.opts as { json: Record<string, unknown> }).json;
@@ -170,11 +170,165 @@ describe("subscribe_to_conference_updates field assembly", () => {
 
   it("omits the email field entirely when not provided", async () => {
     const { ky, calls } = routedKy({ post: { subscriptions: { id: "s1" } } });
-    await callSubsTool(ky, "subscribe_to_conference_updates", {
-      conference_id: "conf-uuid",
+    await callSubsTool(ky, "subscribe_conference", {
+      conference: "NeurIPS",
     });
     const body = (calls[0]!.opts as { json: Record<string, unknown> }).json;
     expect("email" in body).toBe(false);
+  });
+});
+
+describe("search_related_papers handler", () => {
+  it("GETs papers/<id>/related with the limit and returns enriched related hits", async () => {
+    const { ky, calls } = routedKy({
+      get: {
+        "papers/seed-1/related": [
+          {
+            id: "n1",
+            abstract: "Neighbor abstract",
+            matched_chunks: [
+              { section_name: "Methods", text: "nearest chunk", score: 0.8 },
+            ],
+          },
+          { id: "n2", matched_chunks: [] },
+        ],
+      },
+    });
+    const res = await callPaperTool(ky, "search_related_papers", {
+      paper_id: "seed-1",
+      limit: 2,
+    });
+    const relatedCall = calls.find((c) => c.url === "papers/seed-1/related")!;
+    expect(relatedCall.method).toBe("get");
+    expect(
+      (relatedCall.opts as { searchParams: Record<string, unknown> }).searchParams,
+    ).toEqual({ limit: 2 });
+    const sc = res.structuredContent as {
+      papers: Array<{ paper_id: string; abstract?: string; contexts: unknown[] }>;
+    };
+    expect(sc.papers.map((p) => p.paper_id)).toEqual(["n1", "n2"]);
+    expect(sc.papers[0]!.abstract).toBe("Neighbor abstract");
+    expect(sc.papers[0]!.contexts).toEqual([
+      { section: "Methods", text: "nearest chunk", score: 0.8 },
+    ]);
+  });
+
+  it("defaults limit to 6 when omitted", async () => {
+    const { ky, calls } = routedKy({
+      get: { "papers/seed-1/related": [] },
+    });
+    await callPaperTool(ky, "search_related_papers", { paper_id: "seed-1" });
+    const relatedCall = calls.find((c) => c.url === "papers/seed-1/related")!;
+    expect(
+      (relatedCall.opts as { searchParams: Record<string, unknown> }).searchParams,
+    ).toEqual({ limit: 6 });
+  });
+});
+
+describe("Task 8: paging / sort / filter passthrough", () => {
+  it("search_papers forwards sort_by, offset, year range onto the body", async () => {
+    const { ky, calls } = routedKy({ post: { search: { results: [], has_more: false } } });
+    await callPaperTool(ky, "search_papers", {
+      query: "graphs",
+      limit: 5,
+      offset: 10,
+      sort_by: "citations",
+      year_min: 2018,
+      year_max: 2024,
+    });
+    const body = (calls.find((c) => c.url === "search")!.opts as {
+      json: Record<string, unknown>;
+    }).json;
+    expect(body).toMatchObject({
+      query: "graphs",
+      limit: 5,
+      offset: 10,
+      sort_by: "citations",
+      year_min: 2018,
+      year_max: 2024,
+    });
+  });
+
+  it("search_papers defaults offset=0 and sort_by=relevance when omitted", async () => {
+    const { ky, calls } = routedKy({ post: { search: { results: [] } } });
+    await callPaperTool(ky, "search_papers", { query: "x" });
+    const body = (calls.find((c) => c.url === "search")!.opts as {
+      json: Record<string, unknown>;
+    }).json;
+    expect(body.offset).toBe(0);
+    expect(body.sort_by).toBe("relevance");
+  });
+
+  it("search_papers canonicalises venues via the fuzzy resolver before sending", async () => {
+    const { ky, calls } = routedKy({
+      get: { conferences: CONFERENCES },
+      post: { search: { results: [] } },
+    });
+    await callPaperTool(ky, "search_papers", {
+      query: "x",
+      venues: ["neurips"],
+    });
+    const body = (calls.find((c) => c.url === "search")!.opts as {
+      json: Record<string, unknown>;
+    }).json;
+    expect(body.venues).toEqual(["NeurIPS"]);
+  });
+
+  it("search_papers surfaces has_more from the response", async () => {
+    const { ky } = routedKy({ post: { search: { results: [], has_more: true } } });
+    const res = await callPaperTool(ky, "search_papers", { query: "x" });
+    expect((res.structuredContent as { has_more: boolean }).has_more).toBe(true);
+  });
+
+  it("get_paper_citations forwards limit and offset as searchParams", async () => {
+    const { ky, calls } = routedKy({});
+    await callPaperTool(ky, "get_paper_citations", {
+      paper_id: "p1",
+      limit: 50,
+      offset: 25,
+    });
+    expect(
+      (calls[0]!.opts as { searchParams: Record<string, unknown> }).searchParams,
+    ).toEqual({ direction: "cited_by", limit: 50, offset: 25 });
+  });
+
+  it("get_paper_citations surfaces total and has_more from the response", async () => {
+    const { ky } = routedKy({
+      get: { "papers/p1/citations": { direction: "cited_by", papers: [], total: 42, has_more: true } },
+    });
+    const res = await callPaperTool(ky, "get_paper_citations", { paper_id: "p1" });
+    const sc = res.structuredContent as { total?: number; has_more?: boolean };
+    expect(sc.total).toBe(42);
+    expect(sc.has_more).toBe(true);
+  });
+
+  it("get_paper_fulltext forwards sections as repeated searchParams", async () => {
+    const { ky, calls } = routedKy({});
+    await callPaperTool(ky, "get_paper_fulltext", {
+      paper_id: "p1",
+      format: "json",
+      sections: ["Methods", "Results"],
+    });
+    const sp = (calls[0]!.opts as { searchParams: URLSearchParams }).searchParams;
+    expect(sp.get("format")).toBe("json");
+    expect(sp.getAll("sections")).toEqual(["Methods", "Results"]);
+  });
+
+  it("get_conference_papers forwards the sort enum", async () => {
+    const { ky, calls } = routedKy({
+      get: {
+        conferences: CONFERENCES,
+        "conferences/NeurIPS/papers": { papers: [] },
+      },
+    });
+    await callPaperTool(ky, "get_conference_papers", {
+      conference: "neurips",
+      sort: "citations",
+    });
+    const papersCall = calls.find((c) => c.url === "conferences/NeurIPS/papers")!;
+    expect(
+      (papersCall.opts as { searchParams: Record<string, unknown> }).searchParams,
+    ).toMatchObject({ sort: "citations" });
   });
 });
 
@@ -220,23 +374,104 @@ describe("optional-argument default fallbacks", () => {
     expect(body.limit).toBe(10);
   });
 
+  it("emits the matched contexts on a hit when detail is true", async () => {
+    const { ky } = routedKy({
+      post: {
+        search: {
+          results: [
+            {
+              id: "p1",
+              title: "T",
+              matched_chunks: [
+                { section_name: "Results", text: "a span", score: 0.7, chunk_id: "ch-1" },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    // detail: true keeps the enriched output: the hit carries `contexts`.
+    const res = await callPaperTool(ky, "search_papers", {
+      query: "x",
+      detail: true,
+    });
+    const hit = (
+      res.structuredContent as { results: Array<Record<string, unknown>> }
+    ).results[0]!;
+    expect("contexts" in hit).toBe(true);
+    expect((hit.contexts as Array<Record<string, unknown>>)[0]).toMatchObject({
+      section: "Results",
+      text: "a span",
+      chunk_id: "ch-1",
+    });
+    expect("snippet" in hit).toBe(false);
+  });
+
+  it("defaults search hits to the enriched shape when no flag is set", async () => {
+    const { ky } = routedKy({
+      post: {
+        search: {
+          results: [
+            {
+              id: "p1",
+              title: "T",
+              matched_chunks: [{ section_name: "Results", text: "a span", score: 0.7 }],
+            },
+          ],
+        },
+      },
+    });
+    const res = await callPaperTool(ky, "search_papers", { query: "x" });
+    const hit = (
+      res.structuredContent as { results: Array<Record<string, unknown>> }
+    ).results[0]!;
+    expect("snippet" in hit).toBe(false);
+    expect((hit.contexts as Array<Record<string, unknown>>)[0]).toMatchObject({
+      section: "Results",
+      text: "a span",
+    });
+  });
+
+  it("search hits use the concise shape when detail is false", async () => {
+    const { ky } = routedKy({
+      post: {
+        search: {
+          results: [
+            {
+              id: "p1",
+              title: "T",
+              matched_chunks: [{ section_name: "Results", text: "a span", score: 0.7 }],
+            },
+          ],
+        },
+      },
+    });
+    const res = await callPaperTool(ky, "search_papers", { query: "x", detail: false });
+    const hit = (
+      res.structuredContent as { results: Array<Record<string, unknown>> }
+    ).results[0]!;
+    expect(hit.snippet).toBe("a span");
+    expect("contexts" in hit).toBe(false);
+  });
+
   it("get_paper_fulltext defaults the format to markdown when omitted", async () => {
     const { ky, calls } = routedKy({});
     await callPaperTool(ky, "get_paper_fulltext", { paper_id: "p1" });
-    expect(
-      (calls[0]!.opts as { searchParams: Record<string, unknown> }).searchParams,
-    ).toEqual({ format: "markdown" });
+    // searchParams is a URLSearchParams (built from pairs so `sections` repeats).
+    const sp = (calls[0]!.opts as { searchParams: URLSearchParams }).searchParams;
+    expect(sp.get("format")).toBe("markdown");
+    expect(sp.getAll("sections")).toEqual([]);
   });
 
-  it("get_paper_citations defaults the direction to cited_by when omitted", async () => {
+  it("get_paper_citations defaults direction=cited_by, limit=25, offset=0 when omitted", async () => {
     const { ky, calls } = routedKy({});
     await callPaperTool(ky, "get_paper_citations", { paper_id: "p1" });
     expect(
       (calls[0]!.opts as { searchParams: Record<string, unknown> }).searchParams,
-    ).toEqual({ direction: "cited_by" });
+    ).toEqual({ direction: "cited_by", limit: 25, offset: 0 });
   });
 
-  it("get_conference_papers defaults limit=20 and offset=0 when omitted", async () => {
+  it("get_conference_papers defaults limit=20, offset=0, sort=recency when omitted", async () => {
     const { ky, calls } = routedKy({
       get: {
         conferences: CONFERENCES,
@@ -247,7 +482,7 @@ describe("optional-argument default fallbacks", () => {
     const papersCall = calls.find((c) => c.url === "conferences/NeurIPS/papers")!;
     expect(
       (papersCall.opts as { searchParams: Record<string, unknown> }).searchParams,
-    ).toEqual({ limit: 20, offset: 0 });
+    ).toEqual({ limit: 20, offset: 0, sort: "recency" });
   });
 
   it("search_research_guidance defaults limit=5 when omitted", async () => {
@@ -259,23 +494,22 @@ describe("optional-argument default fallbacks", () => {
     expect(body.limit).toBe(5);
   });
 
-  it("check_for_conference_updates defaults limit=20 and omits since when no cursor", async () => {
+  it("get_subscription_updates defaults limit=20 and omits since when no cursor", async () => {
     const { ky, calls } = routedKy({});
-    await callSubsTool(ky, "check_for_conference_updates", {
-      subscription_id: "sub1",
-    });
+    await callSubsTool(ky, "get_subscription_updates", {});
+    expect(calls[0]!.url).toBe("subscriptions/updates");
     const sp = (calls[0]!.opts as { searchParams: Record<string, unknown> })
       .searchParams;
     expect(sp).toEqual({ limit: 20 });
   });
 
-  it("list_conference_update_subscriptions tolerates undefined args", async () => {
+  it("list_subscriptions tolerates undefined args", async () => {
     const { ky, calls } = routedKy({ get: { subscriptions: [] } });
     // The handler does `Empty.parse(args ?? {})`; passing `undefined`
     // exercises the `?? {}` fallback.
     await callSubsTool(
       ky,
-      "list_conference_update_subscriptions",
+      "list_subscriptions",
       undefined as unknown as Record<string, unknown>,
     );
     expect(calls[0]!.url).toBe("subscriptions");

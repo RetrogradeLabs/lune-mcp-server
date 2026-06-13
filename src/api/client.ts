@@ -23,9 +23,16 @@ export function makeClient(token: string): KyInstance {
       Accept: "application/json",
     },
     timeout: 30_000,
-    // MCP clients (Claude, Cursor) implement their own retry on tool errors.
-    // Doubling up on retries here just adds latency on rate-limited 429s.
-    retry: { limit: 0 },
+    // Retry idempotent GETs only (paper/conference/guidance reads): a transient
+    // 502/503/504 or a network drop during a long delegated sweep should not be
+    // a hard failure. POST /search and subscription mutations are NOT retried
+    // (search is non-idempotent; MCP clients retry tool errors themselves).
+    retry: {
+      limit: 2,
+      methods: ["get"],
+      statusCodes: [502, 503, 504],
+      backoffLimit: 2000,
+    },
   });
 }
 

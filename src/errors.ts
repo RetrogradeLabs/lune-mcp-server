@@ -42,6 +42,7 @@ export function mapHttpError(
   status: number,
   body: ApiErrorBody | null | undefined,
   requestId?: string,
+  retryAfterSeconds?: number,
 ): MappedError {
   const safeBody = body ?? {};
   const base: Record<string, unknown> = { status };
@@ -70,7 +71,9 @@ export function mapHttpError(
     case 404:
       return {
         code: LuneErrorCode.NotFound,
-        message: typeof safeBody.detail === "string" ? safeBody.detail : "Not found",
+        message:
+          (typeof safeBody.detail === "string" ? safeBody.detail : "Not found") +
+          " If you do not have a valid paper_id, call search_papers first.",
         data: base,
       };
     case 402: {
@@ -85,7 +88,10 @@ export function mapHttpError(
       };
     }
     case 429: {
-      const retry = typeof safeBody.retry_after_seconds === "number" ? safeBody.retry_after_seconds : 60;
+      const retry =
+        typeof safeBody.retry_after_seconds === "number"
+          ? safeBody.retry_after_seconds
+          : (retryAfterSeconds ?? 60);
       const hint = typeof safeBody.upgrade_hint === "string" ? safeBody.upgrade_hint : undefined;
       return {
         code: LuneErrorCode.RateLimited,
@@ -169,6 +175,18 @@ function asKyHttpError(e: unknown): KyHttpError["response"] | null {
   return (e as KyHttpError)?.response ?? null;
 }
 
+/** Parse an HTTP `Retry-After` header (delta-seconds or HTTP-date) to seconds. */
+function parseRetryAfterHeader(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const asSeconds = Number(value);
+  if (Number.isFinite(asSeconds)) return Math.max(0, Math.round(asSeconds));
+  const at = Date.parse(value);
+  if (!Number.isNaN(at)) {
+    return Math.max(0, Math.round((at - Date.now()) / 1000));
+  }
+  return undefined;
+}
+
 /**
  * Map a caught value to the right MCP error channel.
  *
@@ -194,7 +212,8 @@ export async function httpErrorToToolResult(e: unknown): Promise<ToolCallResult>
       body = null;
     }
     const requestId = response.headers.get("x-request-id") ?? undefined;
-    return toToolError(mapHttpError(response.status, body, requestId));
+    const retryAfter = parseRetryAfterHeader(response.headers.get("retry-after"));
+    return toToolError(mapHttpError(response.status, body, requestId, retryAfter));
   }
   throw e;
 }

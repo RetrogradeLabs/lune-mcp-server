@@ -80,10 +80,12 @@ export class InProcessTTLCache implements Cache {
 
 /* ───────────────────────────── Redis-backed ────────────────────────────── */
 
-const NAMESPACE_PREFIX = process.env.LUNE_CACHE_NAMESPACE ?? "v1";
+// Bumped v1 -> v2 with the cross-principal cache fix: abandons every key under
+// the old namespace on deploy so no pre-fix poisoned entry is ever served.
+const NAMESPACE_PREFIX = process.env.LUNE_CACHE_NAMESPACE ?? "v2";
 
 /**
- * ElastiCache Serverless–backed cache. Connects lazily on first use, retries
+ * ElastiCache Serverless-backed cache. Connects lazily on first use, retries
  * with exponential backoff up to a generous cap, and degrades to silent
  * misses on protocol-level errors. We keep node-redis's reconnection logic
  * (`socket.reconnectStrategy`) on so a transient AZ failover or rolling

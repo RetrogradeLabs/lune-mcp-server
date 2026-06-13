@@ -3,6 +3,7 @@ import type { KyInstance } from "ky";
 import { cachedJson } from "../api/cached-fetch.js";
 import { httpErrorToToolResult } from "../errors.js";
 import {
+  ALWAYS_LOAD_META,
   structuredJson,
   type ToolAnnotations,
   type ToolCallResult,
@@ -53,6 +54,7 @@ export const GUIDANCE_TOOLS: ToolDef[] = [
     inputSchema: SearchIn,
     outputSchema: SearchGuidanceOutput,
     annotations: READ_GUIDANCE,
+    meta: ALWAYS_LOAD_META,
     scopes: ["guidance:read"],
   },
   {

@@ -109,7 +109,7 @@ describe('HTTP transport', () => {
     expect(r.status).toBe(401);
   });
 
-  it('rejects request with stale session ID and non-initialize method', async () => {
+  it('serves a present-but-unknown (stale) session ID statelessly', async () => {
     const r = await fetch(`http://localhost:${port}/mcp`, {
       method: 'POST',
       headers: {
@@ -120,12 +120,17 @@ describe('HTTP transport', () => {
       },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
     });
-    expect(r.status).toBe(400);
+    // Present-but-unknown session id (idle-evicted / restart-orphaned) is
+    // served through an ephemeral stateless transport rather than the spec's
+    // 404: the Anthropic managed-agents MCP client never re-initializes after
+    // a 404, which bricked dashboard follow-up turns (2026-06-10). The full
+    // contract lives in orphaned-session.test.ts.
+    expect(r.status).toBe(200);
   });
 
   it('rejects a POST /mcp with no session ID and a non-initialize method', async () => {
     // No `mcp-session-id` header and the body is `tools/list`, not
-    // `initialize` — the transport refuses to mint a session.
+    // `initialize`: the transport refuses to mint a session.
     const r = await fetch(`http://localhost:${port}/mcp`, {
       method: 'POST',
       headers: {
@@ -239,7 +244,7 @@ describe('HTTP transport', () => {
     const listBody = parseSse(await listRes.text()) as {
       result: { tools: Array<{ name: string }> };
     };
-    expect(listBody.result.tools.length).toBe(12);
+    expect(listBody.result.tools.length).toBe(16);
 
     // 3. GET /mcp opens the standalone SSE stream for the live session.
     const streamRes = await fetch(`http://localhost:${port}/mcp`, {
@@ -264,7 +269,7 @@ describe('HTTP transport', () => {
     });
     expect([200, 204]).toContain(delRes.status);
 
-    // 5. Re-using the now-deleted session id is rejected.
+    // 5. Re-using the now-deleted session id still works, statelessly.
     const afterDelete = await fetch(`http://localhost:${port}/mcp`, {
       method: 'POST',
       headers: {
@@ -275,7 +280,12 @@ describe('HTTP transport', () => {
       },
       body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} }),
     });
-    expect(afterDelete.status).toBe(400);
+    // The DELETE dropped the stateful entry, so the id is now
+    // present-but-unknown: served through the ephemeral stateless path like
+    // any orphaned id (a 404 would brick clients that never re-initialize;
+    // see orphaned-session.test.ts). Auth is still enforced per request, so
+    // serving a spec-violating client that reuses a deleted id is harmless.
+    expect(afterDelete.status).toBe(200);
   });
 
   it('GET /mcp without a session id returns 400', async () => {
@@ -373,7 +383,7 @@ describe('HTTP transport', () => {
           jsonrpc: '2.0',
           id: 2,
           method: 'tools/call',
-          params: { name: 'get_paper', arguments: { paper_id: 'p-nonexistent' } },
+          params: { name: 'search_papers', arguments: { query: 'nonexistent topic' } },
         }),
       });
       expect(callRes.status).toBe(200);

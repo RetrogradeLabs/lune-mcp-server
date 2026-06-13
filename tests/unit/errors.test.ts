@@ -40,7 +40,7 @@ describe("mapHttpError", () => {
   it("404 surfaces detail text when available", () => {
     const e = mapHttpError(404, { detail: "paper not found" });
     expect(e.code).toBe(LuneErrorCode.NotFound);
-    expect(e.message).toBe("paper not found");
+    expect(e.message).toContain("paper not found");
   });
 
   it("402 → quota exhausted with buy-credits url", () => {
@@ -103,12 +103,12 @@ describe("mapHttpError", () => {
   it("404 without a string detail falls back to 'Not found'", () => {
     const e = mapHttpError(404, {});
     expect(e.code).toBe(LuneErrorCode.NotFound);
-    expect(e.message).toBe("Not found");
+    expect(e.message).toContain("Not found");
   });
 
   it("404 with a non-string detail also yields 'Not found'", () => {
     const e = mapHttpError(404, { detail: 12345 });
-    expect(e.message).toBe("Not found");
+    expect(e.message).toContain("Not found");
   });
 
   it("429 without a numeric retry_after defaults to 60s", () => {
@@ -134,7 +134,7 @@ describe("mapHttpError", () => {
 
   it("accepts an undefined body without throwing", () => {
     const e = mapHttpError(404, undefined);
-    expect(e.message).toBe("Not found");
+    expect(e.message).toContain("Not found");
   });
 
   it("omits request_id from data when no request id is supplied", () => {
@@ -178,7 +178,9 @@ describe("toToolError", () => {
     const r = toToolError(mapHttpError(404, { detail: "paper not found" }));
     expect(r.isError).toBe(true);
     // 404 carries only `status` in data; status surfaces as http_status.
-    expect(r.content[0]!.text).toBe("paper not found\nhttp_status=404");
+    expect(r.content[0]!.text).toBe(
+      "paper not found If you do not have a valid paper_id, call search_papers first.\nhttp_status=404",
+    );
   });
 
   it("returns the bare message when the mapped error carries no data fields", () => {
@@ -242,5 +244,29 @@ describe("httpErrorToToolResult", () => {
     const r = await httpErrorToToolResult(fake);
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toMatch(/server error/i);
+  });
+});
+
+describe("mapHttpError header + steer", () => {
+  it("uses the Retry-After header (delta-seconds) when the body lacks retry_after_seconds", () => {
+    const m = mapHttpError(429, {}, undefined, 17);
+    expect(m.data.retry_after_seconds).toBe(17);
+    expect(m.message).toContain("17s");
+  });
+
+  it("prefers the body's retry_after_seconds over the header", () => {
+    const m = mapHttpError(429, { retry_after_seconds: 5 }, undefined, 99);
+    expect(m.data.retry_after_seconds).toBe(5);
+  });
+
+  it("falls back to 60s when neither body nor header is present", () => {
+    const m = mapHttpError(429, {}, undefined, undefined);
+    expect(m.data.retry_after_seconds).toBe(60);
+  });
+
+  it("appends a search_papers recovery steer to 404 messages", () => {
+    const m = mapHttpError(404, { detail: "Paper not found" });
+    expect(m.message).toContain("Paper not found");
+    expect(m.message).toContain("call search_papers");
   });
 });

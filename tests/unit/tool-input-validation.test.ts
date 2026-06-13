@@ -150,57 +150,58 @@ describe("search_papers input validation", () => {
     );
   });
 
-  it("rejects a non-boolean should_include_context", async () => {
+  it("rejects a non-boolean detail flag", async () => {
     const { ky, calls } = fakeKy();
     await expectZodReject(
       () =>
         callPaperTool(ky, "search_papers", {
           query: "x",
-          should_include_context: "yes" as unknown as boolean,
+          detail: "yes" as unknown as boolean,
         }),
       calls,
     );
   });
 
-  it("accepts should_include_context=true", async () => {
+  it("accepts detail=true", async () => {
     const { ky, calls, setResponse } = fakeKy();
     setResponse({ results: [] });
     await callPaperTool(ky, "search_papers", {
       query: "x",
-      should_include_context: true,
+      detail: true,
     });
     expect(calls).toHaveLength(1);
   });
 });
 
-// ─── get_paper ──────────────────────────────────────────────────────────────
+// ─── search_related_papers ───────────────────────────────────────────────────
 
-describe("get_paper input validation", () => {
+describe("search_related_papers input validation", () => {
   it("rejects missing paper_id", async () => {
     const { ky, calls } = fakeKy();
     await expectZodReject(
-      () => callPaperTool(ky, "get_paper", {} as unknown as { paper_id: string }),
-      calls,
-    );
-  });
-
-  it("rejects empty paper_id", async () => {
-    const { ky, calls } = fakeKy();
-    await expectZodReject(
-      () => callPaperTool(ky, "get_paper", { paper_id: "" }),
-      calls,
-    );
-  });
-
-  it("rejects non-string paper_id", async () => {
-    const { ky, calls } = fakeKy();
-    await expectZodReject(
       () =>
-        callPaperTool(ky, "get_paper", {
-          paper_id: 12345 as unknown as string,
-        }),
+        callPaperTool(
+          ky,
+          "search_related_papers",
+          {} as unknown as { paper_id: string },
+        ),
       calls,
     );
+  });
+
+  it("rejects zero limit", async () => {
+    const { ky, calls } = fakeKy();
+    await expectZodReject(
+      () => callPaperTool(ky, "search_related_papers", { paper_id: "p1", limit: 0 }),
+      calls,
+    );
+  });
+
+  it("accepts the max limit", async () => {
+    const { ky, calls, setResponse } = fakeKy();
+    setResponse([]);
+    await callPaperTool(ky, "search_related_papers", { paper_id: "p1", limit: 20 });
+    expect(calls).toHaveLength(1);
   });
 });
 
@@ -382,23 +383,23 @@ describe("search_research_guidance input validation", () => {
 // ─── create_subscription ────────────────────────────────────────────────────
 
 describe("create_subscription input validation", () => {
-  it("rejects missing conference_id", async () => {
+  it("rejects missing conference", async () => {
     const { ky, calls } = fakeKy();
     await expectZodReject(
       () =>
         callSubsTool(
           ky,
-          "subscribe_to_conference_updates",
-          {} as unknown as { conference_id: string },
+          "subscribe_conference",
+          {} as unknown as { conference: string },
         ),
       calls,
     );
   });
 
-  it("rejects empty conference_id", async () => {
+  it("rejects empty conference", async () => {
     const { ky, calls } = fakeKy();
     await expectZodReject(
-      () => callSubsTool(ky, "subscribe_to_conference_updates", { conference_id: "" }),
+      () => callSubsTool(ky, "subscribe_conference", { conference: "" }),
       calls,
     );
   });
@@ -406,8 +407,8 @@ describe("create_subscription input validation", () => {
   it("accepts notify_email + notify_in_app booleans", async () => {
     const { ky, calls, setResponse } = fakeKy();
     setResponse({ id: "sub_1" });
-    await callSubsTool(ky, "subscribe_to_conference_updates", {
-      conference_id: "ccs",
+    await callSubsTool(ky, "subscribe_conference", {
+      conference: "CCS",
       notify_email: true,
       notify_in_app: false,
     });
@@ -418,8 +419,8 @@ describe("create_subscription input validation", () => {
     const { ky, calls } = fakeKy();
     await expectZodReject(
       () =>
-        callSubsTool(ky, "subscribe_to_conference_updates", {
-          conference_id: "ccs",
+        callSubsTool(ky, "subscribe_conference", {
+          conference: "CCS",
           notify_email: "yes" as unknown as boolean,
         }),
       calls,
@@ -436,7 +437,7 @@ describe("subscription mutators input validation", () => {
       () =>
         callSubsTool(
           ky,
-          "unsubscribe_from_conference_updates",
+          "unsubscribe_conference",
           {} as unknown as { subscription_id: string },
         ),
       calls,
@@ -447,17 +448,16 @@ describe("subscription mutators input validation", () => {
     const { ky, calls } = fakeKy();
     await expectZodReject(
       () =>
-        callSubsTool(ky, "unsubscribe_from_conference_updates", { subscription_id: "" }),
+        callSubsTool(ky, "unsubscribe_conference", { subscription_id: "" }),
       calls,
     );
   });
 
-  it("drain_subscription accepts no `since` cursor", async () => {
+  it("get_subscription_updates accepts empty args (no cursor, no id)", async () => {
     const { ky, calls, setResponse } = fakeKy();
-    setResponse({ items: [] });
-    await callSubsTool(ky, "check_for_conference_updates", {
-      subscription_id: "sub_1",
-    });
+    setResponse({ papers: [], next_cursor: null });
+    await callSubsTool(ky, "get_subscription_updates", {});
     expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("subscriptions/updates");
   });
 });

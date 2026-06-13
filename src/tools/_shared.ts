@@ -44,9 +44,27 @@ export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
   outputSchema?: z.ZodTypeAny;
   /** Required by the Apps SDK (see note above). */
   annotations: ToolAnnotations;
+  /**
+   * Optional MCP `_meta` passthrough, emitted verbatim in the `tools/list`
+   * entry. Used to carry client-specific hints; e.g. `ALWAYS_LOAD_META` exempts
+   * an entry tool from Claude Code's tool-search deferral so its full schema
+   * (and the trigger in its description) is in context from session start.
+   */
+  meta?: Record<string, unknown>;
   /** OAuth scopes the caller must hold. Aligned with API's `scopes_supported`. */
   scopes: readonly string[];
 }
+
+/**
+ * `_meta` hint that keeps a tool un-deferred in clients that run MCP tool
+ * search (Claude Code v2.1.121+ honors `anthropic/alwaysLoad`; other clients
+ * ignore the unknown `_meta` key). Set on the 1-3 cold-start entry tools only:
+ * each always-loaded tool spends context, and Claude Code truncates server
+ * `instructions` at 2KB, so an entry tool's own description (which carries the
+ * "use this for research, not web_search" trigger) being present upfront is what
+ * makes Lune reliably selected without a `ToolSearch` hop. See `.claude/rules/mcp.md`.
+ */
+export const ALWAYS_LOAD_META: Record<string, unknown> = { "anthropic/alwaysLoad": true };
 
 export interface ToolCallResult {
   content: Array<{ type: "text"; text: string }>;
@@ -75,7 +93,10 @@ export function jsonText(value: unknown): ToolCallResult {
  */
 export function structuredJson(value: Record<string, unknown>): ToolCallResult {
   return {
-    content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
+    // No pretty-print: the canonical channel is `structuredContent` (parsed by
+    // schema-aware clients); the text mirror is a legacy fallback, so the
+    // 2-space indent only inflated its token cost.
+    content: [{ type: "text", text: JSON.stringify(value) }],
     structuredContent: value,
   };
 }

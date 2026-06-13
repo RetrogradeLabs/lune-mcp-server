@@ -29,7 +29,7 @@ describe("stdio E2E", () => {
     }
   }, 30_000);
 
-  it("returns 13 tools via tools/list", async () => {
+  it("returns 16 tools via tools/list", async () => {
     const proc = spawn("node", [CLI_PATH], {
       env: { ...process.env, LUNE_API_KEY: "lune_fake_token_for_init_only" },
       cwd: PKG_ROOT,
@@ -99,20 +99,24 @@ describe("stdio E2E", () => {
     const tools = toolsResponse?.result?.tools ?? [];
     const names = tools.map((t) => t.name).sort();
 
-    expect(names).toHaveLength(12);
+    expect(names).toHaveLength(16);
     expect(names).toEqual(
       [
-        "check_for_conference_updates",
-        "subscribe_to_conference_updates",
-        "unsubscribe_from_conference_updates",
+        "get_subscription_updates",
+        "subscribe_conference",
+        "unsubscribe_conference",
         "get_conference_papers",
-        "get_paper",
         "get_paper_citations",
         "get_paper_fulltext",
         "get_research_guidance_doc",
-        "list_conference_update_subscriptions",
+        "list_subscriptions",
         "list_conferences",
         "search_papers",
+        "search_papers_many",
+        "extract_from_papers",
+        "verify_claims",
+        "gather_evidence",
+        "search_related_papers",
         "search_research_guidance",
       ].sort(),
     );
