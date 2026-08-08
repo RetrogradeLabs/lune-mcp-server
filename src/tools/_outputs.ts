@@ -7,7 +7,7 @@
  *
  * Top-level output MUST be an object (MCP spec: `outputSchema.type` must be
  * `"object"`). Tools that conceptually return arrays wrap them in a single
- * named field (`conferences`, `citations`, `subscriptions`, etc.).
+ * named field (`conferences`, `citations`, etc.).
  */
 import { z } from "zod";
 
@@ -35,7 +35,7 @@ const PaperOut = z.object({
 });
 
 const ConferenceOut = z.object({
-  id: z.string().describe("Conference UUID; pass into subscription tools."),
+  id: z.string().describe("Conference UUID."),
   short_name: z.string(),
   full_name: z.string(),
   description: z.string().optional(),
@@ -56,7 +56,9 @@ const CitationOut = z.object({
     ),
   in_corpus: z
     .boolean()
-    .describe("True if paper_id is set (the edge resolves to an indexed paper)."),
+    .describe(
+      "True if paper_id is set (the edge resolves to an indexed paper).",
+    ),
   title: z.string().optional(),
   authors: z.array(z.string()).optional(),
   year: z.number().int().optional(),
@@ -99,27 +101,22 @@ const GuidanceDocOut = z.object({
     .describe("The same body split by section heading, in document order."),
 });
 
-const SubscriptionOut = z.object({
-  id: z.string().describe("Subscription UUID; pass into the cursor-based check tool."),
-  conference_id: z.string(),
-  created_at: z.string(),
-});
-
-const DrainPaperOut = PaperOut.extend({
-  occurred_at: z.string().optional().describe("Timestamp the paper was indexed."),
-});
-
 const MatchedContextOut = z.object({
   section: z
     .string()
     .optional()
     .describe("Section the chunk came from (e.g. Methods, Results)."),
   text: z.string().describe("The exact matched text span from the paper."),
-  score: z.number().optional().describe("Retriever relevance score for the chunk."),
+  score: z
+    .number()
+    .optional()
+    .describe("Retriever relevance score for the chunk."),
   chunk_id: z
     .string()
     .optional()
-    .describe("Stable id of the source chunk; deep-links the exact matched span."),
+    .describe(
+      "Stable id of the source chunk; deep-links the exact matched span.",
+    ),
 });
 
 // Search hits default to an enriched shape with the abstract plus non-abstract
@@ -170,7 +167,9 @@ export const SearchPapersOutput = z.object({
   results: z.array(SearchHitOut),
   has_more: z
     .boolean()
-    .describe("True when more results exist past this page; re-call with offset += limit."),
+    .describe(
+      "True when more results exist past this page; re-call with offset += limit.",
+    ),
   best_score: z
     .number()
     .nullable()
@@ -197,11 +196,15 @@ const BatchSearchHitOut = SearchHitOut.extend({
   matched_queries: z
     .array(
       z.object({
-        query: z.string().describe("The input query variant that surfaced this paper."),
+        query: z
+          .string()
+          .describe("The input query variant that surfaced this paper."),
         rank: z
           .number()
           .int()
-          .describe("1-based rank of this paper within that variant's ranked list."),
+          .describe(
+            "1-based rank of this paper within that variant's ranked list.",
+          ),
       }),
     )
     .describe(
@@ -220,7 +223,9 @@ export const SearchPapersManyOutput = z.object({
   queries_run: z
     .number()
     .int()
-    .describe("How many of the submitted query variants completed successfully."),
+    .describe(
+      "How many of the submitted query variants completed successfully.",
+    ),
   queries_failed: z
     .array(
       z.object({
@@ -243,7 +248,7 @@ export const SearchPapersManyOutput = z.object({
 // Related neighbours are a search-style discovery result: each hit carries
 // metadata, abstract, one nearest non-abstract matched chunk when available,
 // and the embedding `similarity` to the seed paper.
-const RelatedPaperOut = z.object({
+const RelatedPaperOut = PaperOut.extend({
   paper_id: z
     .string()
     .optional()
@@ -251,16 +256,10 @@ const RelatedPaperOut = z.object({
       "Lune paper UUID. A fetch handle for get_paper_fulltext; do not show it " +
         "to the user. Cite by title, authors, and venue.",
     ),
-  title: z.string(),
-  authors: z.array(z.string()),
-  year: z.number().int().optional(),
-  doi: z.string().optional(),
-  arxiv_id: z.string().optional(),
-  abstract: z.string().optional(),
-  url: z.string().optional(),
-  pdf_cdn_url: z.string().optional(),
-  citation_count: z.number().int(),
-  conference: z.string().optional().describe("Conference short name (e.g. NeurIPS)."),
+  conference: z
+    .string()
+    .optional()
+    .describe("Conference short name (e.g. NeurIPS)."),
   contexts: z
     .array(MatchedContextOut)
     .describe(
@@ -295,7 +294,9 @@ export const GetCitationsOutput = z.object({
   has_more: z
     .boolean()
     .optional()
-    .describe("True when more edges exist past this page; re-call with offset += limit."),
+    .describe(
+      "True when more edges exist past this page; re-call with offset += limit.",
+    ),
   citations: z.array(CitationOut),
 });
 
@@ -312,11 +313,15 @@ export const GetConferencePapersOutput = z.object({
     .number()
     .int()
     .optional()
-    .describe("Total papers at this venue matching the filters (paging count)."),
+    .describe(
+      "Total papers at this venue matching the filters (paging count).",
+    ),
   has_more: z
     .boolean()
     .optional()
-    .describe("True when more papers exist past this page; re-call with offset += limit."),
+    .describe(
+      "True when more papers exist past this page; re-call with offset += limit.",
+    ),
 });
 
 export const SearchGuidanceOutput = z.object({
@@ -324,22 +329,6 @@ export const SearchGuidanceOutput = z.object({
 });
 
 export const GetGuidanceDocOutput = GuidanceDocOut;
-
-export const ListSubscriptionsOutput = z.object({
-  subscriptions: z.array(SubscriptionOut),
-});
-
-export const SubscribeOutput = SubscriptionOut;
-
-export const UnsubscribeOutput = z.object({
-  ok: z.literal(true),
-  subscription_id: z.string(),
-});
-
-export const CheckUpdatesOutput = z.object({
-  papers: z.array(DrainPaperOut),
-  next_cursor: z.string().nullable(),
-});
 
 // Structured extraction returns one compact row per successfully extracted
 // paper plus a per-paper failure list. `fields` is the caller-defined field
@@ -426,16 +415,21 @@ export const VerifyOutput = z.object({
           .nullable()
           .describe(
             "Text copied verbatim from a retrieved passage that grounds the " +
-              "verdict, or null when none could be quoted (always null for an " +
-              "insufficient_evidence verdict). Verified server-side to be a " +
-              "substring of a retrieved passage, so it is safe to quote directly.",
+              "verdict, or null when none could be quoted. Verified server-side " +
+              "against a passage from one of supporting_paper_ids (compared with " +
+              "whitespace normalised), " +
+              "so it is safe to quote directly. A supported/unsupported verdict " +
+              "failing that check is downgraded to insufficient_evidence with " +
+              "the quote dropped, so those two are always citable.",
           ),
         confidence: z
           .number()
           .describe("The judge's confidence in this verdict, 0..1."),
         reasoning: z
           .string()
-          .describe("Short justification for the verdict, grounded in the passages."),
+          .describe(
+            "Short justification for the verdict, grounded in the passages.",
+          ),
       }),
     )
     .describe("One grounded verdict per input claim, in input order."),
@@ -457,17 +451,23 @@ const EvidenceSpanOut = z.object({
   span_kind: z.enum(["chunk", "abstract"]),
   paper_id: z
     .string()
-    .describe("Lune paper UUID; a fetch handle for get_paper_fulltext, not for display."),
+    .describe(
+      "Lune paper UUID; a fetch handle for get_paper_fulltext, not for display.",
+    ),
   chunk_id: z.string().nullable(),
   title: z.string(),
   authors: z.array(z.string()),
   year: z.number().int().nullable(),
   conference: z.string().nullable(),
   section: z.string(),
-  quote: z.string().describe("The exact retrieved text (matched chunk or abstract floor)."),
+  quote: z
+    .string()
+    .describe("The exact retrieved text (matched chunk or abstract floor)."),
   score: z.number(),
   rerank_score: z.number().nullable(),
-  matched_queries: z.array(z.object({ query: z.string(), rank: z.number().int() })),
+  matched_queries: z.array(
+    z.object({ query: z.string(), rank: z.number().int() }),
+  ),
 });
 
 export const GatherEvidenceOutput = z.object({
@@ -492,16 +492,26 @@ export const GatherEvidenceOutput = z.object({
     .describe("One coverage row per requirement: covered / partial / missing."),
   evidence_spans: z
     .array(EvidenceSpanOut)
-    .describe("The spans the judge evaluated; every supporting_span_id points here."),
+    .describe(
+      "The spans the judge evaluated; every supporting_span_id points here.",
+    ),
   next_queries: z
     .array(z.string())
-    .describe("Suggested follow-up search angles for partial / missing requirements."),
+    .describe(
+      "Suggested follow-up search angles for partial / missing requirements.",
+    ),
+  // Must stay in sync with GatherEvidenceResponse.stop_reason in
+  // apps/api/src/api/evidence/evidence_schemas.py. `time_budget` was missing
+  // here while evidence_service.py:512 emits it whenever _WALL_CLOCK_BUDGET_S
+  // (75s) trips, so a normal multi-iteration partial result failed its own
+  // declared outputSchema in clients that validate structuredContent.
   stop_reason: z.enum([
     "sufficient",
     "max_iterations",
     "max_total_queries",
     "no_progress",
     "judge_unavailable",
+    "time_budget",
   ]),
   draft_support: z
     .array(
@@ -514,14 +524,23 @@ export const GatherEvidenceOutput = z.object({
       }),
     )
     .nullable()
-    .describe("Per-sentence support for a supplied draft, or null when no draft was sent."),
+    .describe(
+      "Per-sentence support for a supplied draft, or null when no draft was sent.",
+    ),
   queries_failed: z
     .array(z.object({ query: z.string(), reason: z.string() }))
-    .describe("Per-query failures (non-CircuitBreaker); a systemic outage 503s instead."),
+    .describe(
+      "Per-query failures (non-CircuitBreaker); a systemic outage 503s instead.",
+    ),
   iterations_run: z.number().int(),
-  queries_run: z.number().int().describe("Actual searches run (<= units_charged)."),
+  queries_run: z
+    .number()
+    .int()
+    .describe("Actual searches run (<= units_charged)."),
   units_charged: z
     .number()
     .int()
-    .describe("Billed ceiling (max_total_queries, default len(queries), cap 25)."),
+    .describe(
+      "Billed ceiling (max_total_queries, default len(queries), cap 25).",
+    ),
 });

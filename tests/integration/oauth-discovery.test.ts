@@ -13,27 +13,27 @@
  * (mcp.luneresearch.com / api.luneresearch.com) rather than mutating env after
  * import (which would be a no-op).
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import type { AddressInfo } from 'node:net';
-import type { Server as HttpServer } from 'node:http';
-import { buildHttpApp } from '../../src/transport/streamableHttp.js';
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import type { AddressInfo } from "node:net";
+import type { Server as HttpServer } from "node:http";
+import { buildHttpApp } from "../../src/transport/streamableHttp.js";
 
 type Json = Record<string, unknown>;
 
 // Deployed defaults (code defaults in streamableHttp.ts; wired in infra/mcp.ts).
-const RESOURCE = 'https://mcp.luneresearch.com/mcp';
-const RESOURCE_ORIGIN = 'https://mcp.luneresearch.com';
-const AUTH_SERVER = 'https://api.luneresearch.com';
+const RESOURCE = "https://mcp.luneresearch.com/mcp";
+const RESOURCE_ORIGIN = "https://mcp.luneresearch.com";
+const AUTH_SERVER = "https://api.luneresearch.com";
 const METADATA_URL = `${RESOURCE_ORIGIN}/.well-known/oauth-protected-resource`;
 
-describe('oauth discovery', () => {
+describe("oauth discovery", () => {
   let server: HttpServer;
   let port: number;
 
   beforeAll(async () => {
     const app = buildHttpApp();
     server = app.listen(0);
-    await new Promise<void>((resolve) => server.once('listening', resolve));
+    await new Promise<void>((resolve) => server.once("listening", resolve));
     port = (server.address() as AddressInfo).port;
   });
 
@@ -41,11 +41,13 @@ describe('oauth discovery', () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
-  it('serves RFC 9728 protected-resource metadata with concrete values', async () => {
-    const r = await fetch(`http://127.0.0.1:${port}/.well-known/oauth-protected-resource`);
+  it("serves RFC 9728 protected-resource metadata with concrete values", async () => {
+    const r = await fetch(
+      `http://127.0.0.1:${port}/.well-known/oauth-protected-resource`,
+    );
 
     expect(r.status).toBe(200);
-    expect(r.headers.get('content-type')).toContain('application/json');
+    expect(r.headers.get("content-type")).toContain("application/json");
 
     const body = (await r.json()) as Json;
 
@@ -63,20 +65,20 @@ describe('oauth discovery', () => {
     // `scopes_supported` MUST advertise the read scopes (papers:read at least).
     const scopes = body.scopes_supported as string[];
     expect(Array.isArray(scopes)).toBe(true);
-    expect(scopes).toContain('papers:read');
-    expect(scopes).toContain('guidance:read');
+    expect(scopes).toContain("papers:read");
+    expect(scopes).toContain("guidance:read");
 
     // Bearer token delivery is header-only (no query/body token methods).
-    expect(body.bearer_methods_supported).toEqual(['header']);
+    expect(body.bearer_methods_supported).toEqual(["header"]);
   });
 
-  it('serves identical metadata at the /mcp and /v1/mcp suffixed well-known paths', async () => {
+  it("serves identical metadata at the /mcp and /v1/mcp suffixed well-known paths", async () => {
     // Sequential (not Promise.all): concurrent fetches against express on an
     // ephemeral port intermittently ECONNRESET under load in CI.
     const paths = [
-      '/.well-known/oauth-protected-resource',
-      '/.well-known/oauth-protected-resource/mcp',
-      '/.well-known/oauth-protected-resource/v1/mcp',
+      "/.well-known/oauth-protected-resource",
+      "/.well-known/oauth-protected-resource/mcp",
+      "/.well-known/oauth-protected-resource/v1/mcp",
     ];
     const bodies: Json[] = [];
     for (const path of paths) {
@@ -92,41 +94,46 @@ describe('oauth discovery', () => {
     expect(v1).toEqual(root);
   });
 
-  it('rejects anonymous POST /mcp with a 401 carrying the resource_metadata pointer', async () => {
+  it("rejects anonymous POST /mcp with a 401 carrying the resource_metadata pointer", async () => {
     const r = await fetch(`http://127.0.0.1:${port}/mcp`, {
-      method: 'POST',
+      method: "POST",
       headers: {
-        'content-type': 'application/json',
-        accept: 'application/json, text/event-stream',
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
       },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/list",
+        params: {},
+      }),
     });
 
     expect(r.status).toBe(401);
 
     // The connector keys off this exact header to start OAuth discovery; the
     // resource_metadata value MUST be the absolute well-known URL.
-    const wwwAuth = r.headers.get('www-authenticate');
+    const wwwAuth = r.headers.get("www-authenticate");
     expect(wwwAuth).toBe(`Bearer resource_metadata="${METADATA_URL}"`);
 
     // The JSON-RPC error body MUST echo that same header so a client that only
     // parses the body (not headers) can still discover the AS.
     const body = (await r.json()) as Json;
-    expect(body.jsonrpc).toBe('2.0');
+    expect(body.jsonrpc).toBe("2.0");
     // `id` echoes the request id (here 1), per the 401 handler.
     expect(body.id).toBe(1);
     const error = body.error as Json;
     expect(error.code).toBe(-32001);
     const data = error.data as Json;
     const meta = data._meta as Json;
-    const echoed = meta['mcp/www_authenticate'];
+    const echoed = meta["mcp/www_authenticate"];
 
     // The header and the body-echoed value MUST be the identical string (same
     // value served in two places). Assert byte-for-byte equality directly, not
     // just that each independently matches the expected literal: a regression
     // that desynced the two (e.g. recomputing the URL differently) would slip
     // past per-side literal checks but is caught here.
-    expect(typeof echoed).toBe('string');
+    expect(typeof echoed).toBe("string");
     expect(echoed).toBe(wwwAuth);
     expect(echoed).toStrictEqual(wwwAuth);
     expect((echoed as string).length).toBe((wwwAuth as string).length);
@@ -134,18 +141,23 @@ describe('oauth discovery', () => {
     expect(echoed).toContain(`resource_metadata="${METADATA_URL}"`);
   });
 
-  it('rejects anonymous POST /v1/mcp the same way as /mcp (alias shares the handler)', async () => {
+  it("rejects anonymous POST /v1/mcp the same way as /mcp (alias shares the handler)", async () => {
     const r = await fetch(`http://127.0.0.1:${port}/v1/mcp`, {
-      method: 'POST',
+      method: "POST",
       headers: {
-        'content-type': 'application/json',
-        accept: 'application/json, text/event-stream',
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
       },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/list', params: {} }),
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 7,
+        method: "tools/list",
+        params: {},
+      }),
     });
 
     expect(r.status).toBe(401);
-    expect(r.headers.get('www-authenticate')).toBe(
+    expect(r.headers.get("www-authenticate")).toBe(
       `Bearer resource_metadata="${METADATA_URL}"`,
     );
     const body = (await r.json()) as Json;

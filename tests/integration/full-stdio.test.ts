@@ -2,7 +2,6 @@ import { describe, it, expect, beforeAll } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { existsSync } from "node:fs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -12,24 +11,31 @@ const CLI_PATH = resolve(PKG_ROOT, "dist/cli.js");
 interface JsonRpcResponse {
   jsonrpc: "2.0";
   id: number | string;
-  result?: { tools?: Array<{ name: string; description?: string; inputSchema?: unknown }> };
+  result?: {
+    tools?: Array<{
+      name: string;
+      description?: string;
+      inputSchema?: unknown;
+    }>;
+  };
   error?: { code: number; message: string };
 }
 
 describe("stdio E2E", () => {
   beforeAll(() => {
-    if (!existsSync(CLI_PATH)) {
-      // Build once. tsup is fast (~10ms) so this is cheap.
-      const r = spawnSync("pnpm", ["build"], { cwd: PKG_ROOT, stdio: "pipe" });
-      if (r.status !== 0) {
-        throw new Error(
-          `build failed: ${r.stderr?.toString() ?? "(no stderr)"} ${r.stdout?.toString() ?? ""}`,
-        );
-      }
+    // ALWAYS rebuild. A dist/cli.js left over from before a tool-catalog change
+    // would make this E2E silently exercise the STALE binary (it did: an old
+    // 17-tool dist passed while source had moved to 16). tsup is fast, so the
+    // cost is negligible and the test always reflects current source.
+    const r = spawnSync("pnpm", ["build"], { cwd: PKG_ROOT, stdio: "pipe" });
+    if (r.status !== 0) {
+      throw new Error(
+        `build failed: ${r.stderr?.toString() ?? "(no stderr)"} ${r.stdout?.toString() ?? ""}`,
+      );
     }
   }, 30_000);
 
-  it("returns 16 tools via tools/list", async () => {
+  it("returns 12 tools via tools/list", async () => {
     const proc = spawn("node", [CLI_PATH], {
       env: { ...process.env, LUNE_API_KEY: "lune_fake_token_for_init_only" },
       cwd: PKG_ROOT,
@@ -99,17 +105,13 @@ describe("stdio E2E", () => {
     const tools = toolsResponse?.result?.tools ?? [];
     const names = tools.map((t) => t.name).sort();
 
-    expect(names).toHaveLength(16);
+    expect(names).toHaveLength(12);
     expect(names).toEqual(
       [
-        "get_subscription_updates",
-        "subscribe_conference",
-        "unsubscribe_conference",
         "get_conference_papers",
         "get_paper_citations",
         "get_paper_fulltext",
         "get_research_guidance_doc",
-        "list_subscriptions",
         "list_conferences",
         "search_papers",
         "search_papers_many",

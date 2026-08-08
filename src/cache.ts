@@ -23,7 +23,6 @@ import { createClient, type RedisClientType } from "redis";
 export interface Cache {
   get(key: string): Promise<unknown | undefined>;
   set(key: string, value: unknown, ttlMs?: number): Promise<void>;
-  invalidate(key: string): Promise<void>;
   clear(): Promise<void>;
 }
 
@@ -67,10 +66,6 @@ export class InProcessTTLCache implements Cache {
       value,
       expiresAt: Date.now() + (ttlMs ?? this.defaultTtlMs),
     });
-  }
-
-  async invalidate(key: string): Promise<void> {
-    this.store.delete(key);
   }
 
   async clear(): Promise<void> {
@@ -129,7 +124,9 @@ export class RedisCache implements Cache {
         this.connected = true;
       })
       .catch((err) => {
-        console.error(`[mcp/cache] redis connect failed: ${(err as Error).message}`);
+        console.error(
+          `[mcp/cache] redis connect failed: ${(err as Error).message}`,
+        );
       })
       .finally(() => {
         this.connecting = null;
@@ -159,20 +156,13 @@ export class RedisCache implements Cache {
       await this.ensureConnected();
       if (!this.connected) return;
       const payload = JSON.stringify(value);
-      const seconds = Math.max(1, Math.round((ttlMs ?? this.defaultTtlMs) / 1000));
+      const seconds = Math.max(
+        1,
+        Math.round((ttlMs ?? this.defaultTtlMs) / 1000),
+      );
       await this.client.set(this.k(key), payload, { EX: seconds });
     } catch (err) {
       console.error(`[mcp/cache] redis SET dropped: ${(err as Error).message}`);
-    }
-  }
-
-  async invalidate(key: string): Promise<void> {
-    try {
-      await this.ensureConnected();
-      if (!this.connected) return;
-      await this.client.del(this.k(key));
-    } catch (err) {
-      console.error(`[mcp/cache] redis DEL dropped: ${(err as Error).message}`);
     }
   }
 
@@ -183,12 +173,17 @@ export class RedisCache implements Cache {
       // SCAN+DEL is the safe batched form; avoid `KEYS *` which blocks the
       // server on large keyspaces.
       const prefix = this.k("*");
-      for await (const key of this.client.scanIterator({ MATCH: prefix, COUNT: 500 })) {
+      for await (const key of this.client.scanIterator({
+        MATCH: prefix,
+        COUNT: 500,
+      })) {
         const keys = Array.isArray(key) ? key : [key];
         if (keys.length > 0) await this.client.del(keys);
       }
     } catch (err) {
-      console.error(`[mcp/cache] redis CLEAR dropped: ${(err as Error).message}`);
+      console.error(
+        `[mcp/cache] redis CLEAR dropped: ${(err as Error).message}`,
+      );
     }
   }
 }
@@ -226,11 +221,13 @@ export class SingleFlight {
 function pickCache(): Cache {
   const url = process.env.REDIS_URL;
   if (url) {
-    console.log("[mcp/cache] using Redis backend");
+    // stderr, not stdout: cache.ts is imported on the stdio transport path where
+    // stdout IS the JSON-RPC channel, so a banner on stdout corrupts the protocol.
+    console.error("[mcp/cache] using Redis backend");
     // 5 min default TTL, overridden per-call by Cache-Control max-age.
     return new RedisCache(url, "mcp_tools", 5 * 60 * 1000);
   }
-  console.log("[mcp/cache] using in-process backend");
+  console.error("[mcp/cache] using in-process backend");
   return new InProcessTTLCache(512, 5 * 60 * 1000);
 }
 

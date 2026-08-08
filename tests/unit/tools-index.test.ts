@@ -1,7 +1,7 @@
 /**
  * Unit coverage for the tool-registration layer (`src/tools/index.ts`).
  *
- * Exercises `getAllToolDefinitions`, the `dispatchToolCall` router (all four
+ * Exercises `getAllToolDefinitions`, the `dispatchToolCall` router (all three
  * branches), and `registerAllTools` (every `setRequestHandler` wiring plus
  * the handler bodies themselves: tools/list, tools/call, and the empty
  * resources/prompts probes).
@@ -14,6 +14,7 @@ import {
   listToolsResponse,
   registerAllTools,
 } from "../../src/tools/index.js";
+import { registerResources } from "../../src/resources.js";
 import { TOOL_RESPONSE_CACHE } from "../../src/cache.js";
 import { GatherEvidenceOutput } from "../../src/tools/_outputs.js";
 
@@ -23,7 +24,8 @@ beforeEach(async () => {
 
 /** Records every verb call and returns a thenable `{ json }` matcher. */
 function fakeKy(response: unknown = {}): KyInstance {
-  const make = () => () => ({ json: async () => response }) as unknown as Promise<unknown>;
+  const make = () => () =>
+    ({ json: async () => response }) as unknown as Promise<unknown>;
   return {
     get: make(),
     post: make(),
@@ -55,18 +57,21 @@ function erroringKy(status: number, body: unknown): KyInstance {
 }
 
 describe("getAllToolDefinitions", () => {
-  it("returns the union of paper, guidance, and subscription tools", () => {
+  it("returns the union of paper and guidance tools", () => {
     const defs = getAllToolDefinitions();
-    expect(defs.length).toBe(16);
+    expect(defs.length).toBe(12);
     const names = defs.map((d) => d.name);
     expect(names).toContain("search_papers");
+    // Workspace retrieval is folded into the corpus tools' source="workspace"
+    // selector, so there are NO dedicated workspace tools in the public list.
+    expect(names).not.toContain("search_workspace");
+    expect(names).not.toContain("get_workspace_document");
     expect(names).toContain("search_papers_many");
     expect(names).toContain("extract_from_papers");
     expect(names).toContain("verify_claims");
     expect(names).toContain("gather_evidence");
     expect(names).toContain("search_related_papers");
     expect(names).toContain("search_research_guidance");
-    expect(names).toContain("get_subscription_updates");
     // Paper metadata is included in search results; these are no longer tools.
     expect(names).not.toContain("get_paper");
     expect(names).not.toContain("get_papers");
@@ -77,8 +82,67 @@ describe("getAllToolDefinitions", () => {
     for (const d of getAllToolDefinitions()) {
       expect(d.title.length).toBeGreaterThan(0);
       expect(d.annotations).toBeTypeOf("object");
-      expect(Array.isArray(d.scopes)).toBe(true);
     }
+  });
+});
+
+describe("credential-aware tools/list (workspace source hiding)", () => {
+  const SOURCE_TOOLS = [
+    "search_papers",
+    "get_paper_fulltext",
+    "extract_from_papers",
+    "verify_claims",
+    "gather_evidence",
+  ];
+
+  function props(tool: { inputSchema: unknown }): Record<string, unknown> {
+    return (
+      (tool.inputSchema as { properties?: Record<string, unknown> })
+        .properties ?? {}
+    );
+  }
+
+  it("exposes the source selector to a workspace credential", () => {
+    const tools = listToolsResponse(true).tools;
+    for (const name of SOURCE_TOOLS) {
+      const t = tools.find((x) => x.name === name)!;
+      expect("source" in props(t), `${name} should expose source`).toBe(true);
+    }
+  });
+
+  it("strips the source selector entirely for a non-workspace credential", () => {
+    const tools = listToolsResponse(false).tools;
+    for (const name of SOURCE_TOOLS) {
+      const t = tools.find((x) => x.name === name)!;
+      expect(
+        "source" in props(t),
+        `${name} must NOT expose source externally`,
+      ).toBe(false);
+    }
+    // Same 12 tools either way; only the source property differs.
+    expect(tools.length).toBe(listToolsResponse(true).tools.length);
+  });
+
+  it("leaves non-source tools byte-identical regardless of credential", () => {
+    const a = listToolsResponse(true).tools.find(
+      (t) => t.name === "get_paper_citations",
+    )!;
+    const b = listToolsResponse(false).tools.find(
+      (t) => t.name === "get_paper_citations",
+    )!;
+    expect(JSON.stringify(a.inputSchema)).toBe(JSON.stringify(b.inputSchema));
+  });
+
+  it("the non-workspace catalog mentions 'workspace' NOWHERE; the workspace one does", () => {
+    // The whole point of the gate: an external client sees zero trace of the
+    // workspace surface (no tool, no param, no describe). A workspace credential
+    // sees it (the source selector's enum + describe).
+    expect(
+      JSON.stringify(listToolsResponse(false)).toLowerCase(),
+    ).not.toContain("workspace");
+    expect(JSON.stringify(listToolsResponse(true)).toLowerCase()).toContain(
+      "workspace",
+    );
   });
 });
 
@@ -90,15 +154,29 @@ describe("alwaysLoad entry tools (tool-selection: get picked over web_search)", 
   // hop. Every OTHER tool stays deferrable so context isn't burned. One entry
   // per cold-start research intent: single-question, literature sweep,
   // methodology. See .claude/rules/mcp.md (tool selection).
-  const ENTRY_TOOLS = ["search_papers", "search_papers_many", "search_research_guidance"];
+  const ENTRY_TOOLS = [
+    "search_papers",
+    "search_papers_many",
+    "search_research_guidance",
+  ];
 
   function alwaysLoad(t: { _meta?: unknown }): boolean {
-    return (t._meta as Record<string, unknown> | undefined)?.["anthropic/alwaysLoad"] === true;
+    return (
+      (t._meta as Record<string, unknown> | undefined)?.[
+        "anthropic/alwaysLoad"
+      ] === true
+    );
   }
 
   it("marks exactly the three entry tools as always-loaded, and no others", () => {
-    const tools = listToolsResponse().tools as Array<{ name: string; _meta?: unknown }>;
-    const flagged = tools.filter(alwaysLoad).map((t) => t.name).sort();
+    const tools = listToolsResponse().tools as Array<{
+      name: string;
+      _meta?: unknown;
+    }>;
+    const flagged = tools
+      .filter(alwaysLoad)
+      .map((t) => t.name)
+      .sort();
     expect(flagged).toEqual([...ENTRY_TOOLS].sort());
     // Non-entry tools must not emit `_meta` at all (no accidental spread).
     for (const t of tools) {
@@ -107,7 +185,9 @@ describe("alwaysLoad entry tools (tool-selection: get picked over web_search)", 
   });
 
   it("search_papers_many leads with the literature-sweep trigger and disambiguates from search_papers", () => {
-    const t = getAllToolDefinitions().find((d) => d.name === "search_papers_many")!;
+    const t = getAllToolDefinitions().find(
+      (d) => d.name === "search_papers_many",
+    )!;
     // Front-loaded intent + the prefer-over-web_search trigger survive Claude
     // Code's 2KB description truncation only if they are near the start.
     expect(t.description.slice(0, 400)).toMatch(/literature sweep/i);
@@ -132,15 +212,6 @@ describe("dispatchToolCall", () => {
       { query: "ablation" },
     );
     expect(r.structuredContent).toEqual({ results: [] });
-  });
-
-  it("routes subscription-tool names to the subscription handler", async () => {
-    const r = await dispatchToolCall(
-      fakeKy([]),
-      "list_subscriptions",
-      {},
-    );
-    expect(r.structuredContent).toEqual({ subscriptions: [] });
   });
 
   it("gather_evidence posts to evidence/gather and passes through a schema-valid response", async () => {
@@ -230,15 +301,17 @@ describe("registerAllTools", () => {
     };
   }
 
-  it("wires three request handlers onto the server", () => {
-    // tools/list, tools/call, resources/list. The prompts/list + prompts/get
-    // handlers are wired separately by registerPrompts (see prompts.test.ts).
+  it("wires two request handlers onto the server", () => {
+    // tools/list, tools/call. The resources/list handler is wired by
+    // registerResources, and prompts/list + prompts/get by registerPrompts
+    // (see prompts.test.ts), so each MCP capability is registered by one
+    // function.
     const { server, handlers } = captureServer();
     registerAllTools(
       server as unknown as Parameters<typeof registerAllTools>[0],
       () => fakeKy(),
     );
-    expect(handlers.size).toBe(3);
+    expect(handlers.size).toBe(2);
   });
 
   it("the tools/list handler returns the full tool catalog", async () => {
@@ -249,9 +322,24 @@ describe("registerAllTools", () => {
     );
     // The first registered handler is tools/list.
     const [listToolsHandler] = [...handlers.values()];
-    const res = (await listToolsHandler!({})) as ReturnType<typeof listToolsResponse>;
+    const res = (await listToolsHandler!({})) as ReturnType<
+      typeof listToolsResponse
+    >;
     expect(res.tools.map((t) => t.name).sort()).toEqual(
-      listToolsResponse().tools.map((t) => t.name).sort(),
+      [
+        "get_conference_papers",
+        "get_paper_citations",
+        "get_paper_fulltext",
+        "get_research_guidance_doc",
+        "list_conferences",
+        "search_papers",
+        "search_papers_many",
+        "extract_from_papers",
+        "verify_claims",
+        "gather_evidence",
+        "search_related_papers",
+        "search_research_guidance",
+      ].sort(),
     );
   });
 
@@ -316,19 +404,17 @@ describe("registerAllTools", () => {
     );
     const callHandler = [...handlers.values()][1]!;
     const res = (await callHandler({
-      params: { name: "list_subscriptions" },
+      params: { name: "list_conferences" },
     })) as { structuredContent: unknown };
-    expect(res.structuredContent).toEqual({ subscriptions: [] });
+    expect(res.structuredContent).toEqual({ conferences: [] });
   });
 
-  it("the resources/list handler returns an empty array", async () => {
+  it("registerResources wires a resources/list handler returning an empty array", async () => {
     const { server, handlers } = captureServer();
-    registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
-      () => fakeKy(),
+    registerResources(
+      server as unknown as Parameters<typeof registerResources>[0],
     );
-    // tools/list (0), tools/call (1), resources/list (2).
-    const resourcesHandler = [...handlers.values()][2]!;
+    const resourcesHandler = [...handlers.values()][0]!;
     expect(await resourcesHandler({})).toEqual({ resources: [] });
   });
 });

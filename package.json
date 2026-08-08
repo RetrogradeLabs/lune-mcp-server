@@ -1,6 +1,6 @@
 {
   "name": "@retrograde-labs/lune-mcp-server",
-  "version": "1.5.1",
+  "version": "2.0.1",
   "mcpName": "com.luneresearch/lune",
   "description": "Lune Research MCP server (stdio + Streamable HTTP) proxying api.luneresearch.com",
   "license": "MIT",
@@ -37,22 +37,22 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "express": "^5.2.1",
-    "jose": "^4.15.9",
+    "jose": "^6.2.3",
     "ky": "^2.0.2",
-    "redis": "^6.0.0",
+    "redis": "^6.2.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
-    "@types/node": "^25.9.3",
-    "@vitest/coverage-v8": "^4.1.8",
+    "@types/node": "^26.1.2",
+    "@vitest/coverage-v8": "4.1.8",
     "tsup": "^8.5.1",
-    "tsx": "^4.22.4",
+    "tsx": "^4.23.6",
     "typescript": "^6.0.3",
-    "vite": "^8.0.16",
-    "vitest": "^4.1.8"
+    "vite": "^8.2.0",
+    "vitest": "4.1.8"
   },
   "engines": {
     "node": ">=20"

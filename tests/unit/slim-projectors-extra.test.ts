@@ -4,10 +4,7 @@ import {
   slimConference,
   slimConferenceList,
   slimConferencePapers,
-  slimDrainResponse,
   slimRelated,
-  slimSubscription,
-  slimSubscriptionList,
 } from "../../src/tools/_slim.js";
 
 /**
@@ -97,7 +94,12 @@ describe("slimRelated", () => {
     ]);
     expect(out.papers[0]!.abstract).toBe("The abstract");
     expect(out.papers[0]!.contexts).toEqual([
-      { section: "Results", text: "The result", score: 0.8, chunk_id: undefined },
+      {
+        section: "Results",
+        text: "The result",
+        score: 0.8,
+        chunk_id: undefined,
+      },
     ]);
   });
 
@@ -109,29 +111,67 @@ describe("slimRelated", () => {
 
 describe("slimConferencePapers", () => {
   it("projects papers (no abstract) and reports total + has_more", () => {
-    const out = slimConferencePapers({
-      papers: [{ id: "p1", title: "One", abstract: "dropped on a browse page" }],
-      total: 42,
-      page: 2,
-      limit: 20,
-    });
+    const out = slimConferencePapers(
+      {
+        papers: [
+          { id: "p1", title: "One", abstract: "dropped on a browse page" },
+        ],
+        total: 42,
+      },
+      0,
+    );
     expect(out.papers).toHaveLength(1);
     expect(out.papers[0]!.paper_id).toBe("p1");
     // Browse pages stay light: the abstract is not surfaced.
     expect("abstract" in out.papers[0]!).toBe(false);
     expect(out.total).toBe(42);
-    // page 2 of 20 covers 40 < 42, so one more paper remains.
+    // offset 0 + 1 returned < 42, so more remain.
     expect(out.has_more).toBe(true);
   });
 
-  it("reports has_more=false on the last page", () => {
-    const out = slimConferencePapers({
-      papers: [{ id: "p1", title: "One" }],
-      total: 40,
-      page: 2,
-      limit: 20,
-    });
+  it("reports has_more=false when offset + returned reaches total", () => {
+    const out = slimConferencePapers(
+      { papers: [{ id: "p1", title: "One" }], total: 40 },
+      39,
+    );
     expect(out.has_more).toBe(false);
+  });
+
+  // Regression: a non-multiple-of-limit offset must not over-report has_more.
+  // The API floors offset into page (5 // 10 + 1 = 1), so the old page*limit
+  // predicate (1*10 < 12 => true) wrongly claimed more results when offset 5 +
+  // 7 returned already reaches total 12.
+  it("reports has_more=false for a non-multiple-of-limit offset on the last slice", () => {
+    const out = slimConferencePapers(
+      {
+        papers: Array.from({ length: 7 }, (_, i) => ({
+          id: `p${i}`,
+          title: `T${i}`,
+        })),
+        total: 12,
+        page: 1,
+        limit: 10,
+      },
+      5,
+    );
+    expect(out.has_more).toBe(false);
+  });
+
+  it("reports has_more=true mid-stream for a non-multiple-of-limit offset", () => {
+    const out = slimConferencePapers(
+      {
+        papers: Array.from({ length: 10 }, (_, i) => ({
+          id: `p${i}`,
+          title: `T${i}`,
+        })),
+        total: 30,
+        page: 1,
+        limit: 10,
+      },
+      5,
+    );
+    // offset 5 + 10 returned = 15 < 30.
+    expect(out.has_more).toBe(true);
   });
 
   it("defaults papers to an empty array and has_more=false", () => {
@@ -139,58 +179,5 @@ describe("slimConferencePapers", () => {
     expect(out.papers).toEqual([]);
     expect(out.total).toBeUndefined();
     expect(out.has_more).toBe(false);
-  });
-});
-
-describe("slimSubscription + slimSubscriptionList", () => {
-  it("projects the subscription id/conference/created_at triple", () => {
-    expect(
-      slimSubscription({
-        id: "s1",
-        conference_id: "c1",
-        created_at: "2026-01-01T00:00:00Z",
-      }),
-    ).toEqual({
-      id: "s1",
-      conference_id: "c1",
-      created_at: "2026-01-01T00:00:00Z",
-    });
-  });
-
-  it("projects a list and drops falsy holes", () => {
-    const out = slimSubscriptionList([
-      { id: "s1", conference_id: "c1", created_at: "t1" },
-      null,
-      { id: "s2", conference_id: "c2", created_at: "t2" },
-    ]);
-    expect(out.subscriptions.map((s) => s.id)).toEqual(["s1", "s2"]);
-  });
-
-  it("returns an empty subscriptions list for a non-array", () => {
-    expect(slimSubscriptionList(undefined)).toEqual({ subscriptions: [] });
-  });
-});
-
-describe("slimDrainResponse", () => {
-  it("merges occurred_at onto each slimmed paper and passes next_cursor", () => {
-    const out = slimDrainResponse({
-      papers: [{ id: "p1", title: "One", occurred_at: "2026-02-02T00:00:00Z" }],
-      next_cursor: "cursor-xyz",
-    });
-    expect(out.papers).toHaveLength(1);
-    expect(out.papers[0]!.paper_id).toBe("p1");
-    expect(out.papers[0]!.occurred_at).toBe("2026-02-02T00:00:00Z");
-    expect(out.next_cursor).toBe("cursor-xyz");
-  });
-
-  it("defaults papers to empty and next_cursor to null", () => {
-    const out = slimDrainResponse({});
-    expect(out.papers).toEqual([]);
-    expect(out.next_cursor).toBeNull();
-  });
-
-  it("coerces an absent next_cursor (null) rather than leaving it undefined", () => {
-    const out = slimDrainResponse({ papers: [], next_cursor: undefined });
-    expect(out.next_cursor).toBeNull();
   });
 });

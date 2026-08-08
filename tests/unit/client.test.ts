@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getBaseUrl, LuneApiError, makeClient } from "../../src/api/client.js";
+import { getBaseUrl, makeClient } from "../../src/api/client.js";
 
 describe("getBaseUrl", () => {
   afterEach(() => {
@@ -36,28 +36,18 @@ describe("makeClient", () => {
     expect(typeof client.delete).toBe("function");
   });
 
-  it("builds the prefix from the configured base URL", () => {
+  it("builds the prefix from the configured base URL", async () => {
     vi.stubEnv("LUNE_API_BASE_URL", "http://localhost:8000");
-    // ky exposes the resolved options via `extend`; assert the request URL
-    // shape indirectly by extending and reading back the merged config.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("{}", { status: 200 }));
+
     const client = makeClient("lune_token_abc");
-    expect(client).toBeDefined();
-  });
-});
+    await client.get("papers/search");
 
-describe("LuneApiError", () => {
-  it("carries status, body, and request id", () => {
-    const err = new LuneApiError(403, { detail: "no scope" }, "req-42");
-    expect(err).toBeInstanceOf(Error);
-    expect(err.name).toBe("LuneApiError");
-    expect(err.status).toBe(403);
-    expect(err.body).toEqual({ detail: "no scope" });
-    expect(err.requestId).toBe("req-42");
-    expect(err.message).toBe("Lune API 403");
-  });
+    const request = fetchSpy.mock.calls[0]![0] as Request;
+    expect(request.url).toBe("http://localhost:8000/api/v1/papers/search");
 
-  it("allows an absent request id", () => {
-    const err = new LuneApiError(500, null);
-    expect(err.requestId).toBeUndefined();
+    fetchSpy.mockRestore();
   });
 });

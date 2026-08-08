@@ -1,6 +1,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { KyInstance } from "ky";
 import { registerPrompts } from "./prompts.js";
+import { registerResources } from "./resources.js";
 import { registerAllTools } from "./tools/index.js";
 
 export const SERVER_NAME = "lune-research";
@@ -59,9 +60,7 @@ export function makeServer(makeClient: () => KyInstance): Server {
           "extract_from_papers (typed comparison table), verify_claims (fact-check " +
           "claims; each with a verified verbatim quote), gather_evidence (evidence " +
           "sufficient? gaps + next queries). Methodology: search_research_guidance " +
-          "(call FIRST for 'how should I...' questions), get_research_guidance_doc. " +
-          "Track venues: list_subscriptions, subscribe_conference, " +
-          "unsubscribe_conference, get_subscription_updates.",
+          "(call FIRST for 'how should I...' questions), get_research_guidance_doc.",
         "",
         "WORKFLOWS (compose tools; rarely stop at one search). Literature review: " +
           "search_papers_many across angles, get_paper_fulltext on what matters, " +
@@ -79,6 +78,7 @@ export function makeServer(makeClient: () => KyInstance): Server {
     },
   );
   registerAllTools(server, makeClient);
+  registerResources(server);
   registerPrompts(server);
   return server;
 }

@@ -12,14 +12,11 @@ import {
   slimConference,
   slimConferenceList,
   slimConferencePapers,
-  slimDrainResponse,
   slimGuidanceDoc,
   slimGuidanceSearch,
   slimPaper,
   slimRelated,
   slimSearchResponse,
-  slimSubscription,
-  slimSubscriptionList,
 } from "../../src/tools/_slim.js";
 
 describe("slimConference", () => {
@@ -169,7 +166,10 @@ describe("slimSearchResponse", () => {
   it("surfaces non-abstract matched_chunks as contexts by default", () => {
     const r = slimSearchResponse({
       results: [
-        { id: "p1", matched_chunks: [{ section_name: "Methods", text: "x", score: 1 }] },
+        {
+          id: "p1",
+          matched_chunks: [{ section_name: "Methods", text: "x", score: 1 }],
+        },
       ],
     });
     const hit = r.results[0]! as { contexts: Array<Record<string, unknown>> };
@@ -189,7 +189,10 @@ describe("slimSearchResponse", () => {
         },
       ],
     });
-    const hit = r.results[0]! as { abstract: string; contexts: Array<Record<string, unknown>> };
+    const hit = r.results[0]! as {
+      abstract: string;
+      contexts: Array<Record<string, unknown>>;
+    };
     expect(hit.abstract).toBe("the abstract text");
     expect(hit.contexts).toEqual([
       { section: "Results", text: "we observe", score: 0.8 },
@@ -242,7 +245,9 @@ describe("slimSearchResponse", () => {
   });
 
   it("flags low_confidence when the best rerank_score is below the floor", () => {
-    const r = slimSearchResponse({ results: [{ id: "p1", score: 0.4, rerank_score: 0.18 }] });
+    const r = slimSearchResponse({
+      results: [{ id: "p1", score: 0.4, rerank_score: 0.18 }],
+    });
     expect(r.best_score).toBe(0.18);
     expect(r.low_confidence).toBe(true);
   });
@@ -264,7 +269,9 @@ describe("slimSearchResponse", () => {
   });
 
   it("carries has_more from the response and defaults it to false when absent", () => {
-    expect(slimSearchResponse({ results: [], has_more: true }).has_more).toBe(true);
+    expect(slimSearchResponse({ results: [], has_more: true }).has_more).toBe(
+      true,
+    );
     expect(slimSearchResponse({ results: [] }).has_more).toBe(false);
   });
 });
@@ -428,7 +435,12 @@ describe("slimRelated", () => {
     expect(hit.conference).toBe("ICML");
     expect(hit.abstract).toBe("Related abstract");
     expect(hit.contexts).toEqual([
-      { section: "Methods", text: "Matched method span", score: 0.8, chunk_id: undefined },
+      {
+        section: "Methods",
+        text: "Matched method span",
+        score: 0.8,
+        chunk_id: undefined,
+      },
     ]);
   });
 
@@ -440,65 +452,15 @@ describe("slimRelated", () => {
 
 describe("slimConferencePapers", () => {
   it("maps papers and reports total + has_more", () => {
-    const r = slimConferencePapers({
-      papers: [{ id: "p1" }],
-      total: 100,
-      page: 2,
-      limit: 20,
-    });
+    const r = slimConferencePapers({ papers: [{ id: "p1" }], total: 100 }, 20);
     expect(r.papers[0]!.paper_id).toBe("p1");
-    // page 2 of 20 covers 40 < 100, so more remain.
+    // offset 20 + 1 returned < 100, so more remain.
     expect(r).toMatchObject({ total: 100, has_more: true });
   });
 
   it("defaults papers to an empty array when absent", () => {
     expect(slimConferencePapers({}).papers).toEqual([]);
     expect(slimConferencePapers(undefined).papers).toEqual([]);
-  });
-});
-
-describe("slimSubscription", () => {
-  it("projects the three subscription fields", () => {
-    expect(
-      slimSubscription({ id: "s1", conference_id: "c1", created_at: "2026-01-01" }),
-    ).toEqual({ id: "s1", conference_id: "c1", created_at: "2026-01-01" });
-  });
-});
-
-describe("slimSubscriptionList", () => {
-  it("maps an array and drops falsy entries", () => {
-    const r = slimSubscriptionList([{ id: "s1" }, null]);
-    expect(r.subscriptions).toHaveLength(1);
-  });
-
-  it("returns an empty list for a non-array input", () => {
-    expect(slimSubscriptionList({})).toEqual({ subscriptions: [] });
-  });
-});
-
-describe("slimDrainResponse", () => {
-  it("maps drain papers with their occurred_at timestamp", () => {
-    const r = slimDrainResponse({
-      papers: [{ id: "p1", occurred_at: "2026-02-02" }],
-      next_cursor: "cur-2",
-    });
-    expect(r.papers[0]).toMatchObject({
-      paper_id: "p1",
-      occurred_at: "2026-02-02",
-    });
-    expect(r.next_cursor).toBe("cur-2");
-  });
-
-  it("defaults papers to [] and next_cursor to null", () => {
-    expect(slimDrainResponse({})).toEqual({ papers: [], next_cursor: null });
-    expect(slimDrainResponse(undefined)).toEqual({
-      papers: [],
-      next_cursor: null,
-    });
-  });
-
-  it("coerces a null next_cursor to null", () => {
-    expect(slimDrainResponse({ next_cursor: null }).next_cursor).toBeNull();
   });
 });
 

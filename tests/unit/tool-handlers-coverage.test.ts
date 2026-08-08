@@ -1,6 +1,6 @@
 /**
  * End-to-end coverage for all tool handlers via callPaperTool /
- * callGuidanceTool / callSubsTool, driven by a mocked ky double.
+ * callGuidanceTool, driven by a mocked ky double.
  *
  * `tool-handlers.test.ts` covers the fuzzy-resolver branches, paging/sort
  * passthrough, and the unknown-tool default arms. This file is the
@@ -16,7 +16,6 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { KyInstance } from "ky";
 import { callPaperTool } from "../../src/tools/papers.js";
 import { callGuidanceTool } from "../../src/tools/guidance.js";
-import { callSubsTool } from "../../src/tools/subscriptions.js";
 import { TOOL_RESPONSE_CACHE } from "../../src/cache.js";
 
 beforeEach(async () => {
@@ -97,21 +96,10 @@ function throwingKy(err: unknown): KyInstance {
       throw err;
     },
   });
-  // `delete` is awaited directly (no `.json()`) in the subscriptions handler,
-  // so it must reject as a thenable too.
-  const rejectingDelete = () => ({
-    then: (
-      _ok: (v: unknown) => unknown,
-      bad: (e: unknown) => unknown,
-    ) => bad(err),
-    json: async () => {
-      throw err;
-    },
-  });
   return {
     get: make(),
     post: make(),
-    delete: rejectingDelete,
+    delete: make(),
     put: make(),
   } as unknown as KyInstance;
 }
@@ -143,14 +131,22 @@ describe("search_papers", () => {
               conference: { short_name: "NeurIPS" },
               score: 1.05,
               rerank_score: 0.91,
-              matched_chunks: [{ section_name: "Abstract", text: "self-attention", score: 0.9 }],
+              matched_chunks: [
+                {
+                  section_name: "Abstract",
+                  text: "self-attention",
+                  score: 0.9,
+                },
+              ],
             },
           ],
           has_more: false,
         },
       },
     });
-    const res = await callPaperTool(ky, "search_papers", { query: "transformers" });
+    const res = await callPaperTool(ky, "search_papers", {
+      query: "transformers",
+    });
     const sc = res.structuredContent as {
       results: Array<Record<string, unknown>>;
       best_score: number;
@@ -178,10 +174,17 @@ describe("search_papers", () => {
 
   it("flags low_confidence when the top rerank_score is below the floor", async () => {
     const { ky } = routedKy({
-      post: { search: { results: [{ id: "p1", title: "weak", score: 0.2, rerank_score: 0.1 }] } },
+      post: {
+        search: {
+          results: [{ id: "p1", title: "weak", score: 0.2, rerank_score: 0.1 }],
+        },
+      },
     });
     const res = await callPaperTool(ky, "search_papers", { query: "x" });
-    const sc = res.structuredContent as { best_score: number; low_confidence: boolean };
+    const sc = res.structuredContent as {
+      best_score: number;
+      low_confidence: boolean;
+    };
     expect(sc.best_score).toBe(0.1);
     expect(sc.low_confidence).toBe(true);
   });
@@ -193,7 +196,12 @@ describe("search_papers", () => {
       { query: "x" },
     );
     expectToolError(res, {
-      contains: ["Quota exhausted", "https://lune/buy", "buy_credits_url=https://lune/buy", "http_status=402"],
+      contains: [
+        "Quota exhausted",
+        "https://lune/buy",
+        "buy_credits_url=https://lune/buy",
+        "http_status=402",
+      ],
     });
   });
 });
@@ -205,7 +213,9 @@ describe("get_paper_fulltext", () => {
     const { ky } = routedKy({
       get: { "papers/p1/fulltext": { body: "# Methods\nWe trained a model." } },
     });
-    const res = await callPaperTool(ky, "get_paper_fulltext", { paper_id: "p1" });
+    const res = await callPaperTool(ky, "get_paper_fulltext", {
+      paper_id: "p1",
+    });
     expect(res.content?.[0]?.type).toBe("text");
     expect(res.content?.[0]?.text).toBe("# Methods\nWe trained a model.");
   });
@@ -222,7 +232,9 @@ describe("get_paper_fulltext", () => {
       paper_id: "p1",
       format: "json",
     });
-    const sc = res.structuredContent as { sections: Array<{ heading: string }> };
+    const sc = res.structuredContent as {
+      sections: Array<{ heading: string }>;
+    };
     expect(sc.sections[0]!.heading).toBe("Methods");
   });
 
@@ -247,13 +259,21 @@ describe("get_paper_citations", () => {
           total: 2,
           has_more: false,
           papers: [
-            { id: "c1", title: "Cites Me", year: 2020, venue: "ICML", citation_count: 5 },
+            {
+              id: "c1",
+              title: "Cites Me",
+              year: 2020,
+              venue: "ICML",
+              citation_count: 5,
+            },
             { title: "Parsed Only Reference", year: 1999 },
           ],
         },
       },
     });
-    const res = await callPaperTool(ky, "get_paper_citations", { paper_id: "p1" });
+    const res = await callPaperTool(ky, "get_paper_citations", {
+      paper_id: "p1",
+    });
     const sc = res.structuredContent as {
       direction: string;
       total: number;
@@ -272,12 +292,23 @@ describe("get_paper_citations", () => {
 
   it("surfaces a 429 rate-limit as an isError tool result with retry seconds", async () => {
     const res = await callPaperTool(
-      throwingKy(httpError(429, { retry_after_seconds: 30, upgrade_hint: "Upgrade for more." })),
+      throwingKy(
+        httpError(429, {
+          retry_after_seconds: 30,
+          upgrade_hint: "Upgrade for more.",
+        }),
+      ),
       "get_paper_citations",
       { paper_id: "p1" },
     );
     expectToolError(res, {
-      contains: ["Rate limited", "Retry after 30s", "Upgrade for more.", "retry_after_seconds=30", "http_status=429"],
+      contains: [
+        "Rate limited",
+        "Retry after 30s",
+        "Upgrade for more.",
+        "retry_after_seconds=30",
+        "http_status=429",
+      ],
     });
   });
 });
@@ -300,11 +331,17 @@ describe("list_conferences", () => {
         ],
       },
     });
-    const res = await callPaperTool(ky, "list_conferences", { category: "security" });
-    expect((calls[0]!.opts as { searchParams: Record<string, string> }).searchParams).toEqual({
+    const res = await callPaperTool(ky, "list_conferences", {
       category: "security",
     });
-    const sc = res.structuredContent as { conferences: Array<Record<string, unknown>> };
+    expect(
+      (calls[0]!.opts as { searchParams: Record<string, string> }).searchParams,
+    ).toEqual({
+      category: "security",
+    });
+    const sc = res.structuredContent as {
+      conferences: Array<Record<string, unknown>>;
+    };
     expect(sc.conferences[0]!.id).toBe("conf-1");
     expect(sc.conferences[0]!.short_name).toBe("CCS");
     expect(sc.conferences[0]!.paper_count).toBe(1200);
@@ -317,7 +354,9 @@ describe("list_conferences", () => {
       "list_conferences",
       {},
     );
-    expectToolError(res, { contains: ["Rate limited", "Retry after 12s", "http_status=429"] });
+    expectToolError(res, {
+      contains: ["Rate limited", "Retry after 12s", "http_status=429"],
+    });
   });
 });
 
@@ -344,7 +383,9 @@ describe("get_conference_papers", () => {
         },
       },
     });
-    const res = await callPaperTool(ky, "get_conference_papers", { conference: "NeurIPS" });
+    const res = await callPaperTool(ky, "get_conference_papers", {
+      conference: "NeurIPS",
+    });
     const sc = res.structuredContent as {
       papers: Array<Record<string, unknown>>;
       total: number;
@@ -365,7 +406,9 @@ describe("get_conference_papers", () => {
       "get_conference_papers",
       { conference: "NotARealVenue" },
     );
-    expectToolError(res, { contains: ["Conference not found", "http_status=404"] });
+    expectToolError(res, {
+      contains: ["Conference not found", "http_status=404"],
+    });
   });
 });
 
@@ -389,9 +432,14 @@ describe("search_related_papers", () => {
         ],
       },
     });
-    const res = await callPaperTool(ky, "search_related_papers", { paper_id: "seed", limit: 2 });
+    const res = await callPaperTool(ky, "search_related_papers", {
+      paper_id: "seed",
+      limit: 2,
+    });
     expect(calls[0]!.url).toBe("papers/seed/related");
-    const sc = res.structuredContent as { papers: Array<Record<string, unknown>> };
+    const sc = res.structuredContent as {
+      papers: Array<Record<string, unknown>>;
+    };
     expect(sc.papers).toHaveLength(2);
     expect(sc.papers.map((p) => p.paper_id)).toEqual(["n1", "n2"]);
     expect(sc.papers[0]!.title).toBe("Neighbor One");
@@ -408,7 +456,13 @@ describe("search_related_papers", () => {
       "search_related_papers",
       { paper_id: "missing" },
     );
-    expectToolError(res, { contains: ["Paper not found", "call search_papers first", "http_status=404"] });
+    expectToolError(res, {
+      contains: [
+        "Paper not found",
+        "call search_papers first",
+        "http_status=404",
+      ],
+    });
   });
 });
 
@@ -431,9 +485,13 @@ describe("search_research_guidance", () => {
         },
       },
     });
-    const res = await callGuidanceTool(ky, "search_research_guidance", { query: "ablation" });
+    const res = await callGuidanceTool(ky, "search_research_guidance", {
+      query: "ablation",
+    });
     expect(calls[0]!.url).toBe("research-guidance/search");
-    const sc = res.structuredContent as { results: Array<Record<string, unknown>> };
+    const sc = res.structuredContent as {
+      results: Array<Record<string, unknown>>;
+    };
     const hit = sc.results[0]!;
     expect(hit.doc_id).toBe("g1");
     expect(hit.doc_title).toBe("How to Design an Ablation");
@@ -448,7 +506,9 @@ describe("search_research_guidance", () => {
       "search_research_guidance",
       { query: "x" },
     );
-    expectToolError(res, { contains: ["Rate limited", "Retry after 5s", "http_status=429"] });
+    expectToolError(res, {
+      contains: ["Rate limited", "Retry after 5s", "http_status=429"],
+    });
   });
 });
 
@@ -468,7 +528,9 @@ describe("get_research_guidance_doc", () => {
         },
       },
     });
-    const res = await callGuidanceTool(ky, "get_research_guidance_doc", { doc_id: "g1" });
+    const res = await callGuidanceTool(ky, "get_research_guidance_doc", {
+      doc_id: "g1",
+    });
     expect(calls[0]!.url).toBe("research-guidance/g1");
     const sc = res.structuredContent as Record<string, unknown>;
     expect(sc.doc_id).toBe("g1");
@@ -489,168 +551,33 @@ describe("get_research_guidance_doc", () => {
   });
 });
 
-// ─── list_subscriptions ─────────────────────────────────────
-
-describe("list_subscriptions", () => {
-  it("projects the subscription list down to id / conference_id / created_at", async () => {
-    const { ky, calls } = routedKy({
-      get: {
-        subscriptions: [
-          { id: "sub-1", conference_id: "conf-1", created_at: "2026-01-01T00:00:00Z" },
-        ],
-      },
-    });
-    const res = await callSubsTool(ky, "list_subscriptions", {});
-    expect(calls[0]!.url).toBe("subscriptions");
-    const sc = res.structuredContent as { subscriptions: Array<Record<string, unknown>> };
-    expect(sc.subscriptions[0]!.id).toBe("sub-1");
-    expect(sc.subscriptions[0]!.conference_id).toBe("conf-1");
-    expect(sc.subscriptions[0]!.created_at).toBe("2026-01-01T00:00:00Z");
-  });
-
-  it("surfaces a 429 rate-limit as an isError tool result", async () => {
-    const res = await callSubsTool(
-      throwingKy(httpError(429, { retry_after_seconds: 8 })),
-      "list_subscriptions",
-      {},
-    );
-    expectToolError(res, { contains: ["Rate limited", "Retry after 8s", "http_status=429"] });
-  });
-});
-
-// ─── subscribe_conference ──────────────────────────────────────────
-
-describe("subscribe_conference", () => {
-  it("posts the create body and returns the slim subscription", async () => {
-    const { ky, calls } = routedKy({
-      post: {
-        subscriptions: {
-          id: "sub-9",
-          conference_id: "conf-1",
-          created_at: "2026-02-02T00:00:00Z",
-        },
-      },
-    });
-    const res = await callSubsTool(ky, "subscribe_conference", {
-      conference: "NeurIPS",
-    });
-    // notify_email / notify_in_app default to true from zod and are always sent.
-    // The agent's `conference` maps onto the API's `conference_id` field.
-    const body = (calls[0]!.opts as { json: Record<string, unknown> }).json;
-    expect(body.conference_id).toBe("NeurIPS");
-    expect(body.notify_email).toBe(true);
-    expect(body.notify_in_app).toBe(true);
-    const sc = res.structuredContent as Record<string, unknown>;
-    expect(sc.id).toBe("sub-9");
-    expect(sc.conference_id).toBe("conf-1");
-    expect(sc.created_at).toBe("2026-02-02T00:00:00Z");
-  });
-
-  it("surfaces a 402 quota error as an isError tool result", async () => {
-    const res = await callSubsTool(
-      throwingKy(httpError(402, { buy_credits_url: "https://lune/buy" })),
-      "subscribe_conference",
-      { conference: "NeurIPS" },
-    );
-    expectToolError(res, { contains: ["Quota exhausted", "https://lune/buy", "http_status=402"] });
-  });
-});
-
-// ─── unsubscribe_conference ──────────────────────────────────────
-
-describe("unsubscribe_conference", () => {
-  it("DELETEs the subscription and echoes { ok: true, subscription_id }", async () => {
-    const { ky, calls } = routedKy({ delete: {} });
-    const res = await callSubsTool(ky, "unsubscribe_conference", {
-      subscription_id: "sub-1",
-    });
-    expect(calls[0]!.method).toBe("delete");
-    expect(calls[0]!.url).toBe("subscriptions/sub-1");
-    const sc = res.structuredContent as { ok: boolean; subscription_id: string };
-    expect(sc.ok).toBe(true);
-    expect(sc.subscription_id).toBe("sub-1");
-  });
-
-  it("surfaces a 404 as an isError tool result", async () => {
-    const res = await callSubsTool(
-      throwingKy(httpError(404, { detail: "Subscription not found" })),
-      "unsubscribe_conference",
-      { subscription_id: "missing" },
-    );
-    expectToolError(res, { contains: ["Subscription not found", "http_status=404"] });
-  });
-});
-
-// ─── get_subscription_updates ─────────────────────────────────────────────
-
-describe("get_subscription_updates", () => {
-  it("returns the merged updates (with occurred_at) and the next_cursor", async () => {
-    const { ky, calls } = routedKy({
-      get: {
-        "subscriptions/updates": {
-          papers: [
-            {
-              id: "p1",
-              title: "Freshly Indexed",
-              year: 2026,
-              citation_count: 0,
-              occurred_at: "2026-03-03T00:00:00Z",
-            },
-          ],
-          next_cursor: "cursor-abc",
-        },
-      },
-    });
-    // No subscription_id: the aggregate feed covers every subscription.
-    const res = await callSubsTool(ky, "get_subscription_updates", {});
-    expect(calls[0]!.url).toBe("subscriptions/updates");
-    const sc = res.structuredContent as {
-      papers: Array<Record<string, unknown>>;
-      next_cursor: string | null;
-    };
-    expect(sc.papers[0]!.paper_id).toBe("p1");
-    expect(sc.papers[0]!.title).toBe("Freshly Indexed");
-    expect(sc.papers[0]!.occurred_at).toBe("2026-03-03T00:00:00Z");
-    expect(sc.next_cursor).toBe("cursor-abc");
-  });
-
-  it("forwards the since cursor as a searchParam when provided", async () => {
-    const { ky, calls } = routedKy({
-      get: { "subscriptions/updates": { papers: [], next_cursor: null } },
-    });
-    await callSubsTool(ky, "get_subscription_updates", {
-      since: "cursor-prev",
-    });
-    expect(calls[0]!.url).toBe("subscriptions/updates");
-    const sp = (calls[0]!.opts as { searchParams: Record<string, unknown> }).searchParams;
-    expect(sp).toEqual({ limit: 20, since: "cursor-prev" });
-  });
-
-  it("surfaces an upstream error as an isError tool result", async () => {
-    const res = await callSubsTool(
-      throwingKy(httpError(402, { detail: "Quota exhausted" })),
-      "get_subscription_updates",
-      {},
-    );
-    expectToolError(res, { contains: ["Quota exhausted", "http_status=402"] });
-  });
-});
-
 // ─── error-body edge cases shared across handlers ─────────────────────────────
 
 describe("upstream error projection edge cases", () => {
   it("falls back to a generic 404 message when the error body has no detail", async () => {
-    const res = await callPaperTool(throwingKy(httpError(404, null)), "search_related_papers", {
-      paper_id: "x",
+    const res = await callPaperTool(
+      throwingKy(httpError(404, null)),
+      "search_related_papers",
+      {
+        paper_id: "x",
+      },
+    );
+    expectToolError(res, {
+      contains: ["Not found", "call search_papers first", "http_status=404"],
     });
-    expectToolError(res, { contains: ["Not found", "call search_papers first", "http_status=404"] });
   });
 
   it("defaults the 429 retry window to 60s when the body omits retry_after_seconds", async () => {
-    const res = await callPaperTool(throwingKy(httpError(429, {})), "search_papers", {
-      query: "x",
+    const res = await callPaperTool(
+      throwingKy(httpError(429, {})),
+      "search_papers",
+      {
+        query: "x",
+      },
+    );
+    expectToolError(res, {
+      contains: ["Rate limited", "Retry after 60s", "retry_after_seconds=60"],
     });
-    expectToolError(res, { contains: ["Rate limited", "Retry after 60s", "retry_after_seconds=60"] });
   });
 
   it("derives the 429 retry window from the Retry-After header when the body omits it", async () => {
@@ -659,6 +586,8 @@ describe("upstream error projection edge cases", () => {
       "search_papers",
       { query: "x" },
     );
-    expectToolError(res, { contains: ["Retry after 45s", "retry_after_seconds=45"] });
+    expectToolError(res, {
+      contains: ["Retry after 45s", "retry_after_seconds=45"],
+    });
   });
 });

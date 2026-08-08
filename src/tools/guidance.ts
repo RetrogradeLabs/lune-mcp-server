@@ -11,6 +11,7 @@ import {
 } from "./_shared.js";
 import { slimGuidanceDoc, slimGuidanceSearch } from "./_slim.js";
 import { GetGuidanceDocOutput, SearchGuidanceOutput } from "./_outputs.js";
+import { pathSegmentId } from "./papers.schemas.js";
 
 const READ_GUIDANCE: ToolAnnotations = {
   readOnlyHint: true,
@@ -20,7 +21,6 @@ const READ_GUIDANCE: ToolAnnotations = {
   idempotentHint: true,
 };
 
-const TTL_GUIDANCE_SEARCH = 60_000;
 const TTL_GUIDANCE_DOC = 600_000;
 
 const SearchIn = z.object({
@@ -29,7 +29,10 @@ const SearchIn = z.object({
 });
 
 const GetIn = z.object({
-  doc_id: z.string().describe("Guidance document UUID."),
+  doc_id: pathSegmentId(
+    "Guidance document UUID, from a `search_research_guidance` hit. NOT a " +
+      "corpus paper_id (those come from `search_papers`).",
+  ),
 });
 
 export const GUIDANCE_TOOLS: ToolDef[] = [
@@ -55,7 +58,6 @@ export const GUIDANCE_TOOLS: ToolDef[] = [
     outputSchema: SearchGuidanceOutput,
     annotations: READ_GUIDANCE,
     meta: ALWAYS_LOAD_META,
-    scopes: ["guidance:read"],
   },
   {
     name: "get_research_guidance_doc",
@@ -67,7 +69,6 @@ export const GUIDANCE_TOOLS: ToolDef[] = [
     inputSchema: GetIn,
     outputSchema: GetGuidanceDocOutput,
     annotations: READ_GUIDANCE,
-    scopes: ["guidance:read"],
   },
 ];
 
@@ -80,9 +81,11 @@ export async function callGuidanceTool(
     switch (name) {
       case "search_research_guidance": {
         const a = SearchIn.parse(args);
+        // No defaultTtlMs: research-guidance/search is on PER_PRINCIPAL_PATHS
+        // (scope-gated + billable), so cachedJson bypasses the shared cache and
+        // single-flight entirely - every call reaches the API to be scoped + metered.
         const r = await cachedJson(api, "post", "research-guidance/search", {
           json: { query: a.query, limit: a.limit },
-          defaultTtlMs: TTL_GUIDANCE_SEARCH,
         });
         return structuredJson(slimGuidanceSearch(r));
       }
@@ -103,6 +106,6 @@ export async function callGuidanceTool(
     // Upstream Lune-API failures resolve to a `{ isError: true }` tool result
     // (actionable, in-context); non-HTTP errors (zod, unknown-tool) re-throw
     // as JSON-RPC protocol errors. See `httpErrorToToolResult`.
-    return await httpErrorToToolResult(e);
+    return await httpErrorToToolResult(e, name);
   }
 }

@@ -5,7 +5,7 @@
  *   1. Common abbreviations / casing variants resolve to the canonical
  *      `short_name` (`usenix sec` → `USENIX Security`).
  *   2. The matcher is strict: typos and over-broad single-letter inputs do
- *      NOT silently subscribe an agent to the wrong conference.
+ *      NOT silently route an agent's query to the wrong conference.
  *   3. When multiple candidates tie at the most-specific match level, we
  *      flag `ambiguous` and surface the candidate list (e.g. `usenix`
  *      against a corpus that contains both `USENIX Security` and
@@ -21,13 +21,32 @@ import {
 } from "../../src/tools/_fuzzy.js";
 
 const CONFERENCES: ConferenceCandidate[] = [
-  { short_name: "ICML", full_name: "International Conference on Machine Learning" },
-  { short_name: "ICLR", full_name: "International Conference on Learning Representations" },
+  {
+    short_name: "ICML",
+    full_name: "International Conference on Machine Learning",
+  },
+  {
+    short_name: "ICLR",
+    full_name: "International Conference on Learning Representations",
+  },
   { short_name: "NeurIPS", full_name: "Neural Information Processing Systems" },
-  { short_name: "ACL", full_name: "Annual Meeting of the Association for Computational Linguistics" },
-  { short_name: "CVPR", full_name: "IEEE/CVF Conference on Computer Vision and Pattern Recognition" },
-  { short_name: "NDSS", full_name: "Network and Distributed System Security Symposium" },
-  { short_name: "CCS", full_name: "ACM Conference on Computer and Communications Security" },
+  {
+    short_name: "ACL",
+    full_name:
+      "Annual Meeting of the Association for Computational Linguistics",
+  },
+  {
+    short_name: "CVPR",
+    full_name: "IEEE/CVF Conference on Computer Vision and Pattern Recognition",
+  },
+  {
+    short_name: "NDSS",
+    full_name: "Network and Distributed System Security Symposium",
+  },
+  {
+    short_name: "CCS",
+    full_name: "ACM Conference on Computer and Communications Security",
+  },
   { short_name: "S&P", full_name: "IEEE Symposium on Security and Privacy" },
   { short_name: "USENIX Security", full_name: "USENIX Security Symposium" },
 ];
@@ -46,46 +65,58 @@ describe("resolveConferenceShortName: exact + abbreviated matches", () => {
 
   it("is case-insensitive on short_name", () => {
     expect(resolveConferenceShortName("cvpr", CONFERENCES)).toEqual({
-      kind: "match", short_name: "CVPR",
+      kind: "match",
+      short_name: "CVPR",
     });
     expect(resolveConferenceShortName("Cvpr", CONFERENCES)).toEqual({
-      kind: "match", short_name: "CVPR",
+      kind: "match",
+      short_name: "CVPR",
     });
     expect(resolveConferenceShortName("neurips", CONFERENCES)).toEqual({
-      kind: "match", short_name: "NeurIPS",
+      kind: "match",
+      short_name: "NeurIPS",
     });
   });
 
   it("matches abbreviated tokens via prefix (USENIX SEC → USENIX Security)", () => {
     expect(resolveConferenceShortName("USENIX SEC", CONFERENCES)).toEqual({
-      kind: "match", short_name: "USENIX Security",
+      kind: "match",
+      short_name: "USENIX Security",
     });
     expect(resolveConferenceShortName("usenix sec", CONFERENCES)).toEqual({
-      kind: "match", short_name: "USENIX Security",
+      kind: "match",
+      short_name: "USENIX Security",
     });
   });
 
   it("strips punctuation in both directions (S&P, sp, S P)", () => {
     expect(resolveConferenceShortName("S&P", CONFERENCES)).toEqual({
-      kind: "match", short_name: "S&P",
+      kind: "match",
+      short_name: "S&P",
     });
     expect(resolveConferenceShortName("s&p", CONFERENCES)).toEqual({
-      kind: "match", short_name: "S&P",
+      kind: "match",
+      short_name: "S&P",
     });
     expect(resolveConferenceShortName("S P", CONFERENCES)).toEqual({
-      kind: "match", short_name: "S&P",
+      kind: "match",
+      short_name: "S&P",
     });
   });
 
   it("widens to full_name when no short_name match (machine learning → ICML)", () => {
-    expect(resolveConferenceShortName("machine learning", CONFERENCES)).toEqual({
-      kind: "match", short_name: "ICML",
-    });
+    expect(resolveConferenceShortName("machine learning", CONFERENCES)).toEqual(
+      {
+        kind: "match",
+        short_name: "ICML",
+      },
+    );
   });
 
   it("token order is irrelevant", () => {
     expect(resolveConferenceShortName("Security USENIX", CONFERENCES)).toEqual({
-      kind: "match", short_name: "USENIX Security",
+      kind: "match",
+      short_name: "USENIX Security",
     });
   });
 
@@ -106,7 +137,7 @@ describe("resolveConferenceShortName: ambiguity", () => {
   it("flags ambiguity when two candidates share an input prefix in their short_name", () => {
     // The exact case the user raised: introduce a USENIX Privacy alongside
     // USENIX Security. `usenix` alone is consistent with both; silently
-    // picking one would subscribe the agent to the wrong venue.
+    // picking one would route the agent's query to the wrong venue.
     const corpus: ConferenceCandidate[] = [
       ...CONFERENCES,
       { short_name: "USENIX Privacy", full_name: "USENIX Privacy Conference" },
@@ -116,7 +147,10 @@ describe("resolveConferenceShortName: ambiguity", () => {
     if (result.kind === "ambiguous") {
       // Both must be reported. Order doesn't matter; agents render this
       // back to the user / chooses one.
-      expect(result.candidates.sort()).toEqual(["USENIX Privacy", "USENIX Security"]);
+      expect(result.candidates.sort()).toEqual([
+        "USENIX Privacy",
+        "USENIX Security",
+      ]);
     }
   });
 
@@ -128,12 +162,18 @@ describe("resolveConferenceShortName: ambiguity", () => {
     const corpus: ConferenceCandidate[] = [
       { short_name: "USENIX Security", full_name: "USENIX Security Symposium" },
       { short_name: "USENIX Privacy", full_name: "USENIX Privacy Conference" },
-      { short_name: "USENIX ATC HotOS", full_name: "USENIX Annual Technical Conference HotOS" },
+      {
+        short_name: "USENIX ATC HotOS",
+        full_name: "USENIX Annual Technical Conference HotOS",
+      },
     ];
     const result = resolveConferenceShortName("usenix", corpus);
     expect(result.kind).toBe("ambiguous");
     if (result.kind === "ambiguous") {
-      expect(result.candidates.sort()).toEqual(["USENIX Privacy", "USENIX Security"]);
+      expect(result.candidates.sort()).toEqual([
+        "USENIX Privacy",
+        "USENIX Security",
+      ]);
     }
   });
 
@@ -143,10 +183,12 @@ describe("resolveConferenceShortName: ambiguity", () => {
       { short_name: "USENIX Privacy", full_name: "USENIX Privacy Conference" },
     ];
     expect(resolveConferenceShortName("USENIX SEC", corpus)).toEqual({
-      kind: "match", short_name: "USENIX Security",
+      kind: "match",
+      short_name: "USENIX Security",
     });
     expect(resolveConferenceShortName("usenix priv", corpus)).toEqual({
-      kind: "match", short_name: "USENIX Privacy",
+      kind: "match",
+      short_name: "USENIX Privacy",
     });
   });
 });
@@ -159,13 +201,21 @@ describe("resolveConferenceShortName: non-matches", () => {
   });
 
   it("returns kind:none when nothing matches", () => {
-    expect(resolveConferenceShortName("OOPSLA", CONFERENCES)).toEqual({ kind: "none" });
-    expect(resolveConferenceShortName("totally-fake", CONFERENCES)).toEqual({ kind: "none" });
+    expect(resolveConferenceShortName("OOPSLA", CONFERENCES)).toEqual({
+      kind: "none",
+    });
+    expect(resolveConferenceShortName("totally-fake", CONFERENCES)).toEqual({
+      kind: "none",
+    });
   });
 
   it("handles empty / whitespace input", () => {
-    expect(resolveConferenceShortName("", CONFERENCES)).toEqual({ kind: "none" });
-    expect(resolveConferenceShortName("   ", CONFERENCES)).toEqual({ kind: "none" });
+    expect(resolveConferenceShortName("", CONFERENCES)).toEqual({
+      kind: "none",
+    });
+    expect(resolveConferenceShortName("   ", CONFERENCES)).toEqual({
+      kind: "none",
+    });
   });
 
   it("handles candidates with null full_name", () => {
@@ -174,10 +224,12 @@ describe("resolveConferenceShortName: non-matches", () => {
       { short_name: "BAR" },
     ];
     expect(resolveConferenceShortName("foo", candidates)).toEqual({
-      kind: "match", short_name: "FOO",
+      kind: "match",
+      short_name: "FOO",
     });
     expect(resolveConferenceShortName("BAR", candidates)).toEqual({
-      kind: "match", short_name: "BAR",
+      kind: "match",
+      short_name: "BAR",
     });
   });
 });
@@ -214,7 +266,10 @@ describe("resolveConferenceShortName: degenerate candidates", () => {
     // tokens → `continue`d. The real prefix match still wins.
     const corpus: ConferenceCandidate[] = [
       { short_name: "!!!", full_name: "@@@" },
-      { short_name: "ICML", full_name: "International Conference on Machine Learning" },
+      {
+        short_name: "ICML",
+        full_name: "International Conference on Machine Learning",
+      },
     ];
     expect(resolveConferenceShortName("icm", corpus)).toEqual({
       kind: "match",

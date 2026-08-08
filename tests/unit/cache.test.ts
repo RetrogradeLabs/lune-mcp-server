@@ -44,13 +44,6 @@ describe("InProcessTTLCache", () => {
     expect(await cache.get("b")).toBeUndefined();
   });
 
-  it("invalidate removes a single key", async () => {
-    const cache = new InProcessTTLCache(8, 60_000);
-    await cache.set("k", "v");
-    await cache.invalidate("k");
-    expect(await cache.get("k")).toBeUndefined();
-  });
-
   it("clear empties the cache", async () => {
     const cache = new InProcessTTLCache(8, 60_000);
     await cache.set("a", 1);
@@ -88,7 +81,10 @@ describe("SingleFlight", () => {
       return `value-${key}`;
     };
 
-    const [a, b] = await Promise.all([sf.do("a", factory("a")), sf.do("b", factory("b"))]);
+    const [a, b] = await Promise.all([
+      sf.do("a", factory("a")),
+      sf.do("b", factory("b")),
+    ]);
     expect([a, b]).toEqual(["value-a", "value-b"]);
     expect(calls).toEqual({ a: 1, b: 1 });
   });

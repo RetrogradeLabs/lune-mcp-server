@@ -37,13 +37,22 @@ describe("projector output matches the advertised outputSchema", () => {
           ...PAPER,
           score: 0.77,
           matched_chunks: [
-            { section_name: "Results", text: "gain", score: 0.77, chunk_id: "ch-1" },
+            {
+              section_name: "Results",
+              text: "gain",
+              score: 0.77,
+              chunk_id: "ch-1",
+            },
           ],
         },
       ],
     };
-    expect(() => SearchPapersOutput.parse(slimSearchResponse(fixture))).not.toThrow();
-    expect(() => SearchPapersOutput.parse(slimSearchResponse(fixture, false))).not.toThrow();
+    expect(() =>
+      SearchPapersOutput.parse(slimSearchResponse(fixture)),
+    ).not.toThrow();
+    expect(() =>
+      SearchPapersOutput.parse(slimSearchResponse(fixture, false)),
+    ).not.toThrow();
   });
 
   it("slimCitations conforms to GetCitationsOutput (guards the H1 regression)", () => {
@@ -59,13 +68,24 @@ describe("projector output matches the advertised outputSchema", () => {
 
   it("slimConferenceList conforms to ListConferencesOutput", () => {
     const out = slimConferenceList([
-      { id: "c", short_name: "CCS", full_name: "ACM CCS", paper_count: 9, years: [2024] },
+      {
+        id: "c",
+        short_name: "CCS",
+        full_name: "ACM CCS",
+        paper_count: 9,
+        years: [2024],
+      },
     ]);
     expect(() => ListConferencesOutput.parse(out)).not.toThrow();
   });
 
   it("slimConferencePapers conforms to GetConferencePapersOutput", () => {
-    const out = slimConferencePapers({ papers: [PAPER], total: 1, page: 1, limit: 20 });
+    const out = slimConferencePapers({
+      papers: [PAPER],
+      total: 1,
+      page: 1,
+      limit: 20,
+    });
     expect(() => GetConferencePapersOutput.parse(out)).not.toThrow();
   });
 
@@ -85,10 +105,18 @@ describe("projector output matches the advertised outputSchema", () => {
 
 describe("tool descriptions do not promise dropped fields (guards H3)", () => {
   it("no paper tool description names the removed AI enrichment fields", () => {
-    const banned = [/AI TL;DR/i, /AI-extracted/i, /\bmethodology\b/i, /citation count descending/i];
+    const banned = [
+      /AI TL;DR/i,
+      /AI-extracted/i,
+      /\bmethodology\b/i,
+      /citation count descending/i,
+    ];
     for (const tool of PAPER_TOOLS) {
       for (const re of banned) {
-        expect(tool.description, `${tool.name} description must not match ${re}`).not.toMatch(re);
+        expect(
+          tool.description,
+          `${tool.name} description must not match ${re}`,
+        ).not.toMatch(re);
       }
     }
   });

@@ -9,7 +9,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-/* ── Controllable fake redis client ─────────────────────────────────────── */
+/* Controllable fake redis client */
 
 interface FakeClient {
   url?: string;
@@ -138,9 +138,8 @@ describe("RedisCache", () => {
     };
     const cache = new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
     expect(await cache.get("k")).toBeUndefined();
-    // set / invalidate / clear also no-op cleanly when disconnected.
+    // set / clear also no-op cleanly when disconnected.
     await expect(cache.set("k", 1)).resolves.toBeUndefined();
-    await expect(cache.invalidate("k")).resolves.toBeUndefined();
     await expect(cache.clear()).resolves.toBeUndefined();
   });
 
@@ -163,44 +162,49 @@ describe("RedisCache", () => {
     const setSpy = vi.spyOn(fake, "set");
     const cache = new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
     await cache.set("k", "v", 10);
-    expect(setSpy).toHaveBeenCalledWith(expect.any(String), expect.any(String), {
-      EX: 1,
-    });
+    expect(setSpy).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      {
+        EX: 1,
+      },
+    );
   });
 
   it("uses the default TTL when no per-call TTL is given", async () => {
     const { RedisCache } = await import("../../src/cache.js");
     const setSpy = vi.spyOn(fake, "set");
-    const cache = new RedisCache("redis://localhost:6379", "mcp_tools", 120_000);
+    const cache = new RedisCache(
+      "redis://localhost:6379",
+      "mcp_tools",
+      120_000,
+    );
     await cache.set("k", "v");
-    expect(setSpy).toHaveBeenCalledWith(expect.any(String), expect.any(String), {
-      EX: 120,
-    });
+    expect(setSpy).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      {
+        EX: 120,
+      },
+    );
   });
 
-  it("invalidate deletes the namespaced key", async () => {
+  it("clear evicts the namespaced keys so subsequent reads miss", async () => {
     const { RedisCache } = await import("../../src/cache.js");
     const cache = new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
-    await cache.set("k", "v");
-    expect(fake.store.size).toBe(1);
-    await cache.invalidate("k");
-    expect(fake.store.size).toBe(0);
-  });
 
-  it("invalidate swallows a DEL protocol error", async () => {
-    const { RedisCache } = await import("../../src/cache.js");
-    const cache = new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
-    fake.failOps = true;
-    await expect(cache.invalidate("k")).resolves.toBeUndefined();
-  });
+    await cache.set("a", { v: 1 });
+    await cache.set("b", { v: 2 });
+    expect(await cache.get("a")).toEqual({ v: 1 });
 
-  it("clear scans and deletes keys in batches (string yields)", async () => {
-    const { RedisCache } = await import("../../src/cache.js");
-    const cache = new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
-    const delSpy = vi.spyOn(fake, "del");
-    fake.scanYields = ["lune:v1:mcp_tools:a", "lune:v1:mcp_tools:b"];
+    // SCAN surfaces the namespaced keys the cache just wrote (one string per
+    // yield), which clear() must then delete.
+    fake.scanYields = [...fake.store.keys()];
     await cache.clear();
-    expect(delSpy).toHaveBeenCalledTimes(2);
+
+    expect(fake.store.size).toBe(0);
+    expect(await cache.get("a")).toBeUndefined();
+    expect(await cache.get("b")).toBeUndefined();
   });
 
   it("clear handles array-shaped scan yields", async () => {

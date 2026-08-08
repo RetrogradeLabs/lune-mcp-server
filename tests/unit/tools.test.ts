@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { KyInstance } from "ky";
 import { callPaperTool } from "../../src/tools/papers.js";
+import { HEAVY_TOOL_TIMEOUT_MS } from "../../src/api/client.js";
 import { callGuidanceTool } from "../../src/tools/guidance.js";
-import { callSubsTool } from "../../src/tools/subscriptions.js";
 import { listToolsResponse } from "../../src/tools/index.js";
 import { TOOL_RESPONSE_CACHE } from "../../src/cache.js";
 
@@ -92,7 +92,9 @@ describe("paper tools", () => {
     // `low_confidence`; this hit has no calibrated `rerank_score`, so there is
     // no basis to abstain: best_score is null and low_confidence is false.
     const expected = {
-      results: [{ paper_id: "p1", authors: [], citation_count: 0, contexts: [] }],
+      results: [
+        { paper_id: "p1", authors: [], citation_count: 0, contexts: [] },
+      ],
       has_more: false,
       best_score: null,
       low_confidence: false,
@@ -114,15 +116,26 @@ describe("paper tools", () => {
   it("get_paper_fulltext returns JSON when format=json", async () => {
     const { ky, setResponse } = fakeKy();
     setResponse({ sections: [{ name: "intro", text: "..." }] });
-    const r = await callPaperTool(ky, "get_paper_fulltext", { paper_id: "p1", format: "json" });
-    expect(JSON.parse(r.content[0]!.text)).toEqual({ sections: [{ name: "intro", text: "..." }] });
+    const r = await callPaperTool(ky, "get_paper_fulltext", {
+      paper_id: "p1",
+      format: "json",
+    });
+    expect(JSON.parse(r.content[0]!.text)).toEqual({
+      sections: [{ name: "intro", text: "..." }],
+    });
   });
 
   it("get_paper_citations passes direction param", async () => {
     const { ky, calls, setResponse } = fakeKy();
     setResponse({ citations: [] });
-    await callPaperTool(ky, "get_paper_citations", { paper_id: "p1", direction: "cites" });
-    expect((calls[0]!.opts as { searchParams: Record<string, unknown> }).searchParams).toEqual({
+    await callPaperTool(ky, "get_paper_citations", {
+      paper_id: "p1",
+      direction: "cites",
+    });
+    expect(
+      (calls[0]!.opts as { searchParams: Record<string, unknown> })
+        .searchParams,
+    ).toEqual({
       direction: "cites",
       limit: 25,
       offset: 0,
@@ -133,7 +146,10 @@ describe("paper tools", () => {
     const { ky, calls, setResponse } = fakeKy();
     setResponse([]);
     await callPaperTool(ky, "list_conferences", {});
-    expect((calls[0]!.opts as { searchParams: Record<string, unknown> }).searchParams).toEqual({});
+    expect(
+      (calls[0]!.opts as { searchParams: Record<string, unknown> })
+        .searchParams,
+    ).toEqual({});
   });
 
   it("get_conference_papers includes year, limit, offset", async () => {
@@ -148,7 +164,9 @@ describe("paper tools", () => {
     // assertion target is the actual conference-papers fetch.
     const c = calls.find((x) => x.url === "conferences/CCS/papers")!;
     expect(c).toBeDefined();
-    expect((c.opts as { searchParams: Record<string, unknown> }).searchParams).toEqual({
+    expect(
+      (c.opts as { searchParams: Record<string, unknown> }).searchParams,
+    ).toEqual({
       limit: 30,
       offset: 0,
       sort: "recency",
@@ -161,7 +179,9 @@ describe("paper tools", () => {
     // throws before any API call, so it propagates as a JSON-RPC error
     // rather than an isError tool result.
     const { ky } = fakeKy();
-    await expect(callPaperTool(ky, "search_papers", { query: "" })).rejects.toThrow();
+    await expect(
+      callPaperTool(ky, "search_papers", { query: "" }),
+    ).rejects.toThrow();
   });
 
   it("surfaces a 401 from the API as an isError tool result (not a throw)", async () => {
@@ -170,7 +190,9 @@ describe("paper tools", () => {
     // of throwing a JSON-RPC protocol error the client would discard.
     const { ky, setError } = fakeKy();
     setError(401, { detail: "expired" });
-    const r = await callPaperTool(ky, "get_paper_citations", { paper_id: "p1" });
+    const r = await callPaperTool(ky, "get_paper_citations", {
+      paper_id: "p1",
+    });
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toMatch(/unauthorized|rotate|lune login/i);
   });
@@ -178,7 +200,9 @@ describe("paper tools", () => {
   it("surfaces a 429 (L1 concurrency) as a retryable isError tool result", async () => {
     const { ky, setError } = fakeKy();
     setError(429, { error: "rate_limited", retry_after_seconds: 1 });
-    const r = await callPaperTool(ky, "search_papers", { query: "diffusion guidance" });
+    const r = await callPaperTool(ky, "search_papers", {
+      query: "diffusion guidance",
+    });
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toMatch(/rate limited/i);
     expect(r.content[0]!.text).toContain("retry_after_seconds=1");
@@ -190,10 +214,14 @@ describe("paper tools", () => {
       error: "out_of_credits",
       buy_credits_url: "https://lune/dashboard/settings/billing",
     });
-    const r = await callPaperTool(ky, "search_papers", { query: "side channels" });
+    const r = await callPaperTool(ky, "search_papers", {
+      query: "side channels",
+    });
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toContain("Quota exhausted");
-    expect(r.content[0]!.text).toContain("buy_credits_url=https://lune/dashboard/settings/billing");
+    expect(r.content[0]!.text).toContain(
+      "buy_credits_url=https://lune/dashboard/settings/billing",
+    );
   });
 
   it("search_papers includes non-abstract contexts by default", async () => {
@@ -205,15 +233,24 @@ describe("paper tools", () => {
           title: "Foo",
           abstract: "We study training.",
           matched_chunks: [
-            { section_name: "Abstract", text: "We study training.", score: 0.95 },
+            {
+              section_name: "Abstract",
+              text: "We study training.",
+              score: 0.95,
+            },
             { section_name: "Methods", text: "we trained", score: 0.9 },
           ],
         },
       ],
     });
-    const r = await callPaperTool(ky, "search_papers", { query: "training tricks" });
+    const r = await callPaperTool(ky, "search_papers", {
+      query: "training tricks",
+    });
     const parsed = JSON.parse(r.content[0]!.text) as {
-      results: Array<{ abstract: string; contexts: Array<Record<string, unknown>> }>;
+      results: Array<{
+        abstract: string;
+        contexts: Array<Record<string, unknown>>;
+      }>;
     };
     expect(parsed.results[0]!.abstract).toBe("We study training.");
     expect(parsed.results[0]!.contexts).toEqual([
@@ -228,7 +265,9 @@ describe("paper tools", () => {
         {
           id: "p1",
           title: "Foo",
-          matched_chunks: [{ section_name: "Methods", text: "we trained", score: 0.9 }],
+          matched_chunks: [
+            { section_name: "Methods", text: "we trained", score: 0.9 },
+          ],
         },
       ],
     });
@@ -251,7 +290,11 @@ describe("paper tools", () => {
           id: "p1",
           title: "Foo",
           matched_chunks: [
-            { section_name: "Methods", text: "we trained on 8 GPUs", score: 0.91 },
+            {
+              section_name: "Methods",
+              text: "we trained on 8 GPUs",
+              score: 0.91,
+            },
             { section_name: "", text: "", score: 0 }, // empty chunk dropped
           ],
         },
@@ -268,7 +311,9 @@ describe("paper tools", () => {
       { section: "Methods", text: "we trained on 8 GPUs", score: 0.91 },
     ]);
     // structuredContent mirrors the text content for schema-validating clients.
-    const sc = r.structuredContent as { results: Array<{ contexts: unknown[] }> };
+    const sc = r.structuredContent as {
+      results: Array<{ contexts: unknown[] }>;
+    };
     expect(sc.results[0]!.contexts).toHaveLength(1);
   });
 
@@ -304,7 +349,9 @@ describe("search_papers_many tool", () => {
           id: "p1",
           title: "Foo",
           abstract: "We study X.",
-          matched_chunks: [{ section_name: "Methods", text: "we trained", score: 0.9 }],
+          matched_chunks: [
+            { section_name: "Methods", text: "we trained", score: 0.9 },
+          ],
           matched_queries: [
             { query: "x methods", rank: 1 },
             { query: "x training", rank: 3 },
@@ -356,7 +403,12 @@ describe("search_papers_many tool", () => {
     // The batch request's actual field is `conference`; unlike single search
     // there is no rename. The fuzzy resolver canonicalises the name first.
     const { ky, calls, setResponse } = fakeKy();
-    setResponse({ results: [], queries_run: 1, queries_failed: [], has_more: false });
+    setResponse({
+      results: [],
+      queries_run: 1,
+      queries_failed: [],
+      has_more: false,
+    });
     await callPaperTool(ky, "search_papers_many", {
       queries: ["x"],
       conference: "NeurIPS",
@@ -374,7 +426,9 @@ describe("search_papers_many tool", () => {
         {
           id: "p1",
           title: "Foo",
-          matched_chunks: [{ section_name: "Methods", text: "we trained", score: 0.9 }],
+          matched_chunks: [
+            { section_name: "Methods", text: "we trained", score: 0.9 },
+          ],
           matched_queries: [{ query: "x", rank: 1 }],
         },
       ],
@@ -446,6 +500,7 @@ describe("extract_from_papers tool", () => {
       ],
       instruction: "Extract the dataset and accuracy.",
       sections: ["Results"],
+      source: "corpus",
     });
     // Rows are already compact, so the structured envelope passes straight
     // through (no slim projection).
@@ -528,6 +583,7 @@ describe("verify_claims tool", () => {
     expect((c.opts as { json: Record<string, unknown> }).json).toEqual({
       claims: ["Transformers scale to long sequences."],
       context: "Survey of sequence models.",
+      source: "corpus",
     });
     // The verdict envelope passes straight through (no slim projection).
     expect(r.structuredContent).toEqual(envelope);
@@ -560,7 +616,7 @@ describe("verify_claims tool", () => {
       }
     ).json;
     expect("context" in body).toBe(false);
-    expect(body).toEqual({ claims: ["x"] });
+    expect(body).toEqual({ claims: ["x"], source: "corpus" });
   });
 
   it("rejects 26 claims via zod (thrown protocol error)", async () => {
@@ -584,7 +640,10 @@ describe("guidance tools", () => {
   it("search_research_guidance POSTs query + limit", async () => {
     const { ky, calls, setResponse } = fakeKy();
     setResponse({ chunks: [] });
-    await callGuidanceTool(ky, "search_research_guidance", { query: "ablation", limit: 3 });
+    await callGuidanceTool(ky, "search_research_guidance", {
+      query: "ablation",
+      limit: 3,
+    });
     expect(calls[0]!.url).toBe("research-guidance/search");
     expect((calls[0]!.opts as { json: Record<string, unknown> }).json).toEqual({
       query: "ablation",
@@ -600,57 +659,61 @@ describe("guidance tools", () => {
   });
 });
 
-describe("subscriptions tools", () => {
-  it("list_subscriptions GETs /subscriptions", async () => {
-    const { ky, calls, setResponse } = fakeKy();
-    setResponse([]);
-    await callSubsTool(ky, "list_subscriptions", {});
-    expect(calls[0]!.url).toBe("subscriptions");
-    expect(calls[0]!.method).toBe("GET");
-  });
+describe("heavy tools get an elevated per-call timeout", () => {
+  // gather_evidence / verify_claims / extract_from_papers / search_papers_many
+  // each fan out MULTIPLE server-side LLM + search calls and legitimately run past
+  // the 30s default, so they pass HEAVY_TOOL_TIMEOUT_MS per call. Blanket-30s timed
+  // a workspace gather_evidence out as a generic "protocol error" (the report).
+  const HEAVY: Array<[string, Record<string, unknown>, string]> = [
+    ["search_papers_many", { queries: ["x"] }, "search/batch"],
+    [
+      "extract_from_papers",
+      {
+        paper_ids: ["p1"],
+        fields: [{ name: "f", type: "string" }],
+        instruction: "i",
+      },
+      "papers/extract",
+    ],
+    ["verify_claims", { claims: ["x"] }, "claims/verify"],
+    ["gather_evidence", { task: "t", queries: ["q"] }, "evidence/gather"],
+  ];
 
-  it("subscribe_conference maps `conference` onto the wire `conference_id` + flags", async () => {
-    const { ky, calls, setResponse } = fakeKy();
-    setResponse({ id: "sub1" });
-    // The agent passes a name in `conference`; the tool forwards it as the
-    // API's `conference_id` field, which resolves a short name server-side.
-    await callSubsTool(ky, "subscribe_conference", {
-      conference: "NeurIPS",
-      notify_email: false,
-    });
-    expect(calls[0]!.url).toBe("subscriptions");
-    // zod 4 evaluates `.default(true)` even on `.optional()` fields, so the
-    // tool now sends notify_in_app=true explicitly when the caller omits it.
-    // Both fields end up on the wire; the API's own default would otherwise
-    // apply, but this is unambiguous.
-    expect((calls[0]!.opts as { json: Record<string, unknown> }).json).toEqual({
-      conference_id: "NeurIPS",
-      notify_email: false,
-      notify_in_app: true,
-    });
-  });
+  it.each(HEAVY)(
+    "%s forwards HEAVY_TOOL_TIMEOUT_MS to ky",
+    async (tool, args, path) => {
+      const { ky, calls, setResponse } = fakeKy();
+      setResponse({
+        results: [],
+        rows: [],
+        comparisons: [],
+        verdicts: [],
+        requirements: [],
+        evidence_spans: [],
+        next_queries: [],
+        draft_support: null,
+        stop_reason: "max_iterations",
+        queries_run: 1,
+        queries_failed: [],
+        papers_processed: 0,
+        papers_failed: [],
+        iterations_run: 1,
+        has_more: false,
+      });
+      await callPaperTool(ky, tool, args);
+      const c = calls.find((x) => x.url === path)!;
+      expect((c.opts as { timeout?: number }).timeout).toBe(
+        HEAVY_TOOL_TIMEOUT_MS,
+      );
+    },
+  );
 
-  it("unsubscribe_conference DELETEs by ID and returns ok", async () => {
-    const { ky, calls } = fakeKy();
-    const r = await callSubsTool(ky, "unsubscribe_conference", {
-      subscription_id: "sub1",
-    });
-    expect(calls[0]!.method).toBe("DELETE");
-    expect(calls[0]!.url).toBe("subscriptions/sub1");
-    expect(JSON.parse(r.content[0]!.text)).toEqual({ ok: true, subscription_id: "sub1" });
-  });
-
-  it("get_subscription_updates forwards since cursor", async () => {
+  it("light tools keep the default client timeout (no per-call override)", async () => {
     const { ky, calls, setResponse } = fakeKy();
-    setResponse({ papers: [], next_cursor: "abc" });
-    await callSubsTool(ky, "get_subscription_updates", {
-      since: "2026-01-01T00:00:00Z",
-    });
-    expect(calls[0]!.url).toBe("subscriptions/updates");
-    expect((calls[0]!.opts as { searchParams: Record<string, unknown> }).searchParams).toEqual({
-      limit: 20,
-      since: "2026-01-01T00:00:00Z",
-    });
+    setResponse({ results: [] });
+    await callPaperTool(ky, "search_papers", { query: "x" });
+    const c = calls.find((x) => x.url === "search")!;
+    expect((c.opts as { timeout?: number }).timeout).toBeUndefined();
   });
 });
 

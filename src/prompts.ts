@@ -8,15 +8,9 @@ import {
  * MCP Prompts: reusable, user-invokable research workflows (surfaced as slash
  * commands, e.g. `/literature_review`). Each prompt expands into a single user
  * message that frames a REAL researcher task and orchestrates the Lune tools
- * toward it, with the user's arguments interpolated.
- *
- * The set mirrors the workflow a working academic actually runs with an AI
- * research assistant: scope and survey a literature, position a contribution,
- * extract a structured comparison across papers, fact-check a draft against the
- * corpus, trace a citation lineage, and get grounded methodology advice. These
- * map onto the staged "scope -> screen -> extract -> claim-check -> synthesise"
- * loop that researchers use with tools like Elicit and Consensus, but grounded
- * in Lune's full-text peer-reviewed corpus.
+ * toward it, with the user's arguments interpolated. The set mirrors the
+ * scope -> screen -> extract -> claim-check -> synthesise loop a working academic
+ * runs with an AI research assistant, grounded in Lune's full-text corpus.
  *
  * Prompts are deterministic and stateless: the same arguments always render the
  * same message. Required arguments are validated before rendering.
@@ -53,17 +47,27 @@ export const PROMPTS: PromptDef[] = [
       "Survey the literature on a topic and synthesise it (themes, seminal vs recent " +
       "work, open gaps), grounded in Lune's peer-reviewed corpus.",
     arguments: [
-      { name: "topic", description: "The research topic or question to review.", required: true },
+      {
+        name: "topic",
+        description: "The research topic or question to review.",
+        required: true,
+      },
       {
         name: "venues",
-        description: "Optional comma-separated venues to scope to (e.g. \"NeurIPS, ICML\").",
+        description:
+          'Optional comma-separated venues to scope to (e.g. "NeurIPS, ICML").',
       },
-      { name: "since_year", description: "Optional earliest publication year (e.g. \"2021\")." },
+      {
+        name: "since_year",
+        description: 'Optional earliest publication year (e.g. "2021").',
+      },
     ],
     build: (a) => {
       const scope = [
         present(a.venues) ? `Scope it to these venues: ${a.venues}.` : "",
-        present(a.since_year) ? `Focus on work from ${a.since_year} onward.` : "",
+        present(a.since_year)
+          ? `Focus on work from ${a.since_year} onward.`
+          : "",
       ]
         .filter(Boolean)
         .join(" ");
@@ -99,10 +103,14 @@ export const PROMPTS: PromptDef[] = [
     arguments: [
       {
         name: "abstract",
-        description: "Your paper's abstract, or a paragraph describing the idea/contribution.",
+        description:
+          "Your paper's abstract, or a paragraph describing the idea/contribution.",
         required: true,
       },
-      { name: "venues", description: "Optional comma-separated venues to scope to." },
+      {
+        name: "venues",
+        description: "Optional comma-separated venues to scope to.",
+      },
     ],
     build: (a) => {
       const scope = present(a.venues) ? ` (restrict to ${a.venues})` : "";
@@ -112,7 +120,9 @@ export const PROMPTS: PromptDef[] = [
         "",
         "Find and organise the related work I should cite and compare against:",
         `1. Call search_papers with a rich natural-language query derived from my abstract${scope}` +
-          (scope ? " (pass it as the `venues` filter, not only in prose)" : "") +
+          (scope
+            ? " (pass it as the `venues` filter, not only in prose)"
+            : "") +
           ".",
         "2. For the 2 to 4 closest papers, call search_related_papers on their paper_id for " +
           "adjacent work, and get_paper_citations to surface what they build on and what " +
@@ -142,8 +152,8 @@ export const PROMPTS: PromptDef[] = [
       {
         name: "columns",
         description:
-          "Optional comma-separated columns to extract (e.g. \"dataset, task, method, key " +
-          "metric, headline result\"). If omitted, choose the most informative columns.",
+          'Optional comma-separated columns to extract (e.g. "dataset, task, method, key ' +
+          'metric, headline result"). If omitted, choose the most informative columns.',
       },
     ],
     build: (a) => {
@@ -159,7 +169,7 @@ export const PROMPTS: PromptDef[] = [
         "1. If I named specific papers, find them with search_papers; otherwise call " +
           "search_papers (or search_papers_many) to gather the most relevant papers.",
         "2. Call extract_from_papers over the chosen papers with one field per column " +
-          "(snake_case names, a clear instruction, and `sections` like [\"Results\"] when it " +
+          '(snake_case names, a clear instruction, and `sections` like ["Results"] when it ' +
           "helps focus the read). It reads each paper's full text and returns one row per paper.",
         "3. Present a markdown table, one row per paper. Treat any row flagged `truncated` as " +
           "partial, and list anything in `papers_failed` separately rather than guessing values.",
@@ -177,7 +187,8 @@ export const PROMPTS: PromptDef[] = [
     arguments: [
       {
         name: "draft",
-        description: "The text or list of claims to verify before you rely on it.",
+        description:
+          "The text or list of claims to verify before you rely on it.",
         required: true,
       },
     ],
@@ -207,7 +218,8 @@ export const PROMPTS: PromptDef[] = [
     arguments: [
       {
         name: "paper",
-        description: "A paper title, or a precise description of the paper/idea to anchor on.",
+        description:
+          "A paper title, or a precise description of the paper/idea to anchor on.",
         required: true,
       },
     ],
@@ -237,8 +249,8 @@ export const PROMPTS: PromptDef[] = [
       {
         name: "question",
         description:
-          "The methodology question, e.g. \"how should I design an ablation for X\" or \"how " +
-          "do I respond to reviewer 2\".",
+          'The methodology question, e.g. "how should I design an ablation for X" or "how ' +
+          'do I respond to reviewer 2".',
         required: true,
       },
     ],
@@ -251,8 +263,8 @@ export const PROMPTS: PromptDef[] = [
         "1. Call search_research_guidance FIRST with my question.",
         "2. If a guidance excerpt is relevant but partial, call get_research_guidance_doc for " +
           "its full text.",
-        "3. If the question also needs examples from real papers (e.g. \"how do strong papers " +
-          "ablate X\"), supplement with search_papers.",
+        '3. If the question also needs examples from real papers (e.g. "how do strong papers ' +
+          'ablate X"), supplement with search_papers.',
         "",
         "Give concrete, actionable advice grounded in the guidance corpus, citing each " +
           "guidance entry (doc_id) and any papers you draw on. Be explicit when the corpus " +
@@ -263,7 +275,12 @@ export const PROMPTS: PromptDef[] = [
 
 /** Project the prompt set for `prompts/list` (drops the `build` closure). */
 export function listPrompts(): {
-  prompts: { name: string; title: string; description: string; arguments: PromptArg[] }[];
+  prompts: {
+    name: string;
+    title: string;
+    description: string;
+    arguments: PromptArg[];
+  }[];
 } {
   return {
     prompts: PROMPTS.map(({ name, title, description, arguments: args }) => ({
@@ -283,7 +300,10 @@ export function listPrompts(): {
 export function getPromptResult(
   name: string,
   args: Record<string, string>,
-): { description: string; messages: { role: "user"; content: { type: "text"; text: string } }[] } {
+): {
+  description: string;
+  messages: { role: "user"; content: { type: "text"; text: string } }[];
+} {
   const def = PROMPTS.find((p) => p.name === name);
   if (!def) throw new Error(`unknown prompt: ${name}`);
   for (const arg of def.arguments) {
@@ -293,7 +313,9 @@ export function getPromptResult(
   }
   return {
     description: def.description,
-    messages: [{ role: "user", content: { type: "text", text: def.build(args) } }],
+    messages: [
+      { role: "user", content: { type: "text", text: def.build(args) } },
+    ],
   };
 }
 
@@ -303,15 +325,11 @@ export function getPromptResult(
  * `prompts: {}` capability is already declared in `makeServer`.
  */
 export function registerPrompts(server: Server): void {
-  server.setRequestHandler(
-    ListPromptsRequestSchema,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async () => listPrompts() as any,
-  );
+  server.setRequestHandler(ListPromptsRequestSchema, async () => listPrompts());
   server.setRequestHandler(
     GetPromptRequestSchema,
-    async (req: { params: { name: string; arguments?: Record<string, string> } }) =>
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      getPromptResult(req.params.name, req.params.arguments ?? {}) as any,
+    async (req: {
+      params: { name: string; arguments?: Record<string, string> };
+    }) => getPromptResult(req.params.name, req.params.arguments ?? {}),
   );
 }

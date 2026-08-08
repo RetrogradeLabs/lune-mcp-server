@@ -1,7 +1,7 @@
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
-import { z } from "zod";
 import type { KyInstance } from "ky";
 import { cachedJson } from "../api/cached-fetch.js";
+import { HEAVY_TOOL_TIMEOUT_MS } from "../api/client.js";
 import { httpErrorToToolResult, LuneErrorCode } from "../errors.js";
 import {
   type ConferenceCandidate,
@@ -22,6 +22,7 @@ import {
   slimRelated,
   slimSearchManyResponse,
   slimSearchResponse,
+  slimWorkspaceSearchAsHits,
 } from "./_slim.js";
 import {
   ExtractOutput,
@@ -34,6 +35,18 @@ import {
   SearchPapersOutput,
   VerifyOutput,
 } from "./_outputs.js";
+import {
+  CitationsInput,
+  ConfPapersInput,
+  ExtractInput,
+  FullTextInput,
+  GatherEvidenceInput,
+  ListConfsInput,
+  RelatedInput,
+  SearchInput,
+  SearchManyInput,
+  VerifyInput,
+} from "./papers.schemas.js";
 
 // Per-tool TTL fallbacks (ms) used when the API response carries no usable
 // `Cache-Control: max-age=N` header. The HTTP-cache policy on the API mirrors
@@ -46,439 +59,7 @@ const TTL_CITATIONS = 300_000;
 const TTL_CONFERENCES = 600_000;
 const TTL_CONFERENCE_PAPERS = 120_000;
 
-// ─── Schemas ─────────────────────────────────────────────────────────────────
-
-const SearchInput = z.object({
-  query: z
-    .string()
-    .min(1)
-    .describe(
-      "Full natural-language research query; phrase it the way you would ask " +
-        "a human research assistant. Long, descriptive questions outperform " +
-        "short keyword bags: the server detects conceptual / natural-language " +
-        "intent and automatically rewrites the query into a hypothetical " +
-        "abstract (HyDE) plus paraphrases before vector retrieval, so the " +
-        "richer the input, the better the recall. " +
-        'Good: "methods for retrieval-augmented generation that reduce ' +
-        'hallucination on long-form QA". ' +
-        'Less optimal: "RAG hallucination".',
-    ),
-  conference: z
-    .string()
-    .optional()
-    .describe('Filter by conference short name, e.g. "CCS", "NeurIPS".'),
-  year: z.number().int().min(1990).max(2100).optional(),
-  limit: z.number().int().min(1).max(50).default(10).optional(),
-  offset: z
-    .number()
-    .int()
-    .min(0)
-    .default(0)
-    .optional()
-    .describe(
-      "Pagination offset over the ranked results. Re-call with offset += limit " +
-        "while the response `has_more` is true. offset + limit must stay <= 50.",
-    ),
-  sort_by: z
-    .enum(["relevance", "date", "citations"])
-    .default("relevance")
-    .optional()
-    .describe(
-      "Result ordering within the ranked shortlist: `relevance` (default), " +
-        "`date` (newest first), or `citations` (most-cited first).",
-    ),
-  year_min: z
-    .number()
-    .int()
-    .min(1990)
-    .max(2100)
-    .optional()
-    .describe("Only include papers published in this year or later."),
-  year_max: z
-    .number()
-    .int()
-    .min(1990)
-    .max(2100)
-    .optional()
-    .describe("Only include papers published in this year or earlier."),
-  venues: z
-    .array(z.string().min(1))
-    .optional()
-    .describe("Restrict to these conference short names (e.g. [\"NeurIPS\", \"ICML\"])."),
-  detail: z
-    .boolean()
-    .default(true)
-    .optional()
-    .describe(
-      "true (default): include the full abstract, ids, and contexts[] " +
-        "non-abstract matched spans for grounding. false: concise hits (title, " +
-        "authors, year, venue, citations, score, and a single grounding " +
-        "snippet) for token-saving triage. For the complete paper text call " +
-        "get_paper_fulltext.",
-    ),
-});
-
-const SearchManyInput = z.object({
-  queries: z
-    .array(z.string().min(1))
-    .min(1)
-    .max(25)
-    .describe(
-      "1 to 25 query variants to run in ONE call. Phrase each the way you " +
-        "would ask a human research assistant (full natural-language questions " +
-        "beat keyword bags). Supply genuinely different angles on the topic " +
-        "(rephrasings, sub-questions, alternate terminology) so the merged list " +
-        "covers more of the literature than any single query would. The server " +
-        "runs each variant through the full hybrid pipeline and RRF-fuses the " +
-        "ranked lists into one deduped result set.",
-    ),
-  conference: z
-    .string()
-    .optional()
-    .describe(
-      'Shared across every query: filter to this conference short name, e.g. ' +
-        '"CCS", "NeurIPS".',
-    ),
-  year: z
-    .number()
-    .int()
-    .min(1990)
-    .max(2100)
-    .optional()
-    .describe("Shared across every query: restrict to a single publication year."),
-  year_min: z
-    .number()
-    .int()
-    .min(1990)
-    .max(2100)
-    .optional()
-    .describe("Shared across every query: only papers published in this year or later."),
-  year_max: z
-    .number()
-    .int()
-    .min(1990)
-    .max(2100)
-    .optional()
-    .describe("Shared across every query: only papers published in this year or earlier."),
-  venues: z
-    .array(z.string().min(1))
-    .optional()
-    .describe(
-      'Shared across every query: restrict to these conference short names ' +
-        '(e.g. ["NeurIPS", "ICML"]).',
-    ),
-  limit: z
-    .number()
-    .int()
-    .min(1)
-    .max(50)
-    .default(10)
-    .describe("Max papers in the merged, deduped result list (default 10, max 50)."),
-  detail: z
-    .boolean()
-    .default(true)
-    .describe(
-      "true (default): include the full abstract, ids, and contexts[] " +
-        "non-abstract matched spans for grounding. false: concise hits (title, " +
-        "authors, year, venue, citations, score, and a single grounding " +
-        "snippet) for token-saving triage. `matched_queries` provenance is " +
-        "always present. For the complete paper text call get_paper_fulltext.",
-    ),
-});
-
-const FullTextInput = z.object({
-  paper_id: z
-    .string()
-    .min(1)
-    .describe(
-      "Lune paper UUID, taken from a `search_papers`, `search_related_papers`, " +
-        "or `get_paper_citations` result.",
-    ),
-  format: z
-    .enum(["markdown", "json"])
-    .default("markdown")
-    .optional()
-    .describe(
-      "`markdown` returns one rendered document, ready to read or quote inline. " +
-        "`json` returns a structured section list, useful when you want to " +
-        "navigate by section name (methods / results / related work).",
-    ),
-  sections: z
-    .array(z.string().min(1))
-    .optional()
-    .describe(
-      "Return only these sections (case-insensitive heading match), " +
-        'e.g. ["Methods", "Results"]. Omit to return the whole document.',
-    ),
-});
-
-const CitationsInput = z.object({
-  paper_id: z
-    .string()
-    .min(1)
-    .describe(
-      "Lune paper UUID, taken from a `search_papers` or `search_related_papers` result.",
-    ),
-  direction: z
-    .enum(["cited_by", "cites"])
-    .default("cited_by")
-    .optional()
-    .describe(
-      "`cited_by`: indexed papers that cite this one (forward, follow-up work). " +
-        "`cites`: this paper's parsed references (back, what it built on).",
-    ),
-  limit: z
-    .number()
-    .int()
-    .min(1)
-    .max(100)
-    .default(25)
-    .optional()
-    .describe("Max citation edges to return per page (default 25, max 100)."),
-  offset: z
-    .number()
-    .int()
-    .min(0)
-    .default(0)
-    .optional()
-    .describe(
-      "Pagination offset; re-call with offset += limit while the response " +
-        "`has_more` is true. The response also reports `total`.",
-    ),
-});
-
-const RelatedInput = z.object({
-  paper_id: z.string().min(1).describe("Lune paper UUID to search neighbors for."),
-  limit: z.number().int().min(1).max(20).default(6).optional(),
-});
-
-const ExtractInput = z.object({
-  paper_ids: z
-    .array(z.string().min(1))
-    .min(1)
-    .max(50)
-    .describe(
-      "1 to 50 Lune paper UUIDs to extract from in ONE call. Take them from a " +
-        "`search_papers` / `search_papers_many` / `search_related_papers` / " +
-        "`get_paper_citations` result.",
-    ),
-  fields: z
-    .array(
-      z.object({
-        name: z
-          .string()
-          .min(1)
-          .describe(
-            "snake_case identifier; becomes the key for this field on every row " +
-              "(e.g. `dataset`, `headline_accuracy`).",
-          ),
-        type: z
-          .enum(["string", "number", "boolean", "string[]"])
-          .describe("Wire type the extracted value is coerced to."),
-        description: z
-          .string()
-          .optional()
-          .describe("What to pull for this field; sharpens the extraction."),
-      }),
-    )
-    .min(1)
-    .max(12)
-    .describe(
-      "1 to 12 fields to extract per paper. Each becomes a typed column on every " +
-        "row, keyed by its `name`.",
-    ),
-  instruction: z
-    .string()
-    .min(1)
-    .describe(
-      "Natural-language guidance for the extraction (e.g. \"Pull the primary " +
-        'evaluation dataset and the headline accuracy"). The model is told to use ' +
-        "only what the paper states.",
-    ),
-  sections: z
-    .array(z.string().min(1))
-    .optional()
-    .describe(
-      "Restrict extraction to these sections (case-insensitive heading match), " +
-        'e.g. ["Results", "Experiments"]. Omit to consider the whole paper.',
-    ),
-});
-
-const VerifyInput = z.object({
-  claims: z
-    .array(z.string().min(1))
-    .min(1)
-    .max(25)
-    .describe(
-      "1 to 25 natural-language factual claims to fact-check against the corpus " +
-        "in ONE call. Phrase each as a complete, self-contained assertion (e.g. " +
-        '"LoRA fine-tuning matches full fine-tuning on GLUE while training far ' +
-        'fewer parameters"), not a keyword bag. Each claim is retrieved and ' +
-        "judged independently, so you get one grounded verdict per claim.",
-    ),
-  context: z
-    .string()
-    .optional()
-    .describe(
-      "Optional shared framing passed to the judge for every claim, e.g. the " +
-        "surrounding paragraph or the question the claims answer. Use it to " +
-        "disambiguate terse claims; it does not change what is retrieved.",
-    ),
-  conference: z
-    .string()
-    .optional()
-    .describe(
-      'Restrict the evidence search to this conference short name, e.g. "CCS", ' +
-        '"NeurIPS". Shared across every claim.',
-    ),
-  year: z
-    .number()
-    .int()
-    .min(1990)
-    .max(2100)
-    .optional()
-    .describe("Restrict the evidence search to a single publication year."),
-  year_min: z
-    .number()
-    .int()
-    .min(1990)
-    .max(2100)
-    .optional()
-    .describe("Restrict the evidence search to this publication year or later. Shared across every claim."),
-  year_max: z
-    .number()
-    .int()
-    .min(1990)
-    .max(2100)
-    .optional()
-    .describe("Restrict the evidence search to this publication year or earlier. Shared across every claim."),
-  venues: z
-    .array(z.string().min(1))
-    .optional()
-    .describe(
-      'Restrict the evidence search to these conference short names ' +
-        '(e.g. ["NeurIPS", "ICML"]). Shared across every claim.',
-    ),
-});
-
-const GatherEvidenceInput = z.object({
-  task: z
-    .string()
-    .min(1)
-    .describe(
-      "The research goal in prose: what you are trying to establish. Drives " +
-        "requirement decomposition and the sufficiency judgment.",
-    ),
-  queries: z
-    .array(z.string().min(1))
-    .min(1)
-    .max(25)
-    .describe(
-      "Your initial search angles (full natural-language questions). One corpus " +
-        "search runs per angle; they are billed like search_papers_many.",
-    ),
-  requirements: z
-    .array(
-      z.object({
-        key: z.string().min(1).describe("snake_case id for this evidence slot."),
-        description: z.string().min(1).describe("What evidence this slot needs."),
-      }),
-    )
-    .min(1)
-    .max(12)
-    .optional()
-    .describe(
-      "Optional explicit evidence slots; omit to let the server derive them from `task`.",
-    ),
-  draft: z
-    .string()
-    .optional()
-    .describe(
-      "Optional current draft. Each sentence is checked for support against the " +
-        "gathered spans (no extra searches). The tool never rewrites your draft.",
-    ),
-  max_iterations: z
-    .number()
-    .int()
-    .min(1)
-    .max(5)
-    .default(1)
-    .describe(
-      "Sufficiency rounds. Default 1 is a one-shot advisor. Set >1 (with " +
-        "max_total_queries>len(queries)) to authorize bounded server-side follow-up searches.",
-    ),
-  max_total_queries: z
-    .number()
-    .int()
-    .min(1)
-    .max(25)
-    .optional()
-    .describe(
-      "Total search budget across all iterations (the billed ceiling). Defaults " +
-        "to len(queries). Must exceed len(queries) only when max_iterations>1.",
-    ),
-  conference: z
-    .string()
-    .optional()
-    .describe('Filter to this conference short name, e.g. "NeurIPS".'),
-  year: z.number().int().min(1990).max(2100).optional(),
-  year_min: z.number().int().min(1990).max(2100).optional(),
-  year_max: z.number().int().min(1990).max(2100).optional(),
-  venues: z
-    .array(z.string().min(1))
-    .optional()
-    .describe("Restrict to these conference short names."),
-});
-
-const ListConfsInput = z.object({
-  category: z
-    .string()
-    .optional()
-    .describe(
-      "Optional research-area filter, matched case-insensitively against the " +
-        "conference's field. Accepts short codes (`ai`, `ml`, `nlp`, `cv`, " +
-        "`security`, `databases`, `software`, `systems`) or any substring of the " +
-        "field name. Omit to list every conference.",
-    ),
-});
-
-const ConfPapersInput = z.object({
-  conference: z
-    .string()
-    .min(1)
-    .describe('Conference short name, e.g. "NeurIPS", "CCS", "ICLR".'),
-  // Year range mirrors `SearchInput.year` so a malformed input fails the
-  // same way across the two paper-listing tools.
-  year: z
-    .number()
-    .int()
-    .min(1990)
-    .max(2100)
-    .optional()
-    .describe("Restrict to a single year (e.g. 2024). Omit to span all years."),
-  limit: z
-    .number()
-    .int()
-    .min(1)
-    .max(100)
-    .default(20)
-    .optional()
-    .describe("Max papers to return per page (default 20, max 100)."),
-  offset: z
-    .number()
-    .int()
-    .min(0)
-    .default(0)
-    .optional()
-    .describe("Pagination offset; use to fetch subsequent pages."),
-  sort: z
-    .enum(["recency", "citations"])
-    .default("recency")
-    .optional()
-    .describe("`recency` (newest first, default) or `citations` (most-cited first)."),
-});
-
-// ─── Tool catalog ────────────────────────────────────────────────────────────
+// Tool catalog
 
 // Read-only retrieval tools that surface academic papers. `openWorldHint: true`
 // because the corpus indexes external publications, the underlying world that
@@ -543,14 +124,13 @@ export const PAPER_TOOLS: ToolDef[] = [
     outputSchema: SearchPapersOutput,
     annotations: READ_ONLY_OPEN_NONIDEMPOTENT,
     meta: ALWAYS_LOAD_META,
-    scopes: ["papers:read"],
   },
   {
     name: "search_papers_many",
     title: "Search papers (multi-query)",
     description:
       "Use this for a LITERATURE SWEEP or survey: a research question broad enough to need " +
-      "several angles, e.g. \"what's been done on X\", a related-work section, or a " +
+      'several angles, e.g. "what\'s been done on X", a related-work section, or a ' +
       "state-of-the-field summary. Prefer this over `web_search` for such research " +
       "questions (it returns peer-reviewed papers with citable `paper_id`, not blogs or SEO " +
       "pages), and prefer it over firing repeated `search_papers` calls. For a single " +
@@ -578,7 +158,6 @@ export const PAPER_TOOLS: ToolDef[] = [
     outputSchema: SearchPapersManyOutput,
     annotations: READ_ONLY_OPEN_NONIDEMPOTENT,
     meta: ALWAYS_LOAD_META,
-    scopes: ["papers:read"],
   },
   {
     name: "get_paper_fulltext",
@@ -590,13 +169,12 @@ export const PAPER_TOOLS: ToolDef[] = [
       "`search_related_papers`, or `get_paper_citations`. " +
       "`format=markdown` returns " +
       "one rendered document; `format=json` returns a structured section list. Pass " +
-      "`sections` (case-insensitive headings, e.g. [\"Methods\"]) to fetch only those " +
+      '`sections` (case-insensitive headings, e.g. ["Methods"]) to fetch only those ' +
       "sections instead of the whole document.",
     inputSchema: FullTextInput,
     // No outputSchema: response shape varies by `format` (markdown text vs
     // structured sections). Declaring one would mismatch one of the branches.
     annotations: READ_ONLY_OPEN,
-    scopes: ["papers:read"],
   },
   {
     name: "get_paper_citations",
@@ -611,7 +189,6 @@ export const PAPER_TOOLS: ToolDef[] = [
     inputSchema: CitationsInput,
     outputSchema: GetCitationsOutput,
     annotations: READ_ONLY_OPEN,
-    scopes: ["papers:read"],
   },
   {
     name: "list_conferences",
@@ -624,7 +201,6 @@ export const PAPER_TOOLS: ToolDef[] = [
     inputSchema: ListConfsInput,
     outputSchema: ListConferencesOutput,
     annotations: { ...READ_ONLY_OPEN, openWorldHint: false },
-    scopes: ["papers:read"],
   },
   {
     name: "get_conference_papers",
@@ -637,7 +213,6 @@ export const PAPER_TOOLS: ToolDef[] = [
     inputSchema: ConfPapersInput,
     outputSchema: GetConferencePapersOutput,
     annotations: READ_ONLY_OPEN,
-    scopes: ["papers:read"],
   },
   {
     name: "search_related_papers",
@@ -653,7 +228,6 @@ export const PAPER_TOOLS: ToolDef[] = [
     inputSchema: RelatedInput,
     outputSchema: SearchRelatedOutput,
     annotations: READ_ONLY_OPEN,
-    scopes: ["papers:read"],
   },
   {
     name: "extract_from_papers",
@@ -663,10 +237,10 @@ export const PAPER_TOOLS: ToolDef[] = [
       "columns (`fields`: each a snake_case `name`, a `type`, and an optional " +
       "`description`) and an `instruction`, and the server reads each paper's full " +
       "text and returns one typed row per paper. Use this when you need the SAME " +
-      "facts across many papers, e.g. \"dataset, model size, and reported accuracy " +
-      "for each of these papers\", instead of reading each full text yourself and " +
+      'facts across many papers, e.g. "dataset, model size, and reported accuracy ' +
+      'for each of these papers", instead of reading each full text yourself and ' +
       "transcribing by hand. Pass `sections` (case-insensitive headings, e.g. " +
-      "[\"Results\"]) to focus extraction and cut noise. The model is instructed to " +
+      '["Results"]) to focus extraction and cut noise. The model is instructed to ' +
       "use only what each paper states, not to infer; a field it can't ground may " +
       "be absent or null. Each row carries `truncated` (true when the paper's text " +
       "overflowed the budget and the tail was dropped, so treat it as partial). A " +
@@ -678,7 +252,6 @@ export const PAPER_TOOLS: ToolDef[] = [
     inputSchema: ExtractInput,
     outputSchema: ExtractOutput,
     annotations: READ_ONLY_OPEN,
-    scopes: ["papers:read"],
   },
   {
     name: "verify_claims",
@@ -710,7 +283,6 @@ export const PAPER_TOOLS: ToolDef[] = [
     // calls. NON-idempotent like search_papers / search_papers_many (NOT like a
     // pure lookup), so omit idempotentHint to keep clients from memoizing it.
     annotations: READ_ONLY_OPEN_NONIDEMPOTENT,
-    scopes: ["papers:read"],
   },
   {
     name: "gather_evidence",
@@ -734,11 +306,10 @@ export const PAPER_TOOLS: ToolDef[] = [
     inputSchema: GatherEvidenceInput,
     outputSchema: GatherEvidenceOutput,
     annotations: READ_ONLY_OPEN_NONIDEMPOTENT,
-    scopes: ["papers:read"],
   },
 ];
 
-// ─── Handler ─────────────────────────────────────────────────────────────────
+// Filters and conference resolution
 
 /**
  * Fetch the conferences list (cached on the API side for 10 min and
@@ -751,7 +322,7 @@ export const PAPER_TOOLS: ToolDef[] = [
  *   • No match / endpoint unreachable → return the raw input unchanged
  *     and let the downstream call's 404 surface as the agent's signal.
  */
-async function _resolveConferenceArg(
+async function resolveConferenceArg(
   api: KyInstance,
   raw: string,
 ): Promise<string> {
@@ -787,6 +358,351 @@ async function _resolveConferenceArg(
   }
 }
 
+/**
+ * Resolve the shared corpus filters (conference, year, year_min, year_max,
+ * venues) onto a request `body`. The conference filter's body key differs by
+ * route: single search writes `conference_short_name`, the batch / verify /
+ * gather routes write `conference`. Conference and each venue are canonicalised
+ * through the fuzzy resolver so a near-miss short name reaches the API as the
+ * value it expects.
+ */
+async function applySharedFilters(
+  api: KyInstance,
+  body: Record<string, unknown>,
+  filters: {
+    conference?: string;
+    year?: number;
+    year_min?: number;
+    year_max?: number;
+    venues?: string[];
+  },
+  conferenceKey: "conference" | "conference_short_name",
+): Promise<void> {
+  if (filters.conference) {
+    body[conferenceKey] = await resolveConferenceArg(api, filters.conference);
+  }
+  if (filters.year) body.year = filters.year;
+  if (filters.year_min !== undefined) body.year_min = filters.year_min;
+  if (filters.year_max !== undefined) body.year_max = filters.year_max;
+  if (filters.venues && filters.venues.length > 0) {
+    body.venues = await Promise.all(
+      filters.venues.map((v) => resolveConferenceArg(api, v)),
+    );
+  }
+}
+
+// Per-tool handlers
+
+type SearchArgs = ReturnType<typeof SearchInput.parse>;
+type FullTextArgs = ReturnType<typeof FullTextInput.parse>;
+
+/**
+ * search_papers with source="workspace": the API runs the same HyDE + rerank
+ * pipeline over the user's documents, returning flat reranked spans; group them
+ * into corpus-shaped doc hits so the agent reads the result identically to a
+ * corpus search. Corpus-only filters (conference/year/venues/sort_by/offset/
+ * detail) do not apply. `workspaces/search` is per-active-workspace
+ * (PER_PRINCIPAL_PATHS), so cachedJson bypasses the shared cache. The active
+ * workspace is bound to the credential server-side.
+ */
+async function workspaceSearch(
+  api: KyInstance,
+  a: SearchArgs,
+): Promise<ToolCallResult> {
+  const wr = await cachedJson(api, "post", "workspaces/search", {
+    json: { query: a.query, limit: a.limit },
+  });
+  return structuredJson(slimWorkspaceSearchAsHits(wr));
+}
+
+async function handleSearchPapers(
+  api: KyInstance,
+  args: unknown,
+): Promise<ToolCallResult> {
+  const a = SearchInput.parse(args);
+  if (a.source === "workspace") return workspaceSearch(api, a);
+  // Enriched by default; `detail: false` opts down to the concise shape.
+  const detail = a.detail ?? true;
+  // The catalog's body field is `conference_short_name`; surface as `conference` to the agent.
+  // zod 4 materialises `.default()` even on `.optional()` fields, so `limit`,
+  // `offset`, and `sort_by` are defined at runtime; the assertions narrow the
+  // residual `| undefined` carried by `.optional()`.
+  const body: Record<string, unknown> = {
+    query: a.query,
+    limit: a.limit,
+    offset: a.offset as number,
+    sort_by: a.sort_by as string,
+  };
+  await applySharedFilters(api, body, a, "conference_short_name");
+  // `detail` is an MCP-boundary projection knob, NOT an
+  // API request field: the /search response already carries
+  // `matched_chunks` per hit, and the API's SearchRequest is
+  // `extra="forbid"` (an unknown body field 422s). So we never send the
+  // flag upstream; we only decide here how to shape the response.
+  const r = await cachedJson(api, "post", "search", {
+    json: body,
+    defaultTtlMs: TTL_SEARCH,
+  });
+  return structuredJson(slimSearchResponse(r, detail));
+}
+
+async function handleSearchPapersMany(
+  api: KyInstance,
+  args: unknown,
+): Promise<ToolCallResult> {
+  const a = SearchManyInput.parse(args);
+  // Enriched by default; `detail: false` opts down to the concise shape.
+  const detail = a.detail ?? true;
+  // The batch request's body field is literally `conference` (a real
+  // field; `conference_short_name` is only a derived read-only property
+  // server-side), so this maps with NO rename, unlike single search.
+  // zod 4 materialises `.default()` so `limit` is defined at runtime; the
+  // assertion narrows the residual `| undefined`.
+  const body: Record<string, unknown> = {
+    queries: a.queries,
+    limit: a.limit as number,
+  };
+  await applySharedFilters(api, body, a, "conference");
+  // `detail` is an MCP-boundary projection knob, NOT an API field: the
+  // batch response already carries `matched_chunks` per hit, and the
+  // API's BatchSearchRequest is `extra="forbid"` (an unknown body field
+  // 422s). So we never send it upstream; we only shape the response here.
+  const r = await cachedJson(api, "post", "search/batch", {
+    json: body,
+    defaultTtlMs: TTL_SEARCH,
+    timeout: HEAVY_TOOL_TIMEOUT_MS,
+  });
+  return structuredJson(slimSearchManyResponse(r, detail));
+}
+
+/**
+ * get_paper_fulltext with source="workspace": read one of the user's uploaded
+ * documents by its workspace document id. The active workspace is bound to the
+ * credential server-side and the API re-checks the document belongs to it.
+ * `workspaces/document` is per-active-workspace (PER_PRINCIPAL_PATHS), so
+ * cachedJson bypasses the shared cache. Same markdown/json contract as the
+ * corpus full text.
+ */
+async function workspaceDocument(
+  api: KyInstance,
+  a: FullTextArgs,
+): Promise<ToolCallResult> {
+  const wbody: Record<string, unknown> = {
+    document_id: a.paper_id,
+    format: (a.format ?? "markdown") as string,
+  };
+  if (a.sections && a.sections.length > 0) wbody.sections = a.sections;
+  const wr = await cachedJson<{
+    body?: string;
+    sections?: unknown;
+    title?: string;
+  }>(api, "post", "workspaces/document", { json: wbody });
+  if ((a.format ?? "markdown") === "markdown" && typeof wr.body === "string") {
+    return plainText(wr.body);
+  }
+  return structuredJson(wr as Record<string, unknown>);
+}
+
+async function handleFullText(
+  api: KyInstance,
+  args: unknown,
+): Promise<ToolCallResult> {
+  const a = FullTextInput.parse(args);
+  if (a.source === "workspace") return workspaceDocument(api, a);
+  // Build searchParams from an array of pairs so each `sections` entry is
+  // its own repeated query param. A plain object value would be CSV-joined
+  // by Ky's URLSearchParams stringification, and FastAPI's `list[str]`
+  // param would then receive one comma-joined value, not a list.
+  const sp = new URLSearchParams([["format", a.format as string]]);
+  for (const s of a.sections ?? []) sp.append("sections", s);
+  const r = await cachedJson<{ body?: string; sections?: unknown }>(
+    api,
+    "get",
+    `papers/${encodeURIComponent(a.paper_id)}/fulltext`,
+    {
+      searchParams: sp,
+      defaultTtlMs: TTL_FULLTEXT,
+    },
+  );
+  // Markdown response carries a `body` field; JSON form carries `sections`.
+  if (a.format === "markdown" && typeof r.body === "string")
+    return plainText(r.body);
+  return structuredJson(r as Record<string, unknown>);
+}
+
+async function handleCitations(
+  api: KyInstance,
+  args: unknown,
+): Promise<ToolCallResult> {
+  const a = CitationsInput.parse(args);
+  // `limit` / `offset` carry zod `.default()`s, so they are defined at
+  // runtime; the assertions narrow the `.optional()` `| undefined`.
+  const r = await cachedJson(
+    api,
+    "get",
+    `papers/${encodeURIComponent(a.paper_id)}/citations`,
+    {
+      searchParams: {
+        direction: a.direction,
+        limit: a.limit as number,
+        offset: a.offset as number,
+      },
+      defaultTtlMs: TTL_CITATIONS,
+    },
+  );
+  return structuredJson(slimCitations(r));
+}
+
+async function handleListConferences(
+  api: KyInstance,
+  args: unknown,
+): Promise<ToolCallResult> {
+  const a = ListConfsInput.parse(args);
+  const sp: Record<string, string> = {};
+  if (a.category) sp.category = a.category;
+  const r = await cachedJson(api, "get", "conferences", {
+    searchParams: sp,
+    defaultTtlMs: TTL_CONFERENCES,
+  });
+  return structuredJson(slimConferenceList(r));
+}
+
+async function handleConferencePapers(
+  api: KyInstance,
+  args: unknown,
+): Promise<ToolCallResult> {
+  const a = ConfPapersInput.parse(args);
+  const conference = await resolveConferenceArg(api, a.conference);
+  // zod 4 materialises both `.default()`s even on `.optional()` fields,
+  // so `a.limit` / `a.offset` are guaranteed defined at runtime; the
+  // assertions narrow away the residual TS `| undefined` carried by
+  // `.optional()`.
+  const sp: Record<string, string | number> = {
+    limit: a.limit as number,
+    offset: a.offset as number,
+    sort: a.sort as string,
+  };
+  if (a.year) sp.year = a.year;
+  const r = await cachedJson(
+    api,
+    "get",
+    `conferences/${encodeURIComponent(conference)}/papers`,
+    {
+      searchParams: sp,
+      defaultTtlMs: TTL_CONFERENCE_PAPERS,
+    },
+  );
+  return structuredJson(slimConferencePapers(r, a.offset as number));
+}
+
+async function handleRelated(
+  api: KyInstance,
+  args: unknown,
+): Promise<ToolCallResult> {
+  const a = RelatedInput.parse(args);
+  const sp: Record<string, number> = { limit: a.limit as number };
+  const r = await cachedJson(
+    api,
+    "get",
+    `papers/${encodeURIComponent(a.paper_id)}/related`,
+    { searchParams: sp, defaultTtlMs: TTL_PAPER },
+  );
+  return structuredJson(slimRelated(r));
+}
+
+async function handleExtract(
+  api: KyInstance,
+  args: unknown,
+): Promise<ToolCallResult> {
+  const a = ExtractInput.parse(args);
+  // Every field maps 1:1 onto the API's ExtractRequest body (paper_ids,
+  // fields, instruction, sections), so the parsed input is the body. The
+  // response rows are already compact, so there is no slim projection: we
+  // pass the structured envelope straight through. `papers/extract` is on
+  // PER_PRINCIPAL_PATHS (source="workspace" reads the caller's active
+  // workspace), so cachedJson bypasses BOTH the shared cache and the
+  // single-flight: every call re-runs and never collapses onto another
+  // principal's response.
+  const body: Record<string, unknown> = {
+    paper_ids: a.paper_ids,
+    fields: a.fields,
+    instruction: a.instruction,
+    source: a.source ?? "corpus",
+  };
+  if (a.sections && a.sections.length > 0) body.sections = a.sections;
+  const r = await cachedJson(api, "post", "papers/extract", {
+    json: body,
+    defaultTtlMs: 0,
+    timeout: HEAVY_TOOL_TIMEOUT_MS,
+  });
+  return structuredJson(r as Record<string, unknown>);
+}
+
+async function handleVerify(
+  api: KyInstance,
+  args: unknown,
+): Promise<ToolCallResult> {
+  const a = VerifyInput.parse(args);
+  // Every field maps 1:1 onto the API's VerifyRequest body. `conference`
+  // is a real body field there (resolved server-side via
+  // resolve_search_filters), like the batch route, so it maps with NO
+  // rename; we still canonicalise it (and each `venues` entry) through the
+  // fuzzy resolver so a near-miss short name reaches the API as the value
+  // it expects. `claims/verify` is per-principal (it applies the caller's
+  // excluded_conference_ids to its evidence search) AND not in
+  // GLOBAL_CACHEABLE_PATHS, so cachedJson bypasses the shared cache and
+  // every call re-runs the verification.
+  const body: Record<string, unknown> = {
+    claims: a.claims,
+    source: a.source ?? "corpus",
+  };
+  if (a.context) body.context = a.context;
+  // Corpus filters do not apply to source="workspace" (the API ignores
+  // them); skip resolution so an unknown venue can't spuriously 422 a
+  // workspace verify.
+  if (a.source !== "workspace") {
+    await applySharedFilters(api, body, a, "conference");
+  }
+  const r = await cachedJson(api, "post", "claims/verify", {
+    json: body,
+    defaultTtlMs: 0,
+    timeout: HEAVY_TOOL_TIMEOUT_MS,
+  });
+  return structuredJson(r as Record<string, unknown>);
+}
+
+async function handleGatherEvidence(
+  api: KyInstance,
+  args: unknown,
+): Promise<ToolCallResult> {
+  const a = GatherEvidenceInput.parse(args);
+  // `conference` maps 1:1 (a real body field, like search_papers_many /
+  // verify_claims), resolved through the fuzzy resolver. evidence/gather is
+  // per-principal and not cacheable, so ttl 0 re-runs every call.
+  const body: Record<string, unknown> = {
+    task: a.task,
+    queries: a.queries,
+    source: a.source ?? "corpus",
+  };
+  if (a.requirements) body.requirements = a.requirements;
+  if (a.draft) body.draft = a.draft;
+  body.max_iterations = a.max_iterations;
+  if (a.max_total_queries !== undefined)
+    body.max_total_queries = a.max_total_queries;
+  // Corpus filters do not apply to source="workspace" (API ignores them).
+  if (a.source !== "workspace") {
+    await applySharedFilters(api, body, a, "conference");
+  }
+  const r = await cachedJson(api, "post", "evidence/gather", {
+    json: body,
+    defaultTtlMs: 0,
+    timeout: HEAVY_TOOL_TIMEOUT_MS,
+  });
+  return structuredJson(r as Record<string, unknown>);
+}
+
+// Dispatcher
+
 export async function callPaperTool(
   api: KyInstance,
   name: string,
@@ -794,240 +710,26 @@ export async function callPaperTool(
 ): Promise<ToolCallResult> {
   try {
     switch (name) {
-      case "search_papers": {
-        const a = SearchInput.parse(args);
-        // Enriched by default; `detail: false` opts down to the concise shape.
-        const detail = a.detail ?? true;
-        // The catalog's body field is `conference_short_name`; surface as `conference` to the agent.
-        // zod 4 materialises `.default()` even on `.optional()` fields, so `limit`,
-        // `offset`, and `sort_by` are defined at runtime; the assertions narrow the
-        // residual `| undefined` carried by `.optional()`.
-        const body: Record<string, unknown> = {
-          query: a.query,
-          limit: a.limit,
-          offset: a.offset as number,
-          sort_by: a.sort_by as string,
-        };
-        if (a.conference) {
-          body.conference_short_name = await _resolveConferenceArg(api, a.conference);
-        }
-        if (a.year) body.year = a.year;
-        if (a.year_min !== undefined) body.year_min = a.year_min;
-        if (a.year_max !== undefined) body.year_max = a.year_max;
-        if (a.venues && a.venues.length > 0) {
-          // Canonicalise each venue the same way the single `conference` filter
-          // does, so a fuzzy short name resolves to the API's expected value.
-          body.venues = await Promise.all(
-            a.venues.map((v) => _resolveConferenceArg(api, v)),
-          );
-        }
-        // `detail` is an MCP-boundary projection knob, NOT an
-        // API request field: the /search response already carries
-        // `matched_chunks` per hit, and the API's SearchRequest is
-        // `extra="forbid"` (an unknown body field 422s). So we never send the
-        // flag upstream; we only decide here how to shape the response.
-        const r = await cachedJson(api, "post", "search", {
-          json: body,
-          defaultTtlMs: TTL_SEARCH,
-        });
-        return structuredJson(slimSearchResponse(r, detail));
-      }
-      case "search_papers_many": {
-        const a = SearchManyInput.parse(args);
-        // Enriched by default; `detail: false` opts down to the concise shape.
-        const detail = a.detail ?? true;
-        // The batch request's body field is literally `conference` (a real
-        // field; `conference_short_name` is only a derived read-only property
-        // server-side), so this maps with NO rename, unlike single search.
-        // zod 4 materialises `.default()` so `limit` is defined at runtime; the
-        // assertion narrows the residual `| undefined`.
-        const body: Record<string, unknown> = {
-          queries: a.queries,
-          limit: a.limit as number,
-        };
-        if (a.conference) {
-          body.conference = await _resolveConferenceArg(api, a.conference);
-        }
-        if (a.year) body.year = a.year;
-        if (a.year_min !== undefined) body.year_min = a.year_min;
-        if (a.year_max !== undefined) body.year_max = a.year_max;
-        if (a.venues && a.venues.length > 0) {
-          body.venues = await Promise.all(
-            a.venues.map((v) => _resolveConferenceArg(api, v)),
-          );
-        }
-        // `detail` is an MCP-boundary projection knob, NOT an API field: the
-        // batch response already carries `matched_chunks` per hit, and the
-        // API's BatchSearchRequest is `extra="forbid"` (an unknown body field
-        // 422s). So we never send it upstream; we only shape the response here.
-        const r = await cachedJson(api, "post", "search/batch", {
-          json: body,
-          defaultTtlMs: TTL_SEARCH,
-        });
-        return structuredJson(slimSearchManyResponse(r, detail));
-      }
-      case "get_paper_fulltext": {
-        const a = FullTextInput.parse(args);
-        // Build searchParams from an array of pairs so each `sections` entry is
-        // its own repeated query param. A plain object value would be CSV-joined
-        // by Ky's URLSearchParams stringification, and FastAPI's `list[str]`
-        // param would then receive one comma-joined value, not a list.
-        const sp = new URLSearchParams([["format", a.format as string]]);
-        for (const s of a.sections ?? []) sp.append("sections", s);
-        const r = await cachedJson<{ body?: string; sections?: unknown }>(
-          api,
-          "get",
-          `papers/${encodeURIComponent(a.paper_id)}/fulltext`,
-          {
-            searchParams: sp,
-            defaultTtlMs: TTL_FULLTEXT,
-          },
-        );
-        // Markdown response carries a `body` field; JSON form carries `sections`.
-        if (a.format === "markdown" && typeof r.body === "string") return plainText(r.body);
-        return structuredJson(r as Record<string, unknown>);
-      }
-      case "get_paper_citations": {
-        const a = CitationsInput.parse(args);
-        // `limit` / `offset` carry zod `.default()`s, so they are defined at
-        // runtime; the assertions narrow the `.optional()` `| undefined`.
-        const r = await cachedJson(
-          api,
-          "get",
-          `papers/${encodeURIComponent(a.paper_id)}/citations`,
-          {
-            searchParams: {
-              direction: a.direction,
-              limit: a.limit as number,
-              offset: a.offset as number,
-            },
-            defaultTtlMs: TTL_CITATIONS,
-          },
-        );
-        return structuredJson(slimCitations(r));
-      }
-      case "list_conferences": {
-        const a = ListConfsInput.parse(args);
-        const sp: Record<string, string> = {};
-        if (a.category) sp.category = a.category;
-        const r = await cachedJson(api, "get", "conferences", {
-          searchParams: sp,
-          defaultTtlMs: TTL_CONFERENCES,
-        });
-        return structuredJson(slimConferenceList(r));
-      }
-      case "get_conference_papers": {
-        const a = ConfPapersInput.parse(args);
-        const conference = await _resolveConferenceArg(api, a.conference);
-        // zod 4 materialises both `.default()`s even on `.optional()` fields,
-        // so `a.limit` / `a.offset` are guaranteed defined at runtime; the
-        // assertions narrow away the residual TS `| undefined` carried by
-        // `.optional()`.
-        const sp: Record<string, string | number> = {
-          limit: a.limit as number,
-          offset: a.offset as number,
-          sort: a.sort as string,
-        };
-        if (a.year) sp.year = a.year;
-        const r = await cachedJson(
-          api,
-          "get",
-          `conferences/${encodeURIComponent(conference)}/papers`,
-          {
-            searchParams: sp,
-            defaultTtlMs: TTL_CONFERENCE_PAPERS,
-          },
-        );
-        return structuredJson(slimConferencePapers(r));
-      }
-      case "search_related_papers": {
-        const a = RelatedInput.parse(args);
-        const sp: Record<string, number> = { limit: a.limit as number };
-        const r = await cachedJson(
-          api,
-          "get",
-          `papers/${encodeURIComponent(a.paper_id)}/related`,
-          { searchParams: sp, defaultTtlMs: TTL_PAPER },
-        );
-        return structuredJson(slimRelated(r));
-      }
-      case "extract_from_papers": {
-        const a = ExtractInput.parse(args);
-        // Every field maps 1:1 onto the API's ExtractRequest body (paper_ids,
-        // fields, instruction, sections), so the parsed input is the body. The
-        // response rows are already compact, so there is no slim projection: we
-        // pass the structured envelope straight through. `papers/extract` is not
-        // a per-principal or globally-cacheable path, so cachedJson stores
-        // nothing (ttlMs=0) and every call re-runs the extraction.
-        const body: Record<string, unknown> = {
-          paper_ids: a.paper_ids,
-          fields: a.fields,
-          instruction: a.instruction,
-        };
-        if (a.sections && a.sections.length > 0) body.sections = a.sections;
-        const r = await cachedJson(api, "post", "papers/extract", {
-          json: body,
-          defaultTtlMs: 0,
-        });
-        return structuredJson(r as Record<string, unknown>);
-      }
-      case "verify_claims": {
-        const a = VerifyInput.parse(args);
-        // Every field maps 1:1 onto the API's VerifyRequest body. `conference`
-        // is a real body field there (resolved server-side via
-        // resolve_search_filters), like the batch route, so it maps with NO
-        // rename; we still canonicalise it (and each `venues` entry) through the
-        // fuzzy resolver so a near-miss short name reaches the API as the value
-        // it expects. `claims/verify` is per-principal (it applies the caller's
-        // excluded_conference_ids to its evidence search) AND not in
-        // GLOBAL_CACHEABLE_PATHS, so cachedJson bypasses the shared cache and
-        // every call re-runs the verification.
-        const body: Record<string, unknown> = { claims: a.claims };
-        if (a.context) body.context = a.context;
-        if (a.conference) {
-          body.conference = await _resolveConferenceArg(api, a.conference);
-        }
-        if (a.year) body.year = a.year;
-        if (a.year_min) body.year_min = a.year_min;
-        if (a.year_max) body.year_max = a.year_max;
-        if (a.venues && a.venues.length > 0) {
-          body.venues = await Promise.all(
-            a.venues.map((v) => _resolveConferenceArg(api, v)),
-          );
-        }
-        const r = await cachedJson(api, "post", "claims/verify", {
-          json: body,
-          defaultTtlMs: 0,
-        });
-        return structuredJson(r as Record<string, unknown>);
-      }
-      case "gather_evidence": {
-        const a = GatherEvidenceInput.parse(args);
-        // `conference` maps 1:1 (a real body field, like search_papers_many /
-        // verify_claims), resolved through the fuzzy resolver. evidence/gather is
-        // per-principal and not cacheable, so ttl 0 re-runs every call.
-        const body: Record<string, unknown> = { task: a.task, queries: a.queries };
-        if (a.requirements) body.requirements = a.requirements;
-        if (a.draft) body.draft = a.draft;
-        body.max_iterations = a.max_iterations;
-        if (a.max_total_queries !== undefined) body.max_total_queries = a.max_total_queries;
-        if (a.conference) {
-          body.conference = await _resolveConferenceArg(api, a.conference);
-        }
-        if (a.year) body.year = a.year;
-        if (a.year_min !== undefined) body.year_min = a.year_min;
-        if (a.year_max !== undefined) body.year_max = a.year_max;
-        if (a.venues && a.venues.length > 0) {
-          body.venues = await Promise.all(
-            a.venues.map((v) => _resolveConferenceArg(api, v)),
-          );
-        }
-        const r = await cachedJson(api, "post", "evidence/gather", {
-          json: body,
-          defaultTtlMs: 0,
-        });
-        return structuredJson(r as Record<string, unknown>);
-      }
+      case "search_papers":
+        return await handleSearchPapers(api, args);
+      case "search_papers_many":
+        return await handleSearchPapersMany(api, args);
+      case "get_paper_fulltext":
+        return await handleFullText(api, args);
+      case "get_paper_citations":
+        return await handleCitations(api, args);
+      case "list_conferences":
+        return await handleListConferences(api, args);
+      case "get_conference_papers":
+        return await handleConferencePapers(api, args);
+      case "search_related_papers":
+        return await handleRelated(api, args);
+      case "extract_from_papers":
+        return await handleExtract(api, args);
+      case "verify_claims":
+        return await handleVerify(api, args);
+      case "gather_evidence":
+        return await handleGatherEvidence(api, args);
       default:
         throw new Error(`unknown paper tool: ${name}`);
     }
@@ -1037,6 +739,6 @@ export async function callPaperTool(
     // message in-context. Non-HTTP errors (zod validation, the fuzzy
     // `InvalidParams`, the `unknown paper tool` guard) are re-thrown as
     // JSON-RPC protocol errors.
-    return await httpErrorToToolResult(e);
+    return await httpErrorToToolResult(e, name);
   }
 }

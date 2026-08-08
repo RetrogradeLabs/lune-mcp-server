@@ -28,7 +28,9 @@ describe("extractTokenHttp", () => {
   });
 
   it("extracts Bearer from PascalCase Authorization header", () => {
-    expect(extractTokenHttp({ Authorization: "Bearer pat_xyz" })).toBe("pat_xyz");
+    expect(extractTokenHttp({ Authorization: "Bearer pat_xyz" })).toBe(
+      "pat_xyz",
+    );
   });
 
   it("is case-insensitive on the scheme", () => {
@@ -45,10 +47,14 @@ describe("extractTokenHttp", () => {
   });
 
   it("throws on Basic scheme", () => {
-    expect(() => extractTokenHttp({ authorization: "Basic xx" })).toThrow(/bearer/i);
+    expect(() => extractTokenHttp({ authorization: "Basic xx" })).toThrow(
+      /bearer/i,
+    );
   });
 
   it("throws on empty bearer token", () => {
-    expect(() => extractTokenHttp({ authorization: "Bearer  " })).toThrow(/empty/i);
+    expect(() => extractTokenHttp({ authorization: "Bearer  " })).toThrow(
+      /empty/i,
+    );
   });
 });

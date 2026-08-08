@@ -1,15 +1,12 @@
 /**
  * Resource-server validation of Lune OAuth access tokens.
  *
- * The MCP server is the OAuth 2.1 *resource server* (RFC 9728): when an access
- * token is expired or invalid it MUST answer with a transport-level 401 so the
- * client's MCP OAuth layer (Claude Desktop, Cursor, ...) silently refreshes the
- * token and retries the request. Before this gate the server forwarded any
- * Bearer straight to the Lune API and mapped the API's downstream 401 to a *tool
- * execution error* (`errors.ts`), which the model surfaced as "your
- * authorization expired, please reconnect" instead of the client ever
- * refreshing. Access tokens live one hour, so without this the user re-consented
- * roughly hourly. See `.claude/rules/mcp.md` (Remote-MCP OAuth).
+ * The MCP server is the OAuth 2.1 *resource server* (RFC 9728): an expired/invalid
+ * access token MUST get a transport-level 401 so the client's MCP OAuth layer
+ * (Claude Desktop, Cursor, ...) silently refreshes and retries. Without this gate
+ * the API's downstream 401 mapped to a tool error the model surfaced as "reconnect"
+ * (no refresh), forcing roughly hourly re-consent (1h token TTL). See
+ * `.claude/rules/mcp.md` (Remote-MCP OAuth).
  *
  * Scope: only Lune's own OAuth tokens (RS256 JWTs minted by
  * `api.luneresearch.com`) are validated here. Personal Access Tokens (`lune_*`,
@@ -17,8 +14,18 @@
  * authority. JWKS fetch / availability failures FAIL OPEN (pass through) so a
  * transient inability to reach our own JWKS cannot brick every OAuth tool call.
  */
-import { createRemoteJWKSet, decodeProtectedHeader, jwtVerify } from "jose";
+import {
+  createRemoteJWKSet,
+  decodeJwt,
+  decodeProtectedHeader,
+  jwtVerify,
+} from "jose";
 import type { JWTVerifyGetKey } from "jose";
+
+// A small leeway so a modestly skewed client/task clock does not falsely flag a
+// still-valid (or just-issued) access token as expired and force a needless
+// re-auth. Negligible against the 1h access-token TTL.
+const CLOCK_TOLERANCE_S = 30;
 
 // jose error `code`s that mean the TOKEN ITSELF is bad: expired, forged, signed
 // by a rotated-out / unknown key, or carrying invalid claims (e.g. wrong issuer).
@@ -40,7 +47,9 @@ const TOKEN_ERROR_CODES = new Set<string>([
 ]);
 
 function authServerOrigin(): string {
-  return (process.env.LUNE_AUTH_SERVER_URL ?? "https://api.luneresearch.com").replace(/\/+$/, "");
+  return (
+    process.env.LUNE_AUTH_SERVER_URL ?? "https://api.luneresearch.com"
+  ).replace(/\/+$/, "");
 }
 
 // Lazily build and memoise the remote JWKS resolver. `createRemoteJWKSet` caches
@@ -48,7 +57,10 @@ function authServerOrigin(): string {
 // tracks key rotation, so a network fetch happens about once per rotation, not
 // per request. Re-created only when the auth-server origin changes (tests point
 // it at a local JWKS server via `LUNE_AUTH_SERVER_URL`).
-let jwksRef: { origin: string; resolve: ReturnType<typeof createRemoteJWKSet> } | null = null;
+let jwksRef: {
+  origin: string;
+  resolve: ReturnType<typeof createRemoteJWKSet>;
+} | null = null;
 function remoteJwks(): ReturnType<typeof createRemoteJWKSet> {
   const origin = authServerOrigin();
   if (!jwksRef || jwksRef.origin !== origin) {
@@ -103,10 +115,32 @@ export async function accessTokenNeedsReauth(
     // worse than the original bug: the refreshed token carries the same iss, so it
     // would 401 too and trip the client's "401 after successful auth" circuit
     // breaker, hard-breaking OAuth for everyone. The API stays the iss authority.
-    await jwtVerify(token, resolve, { algorithms: ["RS256"] });
+    await jwtVerify(token, resolve, {
+      algorithms: ["RS256"],
+      clockTolerance: CLOCK_TOLERANCE_S,
+    });
     return false; // signature + exp valid.
   } catch (e) {
     const code = (e as { code?: string }).code;
-    return code !== undefined && TOKEN_ERROR_CODES.has(code);
+    if (code !== undefined && TOKEN_ERROR_CODES.has(code)) return true;
+    // Fail-open path (JWKS infra fault, network error): we could not VERIFY the
+    // token, so normally we forward it and let the API decide. But if the token
+    // is plainly past its own `exp`, forwarding it dead-ends as an API 401 mapped
+    // to a tool error (no client refresh). Challenge instead, so the connector
+    // refreshes even during a JWKS hiccup. Decoding exp WITHOUT verifying the
+    // signature is safe here: returning true never grants access, it only
+    // triggers a refresh, and a forged token still fails at the API.
+    try {
+      const exp = decodeJwt(token).exp;
+      if (
+        typeof exp === "number" &&
+        exp < Date.now() / 1000 - CLOCK_TOLERANCE_S
+      ) {
+        return true;
+      }
+    } catch {
+      // Not a decodable JWT payload; fall through to fail-open.
+    }
+    return false;
   }
 }

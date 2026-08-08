@@ -15,7 +15,7 @@ export function extractTokenStdio(): string {
   if (!t || !t.trim()) {
     throw new Error(
       "LUNE_API_KEY env var is required for stdio MCP. Get a token at " +
-        "https://luneresearch.com/dashboard/credentials.",
+        "https://luneresearch.com/dashboard/settings/credentials.",
     );
   }
   return t.trim();

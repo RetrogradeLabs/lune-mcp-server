@@ -1,5 +1,9 @@
 import type { z } from "zod";
 
+import type { ToolCallResult } from "../tool-result.js";
+
+export type { ToolCallResult } from "../tool-result.js";
+
 /**
  * MCP tool annotations: required by OpenAI's Apps SDK per
  * https://developers.openai.com/apps-sdk/build/mcp-server. Validation error
@@ -26,8 +30,8 @@ export interface ToolAnnotations {
 
 /**
  * Each tool definition couples MCP fields (name, title, description, schema)
- * with platform metadata (annotations + OAuth scope) so a single source can
- * power both the MCP `tools/list` response and the ChatGPT App submission.
+ * with platform metadata (annotations) so a single source can power both the
+ * MCP `tools/list` response and the ChatGPT App submission.
  */
 export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
   name: string;
@@ -51,8 +55,6 @@ export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
    * (and the trigger in its description) is in context from session start.
    */
   meta?: Record<string, unknown>;
-  /** OAuth scopes the caller must hold. Aligned with API's `scopes_supported`. */
-  scopes: readonly string[];
 }
 
 /**
@@ -64,26 +66,9 @@ export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
  * "use this for research, not web_search" trigger) being present upfront is what
  * makes Lune reliably selected without a `ToolSearch` hop. See `.claude/rules/mcp.md`.
  */
-export const ALWAYS_LOAD_META: Record<string, unknown> = { "anthropic/alwaysLoad": true };
-
-export interface ToolCallResult {
-  content: Array<{ type: "text"; text: string }>;
-  /**
-   * Per MCP 2025-06-18: when a tool declares `outputSchema`, the response
-   * SHOULD include `structuredContent` matching that schema. We populate
-   * both fields (text + structured) so older clients that only read
-   * `content` keep working.
-   */
-  structuredContent?: Record<string, unknown>;
-  isError?: boolean;
-}
-
-/** Wrap any JSON-serialisable response as an MCP text content block. */
-export function jsonText(value: unknown): ToolCallResult {
-  return {
-    content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
-  };
-}
+export const ALWAYS_LOAD_META: Record<string, unknown> = {
+  "anthropic/alwaysLoad": true,
+};
 
 /**
  * Emit the same JSON in `content` (text) AND `structuredContent` so clients

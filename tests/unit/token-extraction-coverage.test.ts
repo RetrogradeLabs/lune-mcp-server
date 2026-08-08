@@ -56,7 +56,9 @@ describe("extractTokenHttp (coverage)", () => {
 
   it("reads the first value when the header arrives as an array", () => {
     expect(
-      extractTokenHttp({ authorization: ["Bearer lune_first", "Bearer other"] }),
+      extractTokenHttp({
+        authorization: ["Bearer lune_first", "Bearer other"],
+      }),
     ).toBe("lune_first");
   });
 

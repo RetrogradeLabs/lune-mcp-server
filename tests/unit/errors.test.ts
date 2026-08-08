@@ -3,7 +3,6 @@ import {
   httpErrorToToolResult,
   LuneErrorCode,
   mapHttpError,
-  toMcpError,
   toToolError,
 } from "../../src/errors.js";
 
@@ -31,7 +30,10 @@ describe("mapHttpError", () => {
   });
 
   it("403 → forbidden including required scopes", () => {
-    const e = mapHttpError(403, { error: "insufficient_scope", required: ["papers:read"] });
+    const e = mapHttpError(403, {
+      error: "insufficient_scope",
+      required: ["papers:read"],
+    });
     expect(e.code).toBe(LuneErrorCode.Forbidden);
     expect(e.data.required).toEqual(["papers:read"]);
     expect(e.message).toContain("papers:read");
@@ -57,7 +59,9 @@ describe("mapHttpError", () => {
   it("402 without a url ends with a period", () => {
     const e = mapHttpError(402, { error: "out_of_credits" });
     expect(e.code).toBe(LuneErrorCode.QuotaExhausted);
-    expect(e.message).toBe("Quota exhausted. Upgrade your plan or top up credits to continue.");
+    expect(e.message).toBe(
+      "Quota exhausted. Upgrade your plan or top up credits to continue.",
+    );
     expect(e.data.buy_credits_url).toBeUndefined();
   });
 
@@ -141,12 +145,6 @@ describe("mapHttpError", () => {
     const e = mapHttpError(401, {});
     expect(e.data.request_id).toBeUndefined();
   });
-
-  it("toMcpError wraps to McpError instance", () => {
-    const wrapped = toMcpError(mapHttpError(401, {}));
-    expect(wrapped.code).toBe(LuneErrorCode.Unauthorized);
-    expect(wrapped).toBeInstanceOf(Error);
-  });
 });
 
 describe("toToolError", () => {
@@ -179,7 +177,11 @@ describe("toToolError", () => {
     expect(r.isError).toBe(true);
     // 404 carries only `status` in data; status surfaces as http_status.
     expect(r.content[0]!.text).toBe(
-      "paper not found If you do not have a valid paper_id, call search_papers first.\nhttp_status=404",
+      "paper not found If you do not have a valid paper_id, call search_papers first. " +
+        "The id must match the source: a corpus paper_id comes from search_papers " +
+        "(source=corpus); a workspace document id comes from " +
+        "search_papers(source=workspace) and must be used with source=workspace; a " +
+        "guidance doc_id comes from search_research_guidance.\nhttp_status=404",
     );
   });
 
@@ -228,7 +230,9 @@ describe("httpErrorToToolResult", () => {
     const r = await httpErrorToToolResult(fake);
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toContain("Quota exhausted");
-    expect(r.content[0]!.text).toContain("buy_credits_url=https://lune/billing");
+    expect(r.content[0]!.text).toContain(
+      "buy_credits_url=https://lune/billing",
+    );
   });
 
   it("tolerates a non-JSON error body", async () => {
@@ -244,6 +248,34 @@ describe("httpErrorToToolResult", () => {
     const r = await httpErrorToToolResult(fake);
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toMatch(/server error/i);
+  });
+
+  it("maps a ky TimeoutError to a retryable isError result, not a thrown protocol error", async () => {
+    const timeout = Object.assign(new Error("Request timed out"), {
+      name: "TimeoutError",
+    });
+    const r = await httpErrorToToolResult(timeout, "gather_evidence");
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toMatch(/timed out|connection dropped/i);
+    expect(r.content[0]!.text).toContain("gather_evidence");
+    expect(r.content[0]!.text).toMatch(/retry/i);
+  });
+
+  it("maps a network error (ECONNRESET) to a retryable isError result", async () => {
+    const netErr = Object.assign(new Error("socket hang up"), {
+      code: "ECONNRESET",
+    });
+    const r = await httpErrorToToolResult(netErr);
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toMatch(/retry/i);
+  });
+
+  it("maps an undici fetch-failed TypeError to a retryable isError result", async () => {
+    const fetchFailed = Object.assign(new TypeError("fetch failed"), {
+      cause: { code: "ECONNREFUSED" },
+    });
+    const r = await httpErrorToToolResult(fetchFailed);
+    expect(r.isError).toBe(true);
   });
 });
 
@@ -268,5 +300,54 @@ describe("mapHttpError header + steer", () => {
     const m = mapHttpError(404, { detail: "Paper not found" });
     expect(m.message).toContain("Paper not found");
     expect(m.message).toContain("call search_papers");
+  });
+
+  it("steers paper-id tools to search_papers on 404", () => {
+    const m = mapHttpError(
+      404,
+      { detail: "Paper not found" },
+      undefined,
+      undefined,
+      "get_paper_fulltext",
+    );
+    expect(m.message).toContain("Paper not found");
+    expect(m.message).toContain("call search_papers");
+  });
+
+  it("does NOT surface the paper steer for conference tools", () => {
+    const conf = mapHttpError(
+      404,
+      { detail: "Conference 'xyz' not found" },
+      undefined,
+      undefined,
+      "get_conference_papers",
+    );
+    expect(conf.message).toContain("Conference 'xyz' not found");
+    expect(conf.message).not.toContain("call search_papers");
+    expect(conf.message).toContain("list_conferences");
+  });
+
+  it("steers a guidance-doc 404 to search_research_guidance, not search_papers", () => {
+    const m = mapHttpError(
+      404,
+      { detail: "Guidance document not found" },
+      undefined,
+      undefined,
+      "get_research_guidance_doc",
+    );
+    expect(m.message).toContain("Guidance document not found");
+    expect(m.message).not.toContain("call search_papers");
+    expect(m.message).toContain("search_research_guidance");
+  });
+
+  it("leaves the detail bare for tools with no recovery steer", () => {
+    const m = mapHttpError(
+      404,
+      { detail: "Nothing here" },
+      undefined,
+      undefined,
+      "search_papers",
+    );
+    expect(m.message).toBe("Nothing here");
   });
 });

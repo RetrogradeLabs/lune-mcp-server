@@ -1,6 +1,4 @@
-import { McpError } from "@modelcontextprotocol/sdk/types.js";
-
-import type { ToolCallResult } from "./tools/_shared.js";
+import type { ToolCallResult } from "./tool-result.js";
 
 /**
  * MCP error codes for Lune-specific failures. Picked from the JSON-RPC
@@ -38,11 +36,41 @@ interface ApiErrorBody {
   [k: string]: unknown;
 }
 
+// Most paper-tool 404s are an id from the WRONG namespace/source fed to a fetch
+// tool (e.g. a workspace document id used with source=corpus, or a corpus
+// paper_id used with source=workspace). Name the namespaces so the model
+// self-corrects on ANY client, not just our cloud agents.
+const PAPER_NOT_FOUND_STEER =
+  " If you do not have a valid paper_id, call search_papers first. The id " +
+  "must match the source: a corpus paper_id comes from search_papers " +
+  "(source=corpus); a workspace document id comes from " +
+  "search_papers(source=workspace) and must be used with source=workspace; a " +
+  "guidance doc_id comes from search_research_guidance.";
+
+// A 404's recovery hint must name the resource the CALLING tool addresses.
+// The paper-id steer (call search_papers, match the source) is actionable only
+// for paper-id tools; surfacing it verbatim on a conference/guidance 404
+// misleads the agent into search_papers, which cannot help. Tools absent from
+// this map (search_papers, list_*) get the bare detail/"Not found".
+const NOT_FOUND_STEER: Record<string, string> = {
+  get_paper_fulltext: PAPER_NOT_FOUND_STEER,
+  get_paper_citations: PAPER_NOT_FOUND_STEER,
+  search_related_papers: PAPER_NOT_FOUND_STEER,
+  extract_from_papers: PAPER_NOT_FOUND_STEER,
+  verify_claims: PAPER_NOT_FOUND_STEER,
+  gather_evidence: PAPER_NOT_FOUND_STEER,
+  get_research_guidance_doc:
+    " If you do not have a valid doc_id, call search_research_guidance first.",
+  get_conference_papers:
+    " If the conference is unknown, call list_conferences for valid short names.",
+};
+
 export function mapHttpError(
   status: number,
   body: ApiErrorBody | null | undefined,
   requestId?: string,
   retryAfterSeconds?: number,
+  toolName?: string,
 ): MappedError {
   const safeBody = body ?? {};
   const base: Record<string, unknown> = { status };
@@ -56,6 +84,20 @@ export function mapHttpError(
           "Unauthorized: token expired or revoked. Rotate your PAT or run `lune login` again.",
         data: base,
       };
+    case 402: {
+      const buyUrl =
+        typeof safeBody.buy_credits_url === "string"
+          ? safeBody.buy_credits_url
+          : undefined;
+      const message = buyUrl
+        ? `Quota exhausted. Upgrade your plan or top up credits to continue: ${buyUrl}`
+        : "Quota exhausted. Upgrade your plan or top up credits to continue.";
+      return {
+        code: LuneErrorCode.QuotaExhausted,
+        message,
+        data: { ...base, buy_credits_url: buyUrl },
+      };
+    }
     case 403: {
       const required = safeBody.required ?? [];
       const granted = safeBody.granted ?? [];
@@ -68,23 +110,16 @@ export function mapHttpError(
         data: { ...base, required, granted },
       };
     }
-    case 404:
+    case 404: {
+      const detail =
+        typeof safeBody.detail === "string" ? safeBody.detail : "Not found";
+      const steer = toolName
+        ? (NOT_FOUND_STEER[toolName] ?? "")
+        : PAPER_NOT_FOUND_STEER;
       return {
         code: LuneErrorCode.NotFound,
-        message:
-          (typeof safeBody.detail === "string" ? safeBody.detail : "Not found") +
-          " If you do not have a valid paper_id, call search_papers first.",
+        message: detail + steer,
         data: base,
-      };
-    case 402: {
-      const buyUrl = typeof safeBody.buy_credits_url === "string" ? safeBody.buy_credits_url : undefined;
-      const message = buyUrl
-        ? `Quota exhausted. Upgrade your plan or top up credits to continue: ${buyUrl}`
-        : "Quota exhausted. Upgrade your plan or top up credits to continue.";
-      return {
-        code: LuneErrorCode.QuotaExhausted,
-        message,
-        data: { ...base, buy_credits_url: buyUrl },
       };
     }
     case 429: {
@@ -92,7 +127,10 @@ export function mapHttpError(
         typeof safeBody.retry_after_seconds === "number"
           ? safeBody.retry_after_seconds
           : (retryAfterSeconds ?? 60);
-      const hint = typeof safeBody.upgrade_hint === "string" ? safeBody.upgrade_hint : undefined;
+      const hint =
+        typeof safeBody.upgrade_hint === "string"
+          ? safeBody.upgrade_hint
+          : undefined;
       return {
         code: LuneErrorCode.RateLimited,
         message: hint
@@ -123,32 +161,16 @@ export function mapHttpError(
   }
 }
 
-export function toMcpError(m: MappedError): McpError {
-  return new McpError(m.code, m.message, m.data);
-}
-
 /**
- * Render a mapped upstream error as an MCP "tool execution error": a normal
- * tool result with `isError: true` and a single text block carrying the
- * actionable message.
+ * Render a mapped upstream error as an MCP tool execution error (`isError: true`
+ * + a text block), NOT a JSON-RPC protocol error: per the MCP spec, tool
+ * execution errors reach the model so it can self-correct/retry, while protocol
+ * errors are captured client-side and never enter its context. So every upstream
+ * HTTP failure (incl. 429/402) belongs here.
  *
- * Per the MCP spec (Tools > Error Handling, rev 2025-06-18 and 2025-11-25),
- * upstream API failures and business-logic errors are Tool Execution Errors,
- * NOT JSON-RPC protocol errors: "Tool Execution Errors contain actionable
- * feedback that language models can use to self-correct and retry [...]
- * Clients SHOULD provide tool execution errors to language models to enable
- * self-correction." A JSON-RPC protocol error, by contrast, is captured by
- * the client and typically NOT forwarded into the model's context, so the
- * agent never sees our retry / buy-credits guidance and cannot recover. The
- * spec's own example tool execution error is a rate limit
- * ("API rate limit exceeded"), so 429 (transient, retryable) and 402
- * (quota / credits exhausted) both belong here, as does every other upstream
- * HTTP failure mapped by `mapHttpError`.
- *
- * The text leads with the human-readable message, then appends a compact
- * machine-readable footer (status + the actionable fields) on its own lines
- * so an agent can parse `retry_after_seconds` / `buy_credits_url` without a
- * separate structured channel (`content` is the field every client forwards).
+ * The footer appends the actionable fields (status, retry_after_seconds,
+ * buy_credits_url) on their own lines so the agent can parse them from `content`,
+ * the only channel every client forwards.
  */
 export function toToolError(m: MappedError): ToolCallResult {
   const footer: string[] = [];
@@ -159,7 +181,8 @@ export function toToolError(m: MappedError): ToolCallResult {
   if (typeof data.buy_credits_url === "string") {
     footer.push(`buy_credits_url=${data.buy_credits_url}`);
   }
-  if (typeof data.status === "number") footer.push(`http_status=${data.status}`);
+  if (typeof data.status === "number")
+    footer.push(`http_status=${data.status}`);
   const text = footer.length ? `${m.message}\n${footer.join(" ")}` : m.message;
   return { content: [{ type: "text", text }], isError: true };
 }
@@ -175,6 +198,43 @@ function asKyHttpError(e: unknown): KyHttpError["response"] | null {
   return (e as KyHttpError)?.response ?? null;
 }
 
+// Node/undici network failure codes a fresh attempt would heal.
+const _RETRYABLE_NET_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "EPIPE",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+/**
+ * True for a TRANSPORT failure (no HTTP response ever arrived): a ky per-call
+ * `TimeoutError` or a network error. These must reach the model as a retryable
+ * tool result, NOT a thrown JSON-RPC protocol error the client swallows. A heavy
+ * tool exceeding its 120s deadline, or a transient blip to the API, otherwise
+ * surfaced to the agent as an opaque "protocol error" it could not act on.
+ */
+function isRetryableTransportError(e: unknown): boolean {
+  const err = e as {
+    name?: string;
+    code?: string;
+    message?: string;
+    cause?: { code?: string };
+  };
+  if (err?.name === "TimeoutError") return true;
+  const code = err?.code ?? err?.cause?.code;
+  if (code && _RETRYABLE_NET_CODES.has(code)) return true;
+  // undici surfaces a bare network failure as a TypeError("fetch failed").
+  return (
+    err?.name === "TypeError" &&
+    (err.message ?? "").toLowerCase().includes("fetch failed")
+  );
+}
+
 /** Parse an HTTP `Retry-After` header (delta-seconds or HTTP-date) to seconds. */
 function parseRetryAfterHeader(value: string | null): number | undefined {
   if (!value) return undefined;
@@ -188,21 +248,16 @@ function parseRetryAfterHeader(value: string | null): number | undefined {
 }
 
 /**
- * Map a caught value to the right MCP error channel.
- *
- *   • ky `HTTPError` (an upstream Lune API failure) → resolve a
- *     `ToolCallResult` with `isError: true` so the agent receives the
- *     actionable message in-context (see `toToolError`).
- *   • Anything else (zod input-validation `ZodError`, the fuzzy-resolver's
- *     `InvalidParams` `McpError`, the `unknown tool` guard) → re-thrown so the
- *     SDK serialises it as a JSON-RPC protocol error. These are malformed
- *     requests / unknown tools, which the spec assigns to Protocol Errors and
- *     which a model is unlikely to recover from anyway.
- *
- * Returns the tool result for the HTTP-error case and never returns
- * (always throws) otherwise.
+ * Route a caught value to the right MCP error channel: a ky `HTTPError` (upstream
+ * API failure) becomes an isError tool result the agent can act on (see
+ * `toToolError`); anything else (zod `ZodError`, the fuzzy-resolver's
+ * `InvalidParams`, the unknown-tool guard) is re-thrown as a JSON-RPC protocol
+ * error. Throws for the non-HTTP case.
  */
-export async function httpErrorToToolResult(e: unknown): Promise<ToolCallResult> {
+export async function httpErrorToToolResult(
+  e: unknown,
+  toolName?: string,
+): Promise<ToolCallResult> {
   const response = asKyHttpError(e);
   if (response) {
     let body: ApiErrorBody | null = null;
@@ -212,8 +267,28 @@ export async function httpErrorToToolResult(e: unknown): Promise<ToolCallResult>
       body = null;
     }
     const requestId = response.headers.get("x-request-id") ?? undefined;
-    const retryAfter = parseRetryAfterHeader(response.headers.get("retry-after"));
-    return toToolError(mapHttpError(response.status, body, requestId, retryAfter));
+    const retryAfter = parseRetryAfterHeader(
+      response.headers.get("retry-after"),
+    );
+    return toToolError(
+      mapHttpError(response.status, body, requestId, retryAfter, toolName),
+    );
+  }
+  if (isRetryableTransportError(e)) {
+    // No HTTP response arrived (timeout / network drop). Surface a retryable
+    // tool result so the model can self-correct, not an opaque protocol error.
+    const label = toolName ? ` for ${toolName}` : "";
+    return {
+      content: [
+        {
+          type: "text",
+          text:
+            `The Lune API request${label} timed out or the connection dropped before a ` +
+            `response. This is usually transient; retry the call.`,
+        },
+      ],
+      isError: true,
+    };
   }
   throw e;
 }

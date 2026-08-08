@@ -17,7 +17,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { makeServer } from "../../src/server.js";
 
-const ENTRY_TOOLS = ["search_papers", "search_papers_many", "search_research_guidance"];
+const ENTRY_TOOLS = [
+  "search_papers",
+  "search_papers_many",
+  "search_research_guidance",
+];
 
 describe("alwaysLoad _meta survives the SDK client round-trip", () => {
   it("a real SDK client parses _meta['anthropic/alwaysLoad'] on exactly the entry tools", async () => {
@@ -25,16 +29,24 @@ describe("alwaysLoad _meta survives the SDK client round-trip", () => {
     // The makeClient factory is never invoked for tools/list (served locally).
     const server = makeServer(() => ({}) as never);
     await server.connect(serverT);
-    const client = new Client({ name: "roundtrip-test", version: "1.0.0" }, { capabilities: {} });
+    const client = new Client(
+      { name: "roundtrip-test", version: "1.0.0" },
+      { capabilities: {} },
+    );
     await client.connect(clientT);
 
     try {
       const { tools } = await client.listTools();
       // The full catalog parses (no tool rejected over the added _meta).
-      expect(tools.length).toBe(16);
+      expect(tools.length).toBe(12);
 
       const flagged = tools
-        .filter((t) => (t._meta as Record<string, unknown> | undefined)?.["anthropic/alwaysLoad"] === true)
+        .filter(
+          (t) =>
+            (t._meta as Record<string, unknown> | undefined)?.[
+              "anthropic/alwaysLoad"
+            ] === true,
+        )
         .map((t) => t.name)
         .sort();
       expect(flagged).toEqual([...ENTRY_TOOLS].sort());

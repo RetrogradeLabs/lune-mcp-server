@@ -118,11 +118,28 @@ interface RawSearchResponse {
   has_more?: boolean;
 }
 
-// Cohere Rerank v3.5 `rerank_score` is a calibrated 0..1 relevance. This floor
-// is a pragmatic "nothing strong matched" abstention signal. It is applied to
-// `rerank_score` ONLY (never the boosted `score`, which is not a calibrated
-// relevance): when no hit was reranked we have no calibrated basis to abstain.
+// Abstention floor on Cohere Rerank v3.5 `rerank_score` (calibrated 0..1). Applied
+// to `rerank_score` ONLY, never the boosted `score` (not a calibrated relevance);
+// when no hit was reranked there is no calibrated basis to abstain.
 const LOW_CONFIDENCE_THRESHOLD = 0.3;
+
+// Build the search-envelope abstention tail: best of the numeric `rerank_score`s
+// (null when none reranked), `low_confidence` when it falls below the floor.
+function withAbstention<T extends { rerank_score?: number }>(
+  results: T[],
+  hasMore: boolean,
+) {
+  const rerankScores = results
+    .map((h) => h.rerank_score)
+    .filter((s): s is number => typeof s === "number");
+  const bestScore = rerankScores.length ? Math.max(...rerankScores) : null;
+  return {
+    results,
+    has_more: hasMore,
+    best_score: bestScore,
+    low_confidence: bestScore !== null && bestScore < LOW_CONFIDENCE_THRESHOLD,
+  };
+}
 
 const SNIPPET_MAX = 280;
 const CONCISE_AUTHOR_LIMIT = 6;
@@ -140,15 +157,10 @@ function bestSnippet(p: RawPaper): string | undefined {
     : abstract;
 }
 
-// Project one hit. Always carries the final ranking `score` (which folds in a
-// citation/freshness boost, so it is NOT a calibrated relevance) and, when the
-// reranker ran, the raw `rerank_score` (Cohere Rerank v3.5, calibrated 0..1);
-// `rerank_score` is omitted for keyword / BM25-dominated queries that skip the
-// reranker. The default enriched shape returns the full paper (abstract, ids,
-// pdf link) plus its `contexts` array (the non-abstract matched
-// `matched_chunks` spans). `detail: false` opts down to a concise shape that
-// drops the heavier fields, trims the author list, and attaches a single
-// grounding `snippet` for cheap triage.
+// Project one hit. Carries the boosted `score` and (when the reranker ran) the
+// raw `rerank_score`; the latter is omitted for keyword/BM25 queries that skip
+// rerank. Enriched default = full paper + `contexts` (non-abstract matched spans);
+// `detail: false` drops heavy fields, trims authors, attaches one `snippet`.
 function projectHit(p: RawPaper, detail: boolean) {
   const base = slimPaper(p);
   const score = typeof p.score === "number" ? p.score : undefined;
@@ -178,17 +190,11 @@ function projectHit(p: RawPaper, detail: boolean) {
 }
 
 /**
- * Slim the hybrid-search response. Each hit carries the final ranking `score`
- * (boosted, NOT a calibrated relevance) and, when the reranker ran, the raw
- * `rerank_score` (Cohere Rerank v3.5, calibrated 0..1). The envelope adds
- * `best_score` and `low_confidence`, BOTH derived from `rerank_score` (the
- * calibrated value), so a consumer can threshold and abstain. When NO hit has a
- * numeric `rerank_score` (keyword / BM25-dominated queries that skip the
- * reranker), `best_score` is null and `low_confidence` is false: there is no
- * calibrated basis to abstain. By default each hit additionally carries the
- * abstract and a `contexts` array (its non-abstract `matched_chunks` from the
- * API: the exact matched text spans). Pass `detail: false` to opt down to the
- * concise snippet shape for very broad exploratory scans.
+ * Slim the hybrid-search response. The envelope's `best_score` / `low_confidence`
+ * derive from `rerank_score` ONLY (Cohere Rerank v3.5, calibrated 0..1), never the
+ * boosted `score`; when no hit was reranked (keyword / BM25 queries) `best_score`
+ * is null and `low_confidence` false (no calibrated basis to abstain). Per-hit
+ * shape is `projectHit` (enriched default vs `detail: false` concise).
  */
 export function slimSearchResponse(
   r: RawSearchResponse | unknown,
@@ -197,24 +203,109 @@ export function slimSearchResponse(
   const obj = (r ?? {}) as RawSearchResponse;
   const results = Array.isArray(obj.results) ? obj.results : [];
   const projected = results.map((p) => projectHit(p, detail));
-  // Abstention is keyed on the CALIBRATED rerank score only. A query that
-  // skipped the reranker (no numeric rerank_score on any hit) yields a null
-  // best_score and low_confidence=false: the boosted `score` is a different
-  // family (it can exceed 1.0) and must never feed the 0..1 abstention cut-off.
-  const rerankScores = projected
-    .map((h) => h.rerank_score)
-    .filter((s): s is number => typeof s === "number");
-  const bestScore = rerankScores.length ? Math.max(...rerankScores) : null;
-  return {
-    results: projected,
-    // The API pages search after the rerank/boost and reports whether more
-    // results exist past this window. Default to false when the field is
-    // absent (e.g. a pre-deploy API) so the agent never pages off the end.
-    has_more: typeof obj.has_more === "boolean" ? obj.has_more : false,
-    best_score: bestScore,
-    low_confidence:
-      bestScore !== null && bestScore < LOW_CONFIDENCE_THRESHOLD,
-  };
+  // The API pages search after the rerank/boost and reports whether more
+  // results exist past this window. Default to false when the field is absent
+  // (e.g. a pre-deploy API) so the agent never pages off the end.
+  return withAbstention(
+    projected,
+    typeof obj.has_more === "boolean" ? obj.has_more : false,
+  );
+}
+
+interface RawWorkspaceSpan {
+  document_id?: string | null;
+  chunk_id?: string | null;
+  filename?: string | null;
+  title?: string | null;
+  section_name?: string | null;
+  text?: string | null;
+  score?: number | null;
+  rerank_score?: number | null;
+}
+
+interface RawWorkspaceSearchResponse {
+  results?: RawWorkspaceSpan[] | unknown;
+}
+
+interface WorkspaceHit {
+  paper_id: string;
+  title: string;
+  authors: string[];
+  // year / conference are OMITTED (not null): SearchPapersOutput's PaperOut
+  // declares them `.optional()` (absent or a value, never null), so emitting
+  // null fails a schema-aware client's outputSchema validation. A workspace
+  // document has no bibliographic year/venue, so the fields are simply absent.
+  citation_count: number;
+  score: number | undefined;
+  rerank_score: number | undefined;
+  contexts: {
+    section?: string;
+    text: string;
+    score?: number;
+    chunk_id?: string;
+  }[];
+}
+
+/**
+ * Slim the workspace search response into the SAME hit shape as corpus search
+ * (`slimSearchResponse`), so `search_papers(source="workspace")` returns a
+ * uniform result the agent reads identically. The API returns flat reranked
+ * spans; we GROUP them by document into one hit per document (preserving the
+ * reranked order of first appearance), each span becoming a `contexts` entry. A
+ * workspace document carries no bibliographic metadata, so authors / year /
+ * venue / doi are empty and `paper_id` is the document id (for citing + reading
+ * via `get_paper_fulltext(source="workspace")`). `best_score` / `low_confidence`
+ * derive from `rerank_score` exactly as for the corpus.
+ */
+export function slimWorkspaceSearchAsHits(
+  r: RawWorkspaceSearchResponse | unknown,
+) {
+  const obj = (r ?? {}) as RawWorkspaceSearchResponse;
+  const spans = Array.isArray(obj.results) ? obj.results : [];
+  const byDoc = new Map<string, WorkspaceHit>();
+  for (const sp of spans) {
+    if (!sp || typeof sp.text !== "string" || sp.text.length === 0) continue;
+    const docId = sp.document_id ? String(sp.document_id) : "";
+    if (!docId) continue;
+    const score = typeof sp.score === "number" ? sp.score : undefined;
+    const rerank =
+      typeof sp.rerank_score === "number" ? sp.rerank_score : undefined;
+    let hit = byDoc.get(docId);
+    if (!hit) {
+      hit = {
+        paper_id: docId,
+        title: sp.title || sp.filename || "Untitled document",
+        authors: [],
+        citation_count: 0,
+        score,
+        rerank_score: rerank,
+        contexts: [],
+      };
+      byDoc.set(docId, hit);
+    } else {
+      // Keep the document's strongest span scores at the hit level.
+      if (
+        score !== undefined &&
+        (hit.score === undefined || score > hit.score)
+      ) {
+        hit.score = score;
+      }
+      if (
+        rerank !== undefined &&
+        (hit.rerank_score === undefined || rerank > hit.rerank_score)
+      ) {
+        hit.rerank_score = rerank;
+      }
+    }
+    hit.contexts.push({
+      section: sp.section_name || undefined,
+      text: sp.text,
+      score,
+      chunk_id: sp.chunk_id || undefined,
+    });
+  }
+  const results = [...byDoc.values()];
+  return withAbstention(results, false);
 }
 
 interface RawMatchedQuery {
@@ -261,7 +352,8 @@ export function slimSearchManyResponse(
           // Drop malformed provenance rather than fabricate a rank: `rank` is a
           // 1-based position, so a missing one has no meaningful default.
           .filter(
-            (mq) => mq && typeof mq.query === "string" && typeof mq.rank === "number",
+            (mq) =>
+              mq && typeof mq.query === "string" && typeof mq.rank === "number",
           )
           .map((mq) => ({ query: mq.query as string, rank: mq.rank as number }))
       : [],
@@ -308,20 +400,7 @@ export function slimRelated(rows: unknown) {
     papers: arr.map((raw) => {
       const p = raw as RawRelatedPaper;
       return {
-        paper_id: p.paper_id ?? p.id,
-        title: p.title,
-        authors: p.authors ?? [],
-        year: p.year ?? undefined,
-        doi: p.doi ?? undefined,
-        arxiv_id: p.arxiv_id ?? undefined,
-        abstract: p.abstract || undefined,
-        url: p.url ?? undefined,
-        pdf_cdn_url: p.pdf_cdn_url ?? undefined,
-        citation_count: p.citation_count ?? 0,
-        conference:
-          typeof p.conference === "string"
-            ? p.conference
-            : p.conference?.short_name,
+        ...slimPaper(raw as RawPaper),
         contexts: slimContexts(p.matched_chunks),
         similarity: typeof p.similarity === "number" ? p.similarity : undefined,
       };
@@ -385,61 +464,27 @@ interface RawConferencePapers {
 // page of N venue papers should stay light. Pagination is reported as `total`
 // + `has_more`, the same vocab every other paged tool uses (the API's
 // page/total_pages is collapsed away).
-export function slimConferencePapers(r: RawConferencePapers | unknown) {
+//
+// `has_more` is computed from the REQUESTED offset, not the API's `page`: the
+// API floors offset into `page = offset // limit + 1`, so a non-multiple-of-
+// limit offset (e.g. offset=5, limit=10) loses its remainder and `page*limit`
+// over/under-counts the consumed rows. `offset + returned_count < total` is the
+// only exact predicate (offset-based slicing returns min(limit, total-offset)
+// rows, so the last page lands exactly on `total`).
+export function slimConferencePapers(
+  r: RawConferencePapers | unknown,
+  offset = 0,
+) {
   const obj = (r ?? {}) as RawConferencePapers;
-  const page = obj.page ?? 1;
-  const limit = obj.limit ?? 0;
   const total = obj.total ?? 0;
+  const papers = (obj.papers ?? []).map((p) => {
+    const { abstract: _abstract, ...rest } = slimPaper(p);
+    return rest;
+  });
   return {
-    papers: (obj.papers ?? []).map((p) => {
-      const { abstract: _abstract, ...rest } = slimPaper(p);
-      return rest;
-    }),
+    papers,
     total: obj.total,
-    has_more: limit > 0 && page * limit < total,
-  };
-}
-
-interface RawSubscription {
-  id?: string;
-  conference_id?: string;
-  created_at?: string;
-}
-
-export function slimSubscription(s: RawSubscription) {
-  return {
-    id: s.id,
-    conference_id: s.conference_id,
-    created_at: s.created_at,
-  };
-}
-
-export function slimSubscriptionList(list: unknown) {
-  const arr = Array.isArray(list) ? list : [];
-  return {
-    subscriptions: arr
-      .filter(Boolean)
-      .map((s) => slimSubscription(s as RawSubscription)),
-  };
-}
-
-interface RawDrainPaper extends RawPaper {
-  occurred_at?: string;
-}
-
-interface RawDrainResponse {
-  papers?: RawDrainPaper[];
-  next_cursor?: string | null;
-}
-
-export function slimDrainResponse(r: RawDrainResponse | unknown) {
-  const obj = (r ?? {}) as RawDrainResponse;
-  return {
-    papers: (obj.papers ?? []).map((p) => ({
-      ...slimPaper(p),
-      occurred_at: p.occurred_at,
-    })),
-    next_cursor: obj.next_cursor ?? null,
+    has_more: offset + papers.length < total,
   };
 }
 

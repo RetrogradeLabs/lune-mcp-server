@@ -85,7 +85,9 @@ describe("cli entrypoint", () => {
   it("prints help with --help and does not start a transport", async () => {
     await loadCliWith(["--help"]);
     expect(stdoutSpy).toHaveBeenCalled();
-    const printed = stdoutSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("");
+    const printed = stdoutSpy.mock.calls
+      .map((c: unknown[]) => String(c[0]))
+      .join("");
     expect(printed).toContain("lune-mcp");
     expect(printed).toContain("Usage:");
     expect(runStdio).not.toHaveBeenCalled();
@@ -106,14 +108,18 @@ describe("cli entrypoint", () => {
   it("errors and exits 1 when --port has no argument", async () => {
     await loadCliWith(["--port"]);
     expect(stderrSpy).toHaveBeenCalled();
-    const printed = stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("");
+    const printed = stderrSpy.mock.calls
+      .map((c: unknown[]) => String(c[0]))
+      .join("");
     expect(printed).toContain("--port requires an argument");
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
   it("errors and exits 1 when --port is not a number", async () => {
     await loadCliWith(["--port", "abc"]);
-    const printed = stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("");
+    const printed = stderrSpy.mock.calls
+      .map((c: unknown[]) => String(c[0]))
+      .join("");
     expect(printed).toContain("invalid --port: abc");
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
@@ -121,7 +127,9 @@ describe("cli entrypoint", () => {
   it("errors and exits 1 when the stdio transport throws an Error", async () => {
     runStdio.mockRejectedValue(new Error("transport down"));
     await loadCliWith([]);
-    const printed = stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("");
+    const printed = stderrSpy.mock.calls
+      .map((c: unknown[]) => String(c[0]))
+      .join("");
     expect(printed).toContain("lune-mcp: transport down");
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
@@ -129,7 +137,9 @@ describe("cli entrypoint", () => {
   it("stringifies non-Error rejections in the failure handler", async () => {
     runStdio.mockRejectedValue("plain string failure");
     await loadCliWith([]);
-    const printed = stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("");
+    const printed = stderrSpy.mock.calls
+      .map((c: unknown[]) => String(c[0]))
+      .join("");
     expect(printed).toContain("lune-mcp: plain string failure");
     expect(exitSpy).toHaveBeenCalledWith(1);
   });

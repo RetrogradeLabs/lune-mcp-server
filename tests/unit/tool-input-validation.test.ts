@@ -18,7 +18,6 @@ import { describe, it, expect, beforeEach } from "vitest";
 import type { KyInstance } from "ky";
 import { callPaperTool } from "../../src/tools/papers.js";
 import { callGuidanceTool } from "../../src/tools/guidance.js";
-import { callSubsTool } from "../../src/tools/subscriptions.js";
 import { TOOL_RESPONSE_CACHE } from "../../src/cache.js";
 
 beforeEach(async () => {
@@ -76,7 +75,8 @@ describe("search_papers input validation", () => {
   it("rejects missing query (undefined)", async () => {
     const { ky, calls } = fakeKy();
     await expectZodReject(
-      () => callPaperTool(ky, "search_papers", {} as unknown as { query: string }),
+      () =>
+        callPaperTool(ky, "search_papers", {} as unknown as { query: string }),
       calls,
     );
   });
@@ -135,8 +135,7 @@ describe("search_papers input validation", () => {
   it("rejects out-of-range year (before printing press)", async () => {
     const { ky, calls } = fakeKy();
     await expectZodReject(
-      () =>
-        callPaperTool(ky, "search_papers", { query: "x", year: 1000 }),
+      () => callPaperTool(ky, "search_papers", { query: "x", year: 1000 }),
       calls,
     );
   });
@@ -144,8 +143,7 @@ describe("search_papers input validation", () => {
   it("rejects far-future year", async () => {
     const { ky, calls } = fakeKy();
     await expectZodReject(
-      () =>
-        callPaperTool(ky, "search_papers", { query: "x", year: 9999 }),
+      () => callPaperTool(ky, "search_papers", { query: "x", year: 9999 }),
       calls,
     );
   });
@@ -192,7 +190,11 @@ describe("search_related_papers input validation", () => {
   it("rejects zero limit", async () => {
     const { ky, calls } = fakeKy();
     await expectZodReject(
-      () => callPaperTool(ky, "search_related_papers", { paper_id: "p1", limit: 0 }),
+      () =>
+        callPaperTool(ky, "search_related_papers", {
+          paper_id: "p1",
+          limit: 0,
+        }),
       calls,
     );
   });
@@ -200,7 +202,10 @@ describe("search_related_papers input validation", () => {
   it("accepts the max limit", async () => {
     const { ky, calls, setResponse } = fakeKy();
     setResponse([]);
-    await callPaperTool(ky, "search_related_papers", { paper_id: "p1", limit: 20 });
+    await callPaperTool(ky, "search_related_papers", {
+      paper_id: "p1",
+      limit: 20,
+    });
     expect(calls).toHaveLength(1);
   });
 });
@@ -238,6 +243,18 @@ describe("get_paper_fulltext input validation", () => {
       format: "json",
     });
     expect(calls).toHaveLength(1);
+  });
+
+  it("rejects a dot-segment paper_id that would rewrite the URL path", async () => {
+    // ".." would normalize /papers/../fulltext -> /fulltext (a different
+    // endpoint) instead of a clean 404. Must fail validation, not fetch.
+    for (const bad of [".", ".."]) {
+      const { ky, calls } = fakeKy();
+      await expectZodReject(
+        () => callPaperTool(ky, "get_paper_fulltext", { paper_id: bad }),
+        calls,
+      );
+    }
   });
 });
 
@@ -380,84 +397,18 @@ describe("search_research_guidance input validation", () => {
   });
 });
 
-// ─── create_subscription ────────────────────────────────────────────────────
+// ─── get_conference_papers ──────────────────────────────────────────────────
 
-describe("create_subscription input validation", () => {
-  it("rejects missing conference", async () => {
-    const { ky, calls } = fakeKy();
-    await expectZodReject(
-      () =>
-        callSubsTool(
-          ky,
-          "subscribe_conference",
-          {} as unknown as { conference: string },
-        ),
-      calls,
-    );
-  });
-
-  it("rejects empty conference", async () => {
-    const { ky, calls } = fakeKy();
-    await expectZodReject(
-      () => callSubsTool(ky, "subscribe_conference", { conference: "" }),
-      calls,
-    );
-  });
-
-  it("accepts notify_email + notify_in_app booleans", async () => {
-    const { ky, calls, setResponse } = fakeKy();
-    setResponse({ id: "sub_1" });
-    await callSubsTool(ky, "subscribe_conference", {
-      conference: "CCS",
-      notify_email: true,
-      notify_in_app: false,
-    });
-    expect(calls).toHaveLength(1);
-  });
-
-  it("rejects non-boolean notify_email", async () => {
-    const { ky, calls } = fakeKy();
-    await expectZodReject(
-      () =>
-        callSubsTool(ky, "subscribe_conference", {
-          conference: "CCS",
-          notify_email: "yes" as unknown as boolean,
-        }),
-      calls,
-    );
-  });
-});
-
-// ─── delete_subscription / drain_subscription ───────────────────────────────
-
-describe("subscription mutators input validation", () => {
-  it("delete_subscription rejects missing id", async () => {
-    const { ky, calls } = fakeKy();
-    await expectZodReject(
-      () =>
-        callSubsTool(
-          ky,
-          "unsubscribe_conference",
-          {} as unknown as { subscription_id: string },
-        ),
-      calls,
-    );
-  });
-
-  it("delete_subscription rejects empty id", async () => {
-    const { ky, calls } = fakeKy();
-    await expectZodReject(
-      () =>
-        callSubsTool(ky, "unsubscribe_conference", { subscription_id: "" }),
-      calls,
-    );
-  });
-
-  it("get_subscription_updates accepts empty args (no cursor, no id)", async () => {
-    const { ky, calls, setResponse } = fakeKy();
-    setResponse({ papers: [], next_cursor: null });
-    await callSubsTool(ky, "get_subscription_updates", {});
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.url).toBe("subscriptions/updates");
+describe("get_conference_papers input validation", () => {
+  it("rejects a dot-segment conference that would rewrite the URL", async () => {
+    // ".." -> /conferences/../papers normalizes to a different endpoint; must
+    // fail validation, not fetch (same hardening as paper/guidance ids).
+    for (const bad of [".", ".."]) {
+      const { ky, calls } = fakeKy();
+      await expectZodReject(
+        () => callPaperTool(ky, "get_conference_papers", { conference: bad }),
+        calls,
+      );
+    }
   });
 });
