@@ -7,11 +7,24 @@ import {
 } from "../../src/errors.js";
 
 describe("mapHttpError", () => {
-  it("401 → unauthorized with rotate hint", () => {
+  it("401 → unauthorized with a reconnect hint for any client", () => {
     const e = mapHttpError(401, {}, "req-1");
     expect(e.code).toBe(LuneErrorCode.Unauthorized);
-    expect(e.message).toMatch(/rotate|lune login/i);
+    expect(e.message).toMatch(/re-authorize the connector/i);
+    expect(e.message).toMatch(/lune login/i);
     expect(e.data.request_id).toBe("req-1");
+  });
+
+  it("401 account_suspended points at the appeal address, not a token rotation", () => {
+    // Rotating a credential cannot lift a suspension, so the old "rotate your
+    // PAT" line sent the user down a dead end.
+    const e = mapHttpError(401, {
+      error: "account_suspended",
+      appeal_email: "appeal@luneresearch.com",
+    });
+    expect(e.message).toContain("suspended");
+    expect(e.message).toContain("appeal@luneresearch.com");
+    expect(e.message).not.toMatch(/lune login/i);
   });
 
   it("429 → rate_limited with retry_after", () => {
@@ -39,10 +52,51 @@ describe("mapHttpError", () => {
     expect(e.message).toContain("papers:read");
   });
 
+  it("403 reads the scope list out of FastAPI's nested detail", () => {
+    // `require_scope` raises HTTPException(403, detail={...}), so this is the
+    // shape production actually sends; reading only the flat body dropped the
+    // scope list and left the agent with an unactionable "lacks the scope".
+    const e = mapHttpError(403, {
+      detail: {
+        error: "insufficient_scope",
+        required: ["guidance:read"],
+        granted: ["papers:read"],
+      },
+    });
+    expect(e.message).toContain("guidance:read");
+    expect(e.data.required).toEqual(["guidance:read"]);
+    expect(e.data.granted).toEqual(["papers:read"]);
+  });
+
   it("404 surfaces detail text when available", () => {
     const e = mapHttpError(404, { detail: "paper not found" });
     expect(e.code).toBe(LuneErrorCode.NotFound);
     expect(e.message).toContain("paper not found");
+  });
+
+  it("422 names the offending argument instead of 'Unexpected 422'", () => {
+    // FastAPI's 422 body is an ARRAY of {loc, msg}; the string-detail path
+    // rendered it as "Unexpected 422", so the model retried the same bad call.
+    const e = mapHttpError(
+      422,
+      {
+        detail: [
+          {
+            type: "value_error",
+            loc: ["body", "fields", 0, "name"],
+            msg: "Value error, field name 'model_dump' is reserved",
+          },
+        ],
+      },
+      undefined,
+      undefined,
+      "extract_from_papers",
+    );
+    expect(e.code).toBe(LuneErrorCode.InvalidParams);
+    expect(e.message).toContain(
+      "fields.0.name: field name 'model_dump' is reserved",
+    );
+    expect(e.message).toMatch(/retrying unchanged fails identically/i);
   });
 
   it("402 → quota exhausted with buy-credits url", () => {
@@ -51,18 +105,239 @@ describe("mapHttpError", () => {
       buy_credits_url: "https://x/billing",
     });
     expect(e.code).toBe(LuneErrorCode.QuotaExhausted);
-    expect(e.message).toContain("Quota exhausted");
+    expect(e.message).toContain("Lune quota exhausted");
     expect(e.message).toContain("https://x/billing");
     expect(e.data.buy_credits_url).toBe("https://x/billing");
   });
 
-  it("402 without a url ends with a period", () => {
+  it("402 with no facts at all still hands the user a way out", () => {
+    // The body a reader could not parse, or an API that sent nothing but the
+    // code. This used to render "you ran out, stop calling Lune" and no way to
+    // fix it, which ends the user's session on a dead end.
     const e = mapHttpError(402, { error: "out_of_credits" });
     expect(e.code).toBe(LuneErrorCode.QuotaExhausted);
-    expect(e.message).toBe(
-      "Quota exhausted. Upgrade your plan or top up credits to continue.",
+    // Guidance is client-side, so it survives an API that sends no facts.
+    expect(e.message).toContain("did NOT run");
+    expect(e.message).toContain("Retrying will fail the same way");
+    expect(e.message).toContain("tell the user");
+    expect(e.message).toContain("top up credits or move to a bigger plan");
+    expect(e.message).toContain(
+      "https://luneresearch.com/dashboard/settings/billing",
     );
-    expect(e.data.buy_credits_url).toBeUndefined();
+    expect(e.message).not.toContain("undefined");
+    // Structured readers reach the same page the prose names.
+    expect(e.data.buy_credits_url).toBe(
+      "https://luneresearch.com/dashboard/settings/billing",
+    );
+    expect(e.data.upgrade_url).toBe(e.data.buy_credits_url);
+  });
+
+  it("402 renders the API's quota facts, reset instant and upgrade path", () => {
+    const e = mapHttpError(402, {
+      error: "out_of_credits",
+      reason: "out_of_capacity",
+      detail: "Out of Lune requests: this call needs 1 and nothing is left.",
+      tier: "free",
+      units_required: 1,
+      daily_limit: 10,
+      used_today: 10,
+      remaining_today: 0,
+      credits_remaining: 0,
+      max_units_now: 0,
+      resets_at: "2026-08-16T00:00:00Z",
+      upgrade_hint:
+        "A higher plan raises the daily allowance: Pro 300/day, Max 600/day.",
+      upgrade_url: "https://lune/dashboard/settings/billing",
+      buy_credits_url: "https://lune/dashboard/settings/billing",
+    });
+    expect(e.message).toContain(
+      "Usage: 10/10 requests used in today's allowance (free plan), 0 prepaid credits left.",
+    );
+    expect(e.message).toContain("resets at 2026-08-16T00:00:00Z");
+    expect(e.message).toContain("Pro 300/day, Max 600/day");
+    expect(e.message).toContain("https://lune/dashboard/settings/billing");
+    expect(e.message).toContain("stop calling Lune tools");
+    // Nothing is spendable, so there is no smaller retry to suggest.
+    expect(e.message).not.toContain("Retry with");
+    expect(e.data.resets_at).toBe("2026-08-16T00:00:00Z");
+    expect(e.data.daily_limit).toBe(10);
+    expect(e.data.credits_remaining).toBe(0);
+    expect(e.data.max_units_now).toBe(0);
+  });
+
+  it("402 on the largest plan points at credits, never at an upgrade", () => {
+    // The API's hint is the only thing that knows whether a bigger plan exists
+    // for this org, so pairing it with our own "or move to a bigger plan" would
+    // contradict it in the same breath, on the one tier where that is a dead end.
+    const e = mapHttpError(402, {
+      error: "out_of_credits",
+      reason: "out_of_capacity",
+      tier: "max",
+      units_required: 1,
+      daily_limit: 600,
+      used_today: 600,
+      remaining_today: 0,
+      credits_remaining: 0,
+      max_units_now: 0,
+      upgrade_hint:
+        "This is already the largest daily allowance, so prepaid credits are " +
+        "the only way to add capacity today.",
+      buy_credits_url: "https://x/billing",
+    });
+    expect(e.message).toContain("prepaid credits are the only way");
+    expect(e.message).not.toContain("bigger plan");
+    expect(e.message).toContain("Send the user to https://x/billing");
+  });
+
+  it("402 on an oversized batch asks for a retry that actually fits, and never says stop", () => {
+    // 3 daily + 1 credit serves a batch of 3, NOT 4: a call is paid from one
+    // lane, all-or-nothing, so advertising the sum sent the agent into a second
+    // guaranteed 402. The API reports the servable size; we must not re-derive it.
+    const e = mapHttpError(
+      402,
+      {
+        error: "out_of_credits",
+        reason: "call_larger_than_remaining",
+        tier: "free",
+        units_required: 25,
+        daily_limit: 10,
+        used_today: 7,
+        remaining_today: 3,
+        credits_remaining: 1,
+        max_units_now: 3,
+        resets_at: "2026-08-16T00:00:00Z",
+      },
+      undefined,
+      undefined,
+      "search_papers_many",
+    );
+    expect(e.message).toContain("the most Lune can serve right now is 3");
+    expect(e.message).toContain("Retry with fewer `queries`");
+    expect(e.message).toContain("needs 3 or fewer");
+    expect(e.message).not.toContain("at most 4");
+    // Retry advice and a stop instruction must never ship together.
+    expect(e.message).not.toMatch(/stop calling Lune tools/i);
+    // The dashboard timeline string-matches "quota" to render a hard
+    // quota-exhausted step, which is the wrong label for a retryable batch.
+    expect(e.message.toLowerCase()).not.toContain("quota");
+    expect(e.data.max_units_now).toBe(3);
+  });
+
+  it("402 does not promise the reset for a call bigger than the whole allowance", () => {
+    // units > daily_limit skips the daily lane entirely, so waiting a day changes
+    // nothing for THIS call. Promising the reset costs the user a day.
+    const e = mapHttpError(402, {
+      error: "out_of_credits",
+      reason: "out_of_capacity",
+      tier: "free",
+      units_required: 20,
+      daily_limit: 10,
+      used_today: 10,
+      remaining_today: 0,
+      credits_remaining: 0,
+      max_units_now: 0,
+      resets_at: "2026-08-16T00:00:00Z",
+    });
+    expect(e.message).toContain("so will retrying after the reset");
+    expect(e.message).toContain("more than the whole 10/day allowance");
+    expect(e.message).toContain("a call of 10 or fewer would fit");
+    expect(e.message).toMatch(/stop calling Lune tools/i);
+    // The ways-out line must agree with that: offering the reset one line above
+    // "the reset will not help either" is the same broken promise, twice.
+    expect(e.message).not.toContain("wait for the daily reset");
+    expect(e.message).toContain(
+      "Ways to continue: add capacity with prepaid credits",
+    );
+  });
+
+  it("402 whose numbers show capacity again asks for one verbatim retry", () => {
+    // The numbers are read AFTER the refusal, so a refund / top-up / UTC roll in
+    // that window leaves max_units_now >= units_required. Calling that "send a
+    // smaller batch" (or "you are out") are both lies.
+    const e = mapHttpError(402, {
+      error: "out_of_credits",
+      reason: "retry_now",
+      tier: "pro",
+      units_required: 25,
+      daily_limit: 300,
+      used_today: 300,
+      remaining_today: 0,
+      credits_remaining: 30,
+      max_units_now: 30,
+    });
+    expect(e.message).toContain("capacity is available again");
+    expect(e.message).toContain("Retry the same call ONCE");
+    expect(e.message).not.toMatch(/stop calling Lune tools/i);
+    expect(e.message).not.toContain("a batch reserves");
+    expect(e.data.quota_reason).toBe("retry_now");
+  });
+
+  it("402 classifies from the numbers when `reason` is absent or unknown", () => {
+    // A published build must not read a NEWER API's reason as terminal: the
+    // numbers are self-describing, so derive rather than default to "stop".
+    const future = mapHttpError(402, {
+      reason: "some_future_reason",
+      units_required: 25,
+      remaining_today: 30,
+      credits_remaining: 0,
+    });
+    expect(future.data.quota_reason).toBe("retry_now");
+    const legacy = mapHttpError(402, {
+      units_required: 25,
+      remaining_today: 3,
+      credits_remaining: 1,
+    });
+    expect(legacy.data.quota_reason).toBe("batch_too_large");
+    const bare = mapHttpError(402, { error: "out_of_credits" });
+    expect(bare.data.quota_reason).toBe("no_capacity");
+  });
+
+  it("402 on gather_evidence points at the query budget, not the item count", () => {
+    // gather_evidence bills `max_total_queries`, so shrinking `queries` alone
+    // re-reserves the same ceiling and 402s again.
+    const e = mapHttpError(
+      402,
+      {
+        reason: "call_larger_than_remaining",
+        units_required: 25,
+        max_units_now: 10,
+      },
+      undefined,
+      undefined,
+      "gather_evidence",
+    );
+    expect(e.message).toContain("max_total_queries");
+    const unknownTool = mapHttpError(402, {
+      reason: "call_larger_than_remaining",
+      units_required: 25,
+      max_units_now: 10,
+    });
+    expect(unknownTool.message).toContain("Retry with fewer items");
+    // No hint and no URL in that body, so the capacity line falls back to the
+    // canonical page: its lead-in colon always has something to introduce.
+    expect(unknownTool.message).toContain(
+      "add capacity: Send the user to https://luneresearch.com/dashboard/settings/billing",
+    );
+  });
+
+  it("402 derives the servable size for an API that predates max_units_now", () => {
+    const e = mapHttpError(402, {
+      units_required: 25,
+      remaining_today: 3,
+      credits_remaining: 1,
+    });
+    expect(e.message).toContain("right now is 3");
+    expect(e.data.max_units_now).toBe(3);
+  });
+
+  it("402 falls back to the API detail sentence when the numbers are missing", () => {
+    const e = mapHttpError(402, {
+      error: "out_of_credits",
+      detail: "Out of Lune requests: the allowance resets at midnight UTC.",
+    });
+    expect(e.message).toContain(
+      "Out of Lune requests: the allowance resets at midnight UTC.",
+    );
   });
 
   it("500+ → server error", () => {
@@ -91,7 +366,7 @@ describe("mapHttpError", () => {
   it("403 without required scopes uses the generic forbidden message", () => {
     const e = mapHttpError(403, {});
     expect(e.code).toBe(LuneErrorCode.Forbidden);
-    expect(e.message).toMatch(/lacks the required scope/i);
+    expect(e.message).toMatch(/lacks the scope this tool needs/i);
     expect(e.data.required).toEqual([]);
     expect(e.data.granted).toEqual([]);
   });
@@ -101,7 +376,7 @@ describe("mapHttpError", () => {
       required: "papers:read" as unknown as string[],
     });
     // Non-array `required` → requiredStr is "" → generic message branch.
-    expect(e.message).toMatch(/lacks the required scope/i);
+    expect(e.message).toMatch(/lacks the scope this tool needs/i);
   });
 
   it("404 without a string detail falls back to 'Not found'", () => {
@@ -129,6 +404,24 @@ describe("mapHttpError", () => {
       upgrade_hint: 999 as unknown as string,
     });
     expect(e.message).toBe("Rate limited. Retry after 30s.");
+  });
+
+  it("429 from Lune's burst guard says it is not the quota", () => {
+    // The two 429-ish failures need opposite reactions: this one clears by
+    // itself, so the model must not tell the user to buy credits.
+    const e = mapHttpError(429, {
+      error: "rate_limited",
+      retry_after_seconds: 1,
+      detail: "Too many Lune requests in one second.",
+    });
+    expect(e.message).toContain("per-second burst guard");
+    expect(e.message).toContain("not your daily allowance");
+    expect(e.message).toContain("retry the same call");
+  });
+
+  it("429 from an unknown source keeps the generic retry line", () => {
+    const e = mapHttpError(429, { retry_after_seconds: 3 });
+    expect(e.message).toBe("Rate limited. Retry after 3s.");
   });
 
   it("accepts a null body without throwing", () => {
@@ -165,11 +458,16 @@ describe("toToolError", () => {
       mapHttpError(402, {
         error: "out_of_credits",
         buy_credits_url: "https://x/billing",
+        resets_at: "2026-08-16T00:00:00Z",
       }),
     );
     expect(r.isError).toBe(true);
-    expect(r.content[0]!.text).toContain("Quota exhausted");
+    expect(r.content[0]!.text).toContain("Lune quota exhausted");
     expect(r.content[0]!.text).toContain("buy_credits_url=https://x/billing");
+    // Machine-parseable footer: the reset instant a client can schedule against.
+    expect(r.content[0]!.text).toContain(
+      "quota_resets_at=2026-08-16T00:00:00Z",
+    );
   });
 
   it("omits the footer entirely when no actionable fields are present", () => {
@@ -229,7 +527,7 @@ describe("httpErrorToToolResult", () => {
     };
     const r = await httpErrorToToolResult(fake);
     expect(r.isError).toBe(true);
-    expect(r.content[0]!.text).toContain("Quota exhausted");
+    expect(r.content[0]!.text).toContain("Lune quota exhausted");
     expect(r.content[0]!.text).toContain(
       "buy_credits_url=https://lune/billing",
     );

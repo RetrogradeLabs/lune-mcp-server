@@ -1,5 +1,6 @@
 import { parseArgs } from "node:util";
 
+import { initAnalytics, setTransportMode } from "./analytics.js";
 import { runStdio } from "./transport/stdio.js";
 import { startHttpServer } from "./transport/streamableHttp.js";
 
@@ -51,6 +52,11 @@ async function main(): Promise<void> {
     return;
   }
   if (parsed.http) {
+    // Analytics is HTTP-mode only by construction: the stdio path never calls
+    // initAnalytics, so local installs run zero telemetry even if the env var
+    // is somehow set.
+    setTransportMode("http");
+    initAnalytics();
     startHttpServer(parsed.port);
     return;
   }

@@ -1,20 +1,29 @@
 /**
  * End-to-end: the `anthropic/alwaysLoad` hint on the entry tools must survive a
- * real MCP SDK client round-trip (server serialize -> JSON-RPC -> client zod
- * parse), not just our local `listToolsResponse()`. The hint is what keeps
- * `search_papers` / `search_papers_many` / `search_research_guidance`
- * un-deferred in Claude Code so their full descriptions (with the "use Lune, not
- * web_search" trigger) are in context from turn 1. If a future SDK started
- * stripping unrecognized-looking `_meta`, the unit test on `listToolsResponse()`
- * would still pass while real clients silently lost the hint; this catches that.
+ * real serve-then-parse round-trip (server encode -> JSON-RPC over HTTP -> the
+ * SDK's own `ListToolsResult` validator), not just our local
+ * `listToolsResponse()`. The hint is what keeps `search_papers` /
+ * `search_papers_many` / `search_research_guidance` un-deferred in Claude Code so
+ * their full descriptions (with the "use Lune, not web_search" trigger) are in
+ * context from turn 1. If a future SDK started stripping unrecognized-looking
+ * `_meta`, the unit test on `listToolsResponse()` would still pass while real
+ * clients silently lost the hint; this catches that.
  *
- * `Tool._meta` is a first-class field in the MCP 2025-11-25 schema, and
+ * `specTypeSchemas.ListToolsResult` is the SDK's neutral-model validator, which
+ * is what a conformant client parses the result with, so a strip on either side
+ * of the wire shows up here. Both eras are checked because `createMcpHandler`
+ * encodes them through different seams: the modern path directly, 2025-era
+ * traffic through the stateless legacy fallback.
+ *
+ * `Tool._meta` is a first-class field in the MCP schema and
  * `anthropic/alwaysLoad` is a format-valid, non-reserved key, so a conformant
  * client MUST preserve (or ignore), never reject it.
  */
 import { describe, it, expect } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import {
+  createMcpHandler,
+  specTypeSchemas,
+} from "@modelcontextprotocol/server";
 import { makeServer } from "../../src/server.js";
 
 const ENTRY_TOOLS = [
@@ -23,30 +32,79 @@ const ENTRY_TOOLS = [
   "search_research_guidance",
 ];
 
-describe("alwaysLoad _meta survives the SDK client round-trip", () => {
-  it("a real SDK client parses _meta['anthropic/alwaysLoad'] on exactly the entry tools", async () => {
-    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
-    // The makeClient factory is never invoked for tools/list (served locally).
-    const server = makeServer(() => ({}) as never);
-    await server.connect(serverT);
-    const client = new Client(
-      { name: "roundtrip-test", version: "1.0.0" },
-      { capabilities: {} },
-    );
-    await client.connect(clientT);
+interface ParsedTool {
+  name: string;
+  _meta?: Record<string, unknown>;
+}
 
-    try {
-      const { tools } = await client.listTools();
+/** Serve one `tools/list` and parse it the way a conformant client would. */
+async function listTools(
+  era: "modern" | "legacy",
+): Promise<readonly ParsedTool[]> {
+  // The makeClient factory is never invoked for tools/list (served locally).
+  const handler = createMcpHandler(() => makeServer(() => ({}) as never));
+  try {
+    const res = await handler.fetch(
+      new Request("https://mcp.test/", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          ...(era === "modern"
+            ? {
+                "MCP-Protocol-Version": "2026-07-28",
+                "Mcp-Method": "tools/list",
+              }
+            : {}),
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/list",
+          params:
+            era === "modern"
+              ? {
+                  _meta: {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientInfo": {
+                      name: "roundtrip-test",
+                      version: "1.0.0",
+                    },
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                  },
+                }
+              : {},
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    // 2025-era responses arrive as a single SSE frame; modern ones as plain JSON.
+    const raw = await res.text();
+    const frame = raw.split(/\r?\n/).find((l) => l.startsWith("data:"));
+    const envelope = JSON.parse(
+      frame ? frame.slice("data:".length).trim() : raw,
+    ) as { result: unknown };
+
+    const parsed = specTypeSchemas.ListToolsResult["~standard"].validate(
+      envelope.result,
+    );
+    expect("issues" in parsed ? parsed.issues : undefined).toBeUndefined();
+    return (parsed as { value: { tools: ParsedTool[] } }).value.tools;
+  } finally {
+    await handler.close();
+  }
+}
+
+describe.each(["modern", "legacy"] as const)(
+  "alwaysLoad _meta survives the %s round-trip",
+  (era) => {
+    it("the SDK's result validator keeps _meta['anthropic/alwaysLoad'] on exactly the entry tools", async () => {
+      const tools = await listTools(era);
       // The full catalog parses (no tool rejected over the added _meta).
       expect(tools.length).toBe(12);
 
       const flagged = tools
-        .filter(
-          (t) =>
-            (t._meta as Record<string, unknown> | undefined)?.[
-              "anthropic/alwaysLoad"
-            ] === true,
-        )
+        .filter((t) => t._meta?.["anthropic/alwaysLoad"] === true)
         .map((t) => t.name)
         .sort();
       expect(flagged).toEqual([...ENTRY_TOOLS].sort());
@@ -55,9 +113,6 @@ describe("alwaysLoad _meta survives the SDK client round-trip", () => {
       for (const t of tools) {
         if (!ENTRY_TOOLS.includes(t.name)) expect(t._meta).toBeUndefined();
       }
-    } finally {
-      await client.close();
-      await server.close();
-    }
-  });
-});
+    });
+  },
+);

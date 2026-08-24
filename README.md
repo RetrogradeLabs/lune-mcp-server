@@ -7,7 +7,7 @@ Official Model Context Protocol server for [Lune Research](https://luneresearch.
 Exposes 12 tools and 6 guided research workflows (prompts) for searching, retrieving, comparing, and fact-checking academic papers across security, ML, NLP, CV, and systems venues, plus retrieval over your own uploaded workspace documents. Two transports:
 
 - **stdio**: run locally via `npx @retrograde-labs/lune-mcp-server`. Reads `LUNE_API_KEY` from the environment.
-- **Streamable HTTP**: hosted at `https://mcp.luneresearch.com/mcp`. Pass your PAT or OAuth token as `Authorization: Bearer ...`.
+- **Streamable HTTP**: hosted at `https://mcp.luneresearch.com`. Pass your PAT or OAuth token as `Authorization: Bearer ...`.
 
 ## Quick start (Claude Desktop, Cursor, etc.)
 

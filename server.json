@@ -3,7 +3,7 @@
   "name": "com.luneresearch/lune",
   "title": "Lune Research",
   "description": "Search peer-reviewed papers and research methodology guidance from your AI agent.",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "websiteUrl": "https://luneresearch.com",
   "repository": {
     "url": "https://github.com/RetrogradeLabs/lune-mcp-server",
@@ -14,7 +14,7 @@
     {
       "registryType": "npm",
       "identifier": "@retrograde-labs/lune-mcp-server",
-      "version": "2.0.1",
+      "version": "2.1.0",
       "transport": {
         "type": "stdio"
       },
@@ -32,11 +32,11 @@
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://mcp.luneresearch.com/mcp",
+      "url": "https://mcp.luneresearch.com",
       "headers": [
         {
           "name": "Authorization",
-          "description": "Bearer token. Use a Lune PAT or an OAuth access token from https://luneresearch.com/dashboard/settings/credentials.",
+          "description": "Bearer token. Create a Lune PAT at https://luneresearch.com/dashboard/settings/credentials, or let an OAuth-capable MCP client sign in through server discovery.",
           "isRequired": true,
           "isSecret": true,
           "value": "Bearer {api_key}",

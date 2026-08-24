@@ -114,7 +114,7 @@ function slimContexts(chunks: RawMatchedChunk[] | null | undefined) {
 }
 
 interface RawSearchResponse {
-  results?: RawPaper[] | unknown;
+  results?: RawPaper[];
   has_more?: boolean;
 }
 
@@ -196,10 +196,7 @@ function projectHit(p: RawPaper, detail: boolean) {
  * is null and `low_confidence` false (no calibrated basis to abstain). Per-hit
  * shape is `projectHit` (enriched default vs `detail: false` concise).
  */
-export function slimSearchResponse(
-  r: RawSearchResponse | unknown,
-  detail = true,
-) {
+export function slimSearchResponse(r: unknown, detail = true) {
   const obj = (r ?? {}) as RawSearchResponse;
   const results = Array.isArray(obj.results) ? obj.results : [];
   const projected = results.map((p) => projectHit(p, detail));
@@ -224,7 +221,7 @@ interface RawWorkspaceSpan {
 }
 
 interface RawWorkspaceSearchResponse {
-  results?: RawWorkspaceSpan[] | unknown;
+  results?: RawWorkspaceSpan[];
 }
 
 interface WorkspaceHit {
@@ -257,9 +254,7 @@ interface WorkspaceHit {
  * via `get_paper_fulltext(source="workspace")`). `best_score` / `low_confidence`
  * derive from `rerank_score` exactly as for the corpus.
  */
-export function slimWorkspaceSearchAsHits(
-  r: RawWorkspaceSearchResponse | unknown,
-) {
+export function slimWorkspaceSearchAsHits(r: unknown) {
   const obj = (r ?? {}) as RawWorkspaceSearchResponse;
   const spans = Array.isArray(obj.results) ? obj.results : [];
   const byDoc = new Map<string, WorkspaceHit>();
@@ -323,7 +318,7 @@ interface RawBatchFailure {
 }
 
 interface RawBatchSearchResponse {
-  results?: RawBatchHit[] | unknown;
+  results?: RawBatchHit[];
   queries_run?: number;
   queries_failed?: RawBatchFailure[];
   has_more?: boolean;
@@ -339,10 +334,7 @@ interface RawBatchSearchResponse {
  * `best_score` / `low_confidence`: the API fuses N ranked lists by RRF, so a
  * single calibrated rerank floor across the merge is not meaningful.
  */
-export function slimSearchManyResponse(
-  r: RawBatchSearchResponse | unknown,
-  detail = true,
-) {
+export function slimSearchManyResponse(r: unknown, detail = true) {
   const obj = (r ?? {}) as RawBatchSearchResponse;
   const results: RawBatchHit[] = Array.isArray(obj.results) ? obj.results : [];
   const projected = results.map((p) => ({
@@ -426,7 +418,7 @@ interface RawCitationsResponse {
   has_more?: boolean;
 }
 
-export function slimCitations(r: RawCitationsResponse | unknown) {
+export function slimCitations(r: unknown) {
   const obj = (r ?? {}) as RawCitationsResponse;
   const papers = Array.isArray(obj.papers) ? obj.papers : [];
   return {
@@ -471,10 +463,7 @@ interface RawConferencePapers {
 // over/under-counts the consumed rows. `offset + returned_count < total` is the
 // only exact predicate (offset-based slicing returns min(limit, total-offset)
 // rows, so the last page lands exactly on `total`).
-export function slimConferencePapers(
-  r: RawConferencePapers | unknown,
-  offset = 0,
-) {
+export function slimConferencePapers(r: unknown, offset = 0) {
   const obj = (r ?? {}) as RawConferencePapers;
   const total = obj.total ?? 0;
   const papers = (obj.papers ?? []).map((p) => {
@@ -500,7 +489,7 @@ interface RawGuidanceSearchResponse {
   results?: RawGuidanceHit[];
 }
 
-export function slimGuidanceSearch(r: RawGuidanceSearchResponse | unknown) {
+export function slimGuidanceSearch(r: unknown) {
   const obj = (r ?? {}) as RawGuidanceSearchResponse;
   return {
     results: (obj.results ?? []).map((h) => ({
@@ -529,7 +518,7 @@ interface RawGuidanceDoc {
   sections?: RawGuidanceSection[] | null;
 }
 
-export function slimGuidanceDoc(r: RawGuidanceDoc | unknown) {
+export function slimGuidanceDoc(r: unknown) {
   const obj = (r ?? {}) as RawGuidanceDoc;
   const sections = Array.isArray(obj.sections)
     ? obj.sections

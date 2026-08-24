@@ -197,7 +197,7 @@ describe("search_papers", () => {
     );
     expectToolError(res, {
       contains: [
-        "Quota exhausted",
+        "Lune quota exhausted",
         "https://lune/buy",
         "buy_credits_url=https://lune/buy",
         "http_status=402",

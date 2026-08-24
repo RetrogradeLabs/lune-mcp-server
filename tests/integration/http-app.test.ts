@@ -1,16 +1,17 @@
 /**
  * Coverage for `buildHttpApp` (used standalone in tests) and
  * `startHttpServer`'s bind callback, plus the `/v1/mcp` alias path and the
- * array-valued `mcp-session-id` header branch.
+ * duplicated `mcp-session-id` header branch.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AddressInfo } from "node:net";
 import type { Server as HttpServer } from "node:http";
 import http from "node:http";
+import type { McpHttpHandler } from "@modelcontextprotocol/server";
+import { initAnalytics, resetAnalyticsForTests } from "../../src/analytics.js";
 import {
   buildHttpApp,
   startHttpServer,
-  SessionStore,
   hostIsAllowed,
   originIsAllowed,
 } from "../../src/transport/streamableHttp.js";
@@ -66,10 +67,243 @@ describe("buildHttpApp standalone", () => {
   });
 
   it("serves /health from an app built without a port binding", async () => {
-    const r = await fetch(`http://localhost:${port}/health`);
-    expect(r.status).toBe(200);
-    const body = (await r.json()) as { status: string };
-    expect(body.status).toBe("ok");
+    vi.stubEnv("LUNE_BUILD_ID", "");
+    try {
+      const r = await fetch(`http://localhost:${port}/health`);
+      expect(r.status).toBe(200);
+      const body = (await r.json()) as {
+        status: string;
+        build_id?: string;
+      };
+      expect(body.status).toBe("ok");
+      expect(body.build_id).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("exposes the deployed build id when the task definition provides one", async () => {
+    vi.stubEnv("LUNE_BUILD_ID", "abc123");
+    try {
+      const r = await fetch(`http://localhost:${port}/health`);
+      const body = (await r.json()) as { build_id?: string };
+      expect(body.build_id).toBe("abc123");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("keeps MCP available when the optional analytics probe is unavailable", async () => {
+    vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+    initAnalytics();
+    const isolatedApp = buildHttpApp({
+      credentialProbe: async () => ({ status: "indeterminate" }),
+    });
+    const isolatedServer = isolatedApp.listen(0);
+    await new Promise<void>((resolve) =>
+      isolatedServer.once("listening", resolve),
+    );
+    const isolatedPort = (isolatedServer.address() as AddressInfo).port;
+
+    try {
+      const response = await rawPost(
+        isolatedPort,
+        "/mcp",
+        {
+          accept: "application/json, text/event-stream",
+          authorization: "Bearer opaque-test-token",
+        },
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "test-client", version: "1.0.0" },
+          },
+        },
+      );
+      expect(response.status).toBe(200);
+    } finally {
+      await new Promise<void>((resolve) =>
+        isolatedServer.close(() => resolve()),
+      );
+      resetAnalyticsForTests();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("rejects a credential the analytics probe reports invalid, with a refresh challenge", async () => {
+    // The probe is the identity authority, so an API 401 on
+    // `/account/mcp-context` means the bearer is dead. The client has to see
+    // `invalid_token` here to refresh-and-retry; letting the request through
+    // would surface the API's own 401 as a tool error the model reads as
+    // "please reconnect", which is the failure auto-reauth exists to prevent.
+    vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+    initAnalytics();
+    const isolatedApp = buildHttpApp({
+      credentialProbe: async () => ({ status: "invalid" }),
+    });
+    const isolatedServer = isolatedApp.listen(0);
+    await new Promise<void>((resolve) =>
+      isolatedServer.once("listening", resolve),
+    );
+    const isolatedPort = (isolatedServer.address() as AddressInfo).port;
+
+    try {
+      const response = await fetch(`http://localhost:${isolatedPort}/mcp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          authorization: "Bearer revoked-opaque-token",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 7,
+          method: "tools/list",
+          params: {},
+        }),
+      });
+      expect(response.status).toBe(401);
+      expect(response.headers.get("www-authenticate")).toContain(
+        'error="invalid_token"',
+      );
+      expect(await response.json()).toMatchObject({
+        id: 7,
+        error: { code: -32001 },
+      });
+    } finally {
+      await new Promise<void>((resolve) =>
+        isolatedServer.close(() => resolve()),
+      );
+      resetAnalyticsForTests();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("re-probes every request instead of caching a credential verdict", async () => {
+    // A revoked credential has to stop passing on its NEXT request, and a
+    // cache here would be exactly the cross-request state the stateless
+    // transport removed. Counted at the route because that is where the
+    // decision is now made.
+    vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+    initAnalytics();
+    let probes = 0;
+    const isolatedApp = buildHttpApp({
+      credentialProbe: async (token) => {
+        probes += 1;
+        return { status: token === "live-token" ? "valid" : "invalid" };
+      },
+    });
+    const isolatedServer = isolatedApp.listen(0);
+    await new Promise<void>((resolve) =>
+      isolatedServer.once("listening", resolve),
+    );
+    const isolatedPort = (isolatedServer.address() as AddressInfo).port;
+    const call = (token: string) =>
+      rawPost(
+        isolatedPort,
+        "/mcp",
+        {
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${token}`,
+        },
+        { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
+      );
+
+    try {
+      expect((await call("revoked-token")).status).toBe(401);
+      expect((await call("live-token")).status).toBe(200);
+      expect((await call("live-token")).status).toBe(200);
+      expect(probes).toBe(3);
+    } finally {
+      await new Promise<void>((resolve) =>
+        isolatedServer.close(() => resolve()),
+      );
+      resetAnalyticsForTests();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("refuses a JSON-RPC batch longer than the cap, before any upstream call", async () => {
+    // Batching left the spec at 2025-06-18 and is refused outright on the
+    // modern path, so an array can only come from a 2025-03-26-era client. One
+    // POST buys one credential probe and one API-side analytics claim while
+    // every element dispatches its own handler and emits its own event, which
+    // is what makes an uncapped array a 40x amplifier and the one path where
+    // per-request accounting under-counts. `prompts/list` needs no upstream
+    // call, so nothing else in the stack would see the flood.
+    vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+    initAnalytics();
+    let probes = 0;
+    const isolatedApp = buildHttpApp({
+      credentialProbe: async () => {
+        probes += 1;
+        return { status: "valid" };
+      },
+    });
+    const isolatedServer = isolatedApp.listen(0);
+    await new Promise<void>((resolve) =>
+      isolatedServer.once("listening", resolve),
+    );
+    const isolatedPort = (isolatedServer.address() as AddressInfo).port;
+    const batch = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        jsonrpc: "2.0",
+        id: i + 1,
+        method: "prompts/list",
+        params: {},
+      }));
+    const call = (n: number) =>
+      rawPost(
+        isolatedPort,
+        "/mcp",
+        {
+          accept: "application/json, text/event-stream",
+          authorization: "Bearer live-token",
+        },
+        batch(n),
+      );
+
+    try {
+      const over = await call(51);
+      expect(over.status).toBe(400);
+      expect(JSON.parse(over.body)).toMatchObject({
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32600 },
+      });
+      // Rejected ahead of the auth work, so the flood never buys the 2.5s
+      // `account/mcp-context` call that every accepted POST pays for.
+      expect(probes).toBe(0);
+
+      // The cap is a ceiling on abuse, not a ban: a batch at the limit is still
+      // served in full, which is also what proves the probe counter above is
+      // wired to a probe that really runs.
+      const atCap = await call(50);
+      expect(atCap.status).toBe(200);
+      expect(probes).toBe(1);
+      expect(atCap.body.match(/"jsonrpc"/g)).toHaveLength(50);
+    } finally {
+      await new Promise<void>((resolve) =>
+        isolatedServer.close(() => resolve()),
+      );
+      resetAnalyticsForTests();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("closes the MCP handler when its bound server closes", async () => {
+    // The handler owns the modern leg's in-flight exchanges, so one that
+    // outlives its server is a leak per app, and the suite builds one per file.
+    const app = buildHttpApp();
+    const closeSpy = vi.spyOn(app.locals.mcpHandler as McpHttpHandler, "close");
+    const bound = app.listen(0);
+    await new Promise<void>((resolve) => bound.once("listening", resolve));
+    await new Promise<void>((resolve) => bound.close(() => resolve()));
+    expect(closeSpy).toHaveBeenCalledTimes(1);
   });
 
   it("serves protected-resource metadata for the /v1/mcp alias path", async () => {
@@ -78,7 +312,25 @@ describe("buildHttpApp standalone", () => {
     );
     expect(r.status).toBe(200);
     const body = (await r.json()) as { resource: string };
-    expect(body.resource).toBe("https://mcp.luneresearch.com/mcp");
+    expect(body.resource).toBe("https://mcp.luneresearch.com/v1/mcp");
+  });
+
+  it("serves the JSON-RPC endpoint at the bare root path", async () => {
+    const r = await fetch(`http://localhost:${port}/`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {},
+      }),
+    });
+    expect(r.status).toBe(401);
+    expect(r.headers.get("www-authenticate")).toMatch(/^Bearer\s/);
   });
 
   it("rejects POST /v1/mcp without Authorization (alias shares the handler)", async () => {
@@ -99,19 +351,19 @@ describe("buildHttpApp standalone", () => {
     expect(r.headers.get("www-authenticate")).toMatch(/^Bearer\s/);
   });
 
-  it("GET /v1/mcp without a session id returns 400", async () => {
+  it("GET /v1/mcp declines the standalone stream with 405", async () => {
     const r = await fetch(`http://localhost:${port}/v1/mcp`, {
       method: "GET",
       headers: { accept: "text/event-stream" },
     });
-    expect(r.status).toBe(400);
+    expect(r.status).toBe(405);
   });
 
   it("tolerates a repeated mcp-session-id header", async () => {
     // Node collapses duplicated inbound headers into a single comma-joined
-    // string (only `set-cookie` is ever arrayed), so `readSessionId` sees
-    // "first-id, second-id" as one present-but-unknown id, which is served
-    // statelessly like any other orphaned session id.
+    // string (only `set-cookie` is ever arrayed), so the request carries
+    // "first-id, second-id" as one value. Nothing resolves it any more, so it
+    // is served like any other stale id (and reported as the `$session_id`).
     const r = await fetch(`http://localhost:${port}/mcp`, {
       method: "POST",
       headers: [
@@ -131,13 +383,12 @@ describe("buildHttpApp standalone", () => {
     expect(r.status).toBe(200);
   });
 
-  it("serves an orphaned session id on POST and declines its GET stream with 405", async () => {
-    // A server-evicted / expired session id is "present but unknown". POSTs
-    // are served through an ephemeral stateless transport (a 404 would tell
-    // the Anthropic managed-agents client its session died, and it never
-    // re-initializes; see orphaned-session.test.ts); the optional standalone
-    // GET stream is declined with 405, which is spec-legal at any time and
-    // does NOT signal session termination.
+  it("serves a stale session id on POST and declines its GET stream with 405", async () => {
+    // POSTs are served with the id ignored (a 404 would tell the Anthropic
+    // managed-agents client its session died, and it never re-initializes; see
+    // orphaned-session.test.ts); the optional standalone GET stream is declined
+    // with 405, which is spec-legal at any time and does NOT signal session
+    // termination.
     const post = await rawPost(
       port,
       "/mcp",
@@ -208,71 +459,6 @@ describe("startHttpServer", () => {
     );
     await new Promise<void>((resolve) => server.close(() => resolve()));
     logSpy.mockRestore();
-  });
-});
-
-describe("SessionStore idle eviction", () => {
-  function fakeEntry(lastSeen: number) {
-    const close = vi.fn().mockResolvedValue(undefined);
-    return {
-      entry: {
-        transport: { close } as never,
-        token: "t",
-        subject: "pat:test",
-        lastSeen,
-        inFlight: 0,
-      },
-      close,
-    };
-  }
-
-  it("closes and drops sessions idle past the TTL, keeps fresh ones", () => {
-    const store = new SessionStore();
-    const now = 1_000_000;
-    const stale = fakeEntry(now - 10_000);
-    const fresh = fakeEntry(now - 100);
-    store.register("stale", stale.entry);
-    store.register("fresh", fresh.entry);
-
-    const evicted = store.sweep(5_000, now);
-
-    expect(evicted).toBe(1);
-    expect(stale.close).toHaveBeenCalledOnce();
-    expect(fresh.close).not.toHaveBeenCalled();
-    expect(store.size).toBe(1);
-    expect(store.get("fresh")).toBeDefined();
-  });
-
-  it("get() touches lastSeen so an active session survives the next sweep", () => {
-    const store = new SessionStore();
-    const now = 2_000_000;
-    store.register("s", fakeEntry(now - 10_000).entry);
-    // A request on the session refreshes lastSeen to "real" now (>> the test's
-    // synthetic `now`), so it is no longer stale relative to `now`.
-    store.get("s");
-    expect(store.sweep(5_000, now)).toBe(0);
-    expect(store.size).toBe(1);
-  });
-
-  it("caps live sessions, evicting the least-recently-used at the limit", () => {
-    // Idle eviction alone can't stop a burst (sessions are only sweep-eligible
-    // after the TTL), so register enforces a hard cap: at the limit it closes
-    // and drops the oldest-by-lastSeen entry before admitting the new one,
-    // bounding memory regardless of the init rate.
-    const store = new SessionStore(2);
-    const a = fakeEntry(1_000); // oldest
-    const b = fakeEntry(2_000);
-    const c = fakeEntry(3_000); // newest
-    store.register("a", a.entry);
-    store.register("b", b.entry);
-    expect(store.size).toBe(2);
-
-    store.register("c", c.entry); // over the cap -> evict LRU ('a')
-    expect(store.size).toBe(2);
-    expect(a.close).toHaveBeenCalledOnce();
-    expect(store.get("a")).toBeUndefined();
-    expect(store.get("b")).toBeDefined();
-    expect(store.get("c")).toBeDefined();
   });
 });
 

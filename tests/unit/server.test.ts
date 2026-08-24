@@ -3,11 +3,14 @@
  *
  * `makeServer` wires capabilities + instructions and delegates tool
  * registration to `registerAllTools`. We assert it produces a connectable
- * `Server` and that the per-invocation `makeClient` factory is threaded
- * through (the HTTP transport relies on this to rotate Bearer tokens).
+ * `Server`, that the `makeClient` factory is threaded through rather than
+ * called at wiring time, and that repeated calls stay independent: the HTTP
+ * handler builds one server per request around that request's own Bearer, so
+ * an eagerly-built client would bind the wrong token and a shared instance
+ * would carry the previous client's attribution.
  */
 import { describe, expect, it, vi } from "vitest";
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { Server } from "@modelcontextprotocol/server";
 import type { KyInstance } from "ky";
 import { makeServer, SERVER_NAME, SERVER_VERSION } from "../../src/server.js";
 

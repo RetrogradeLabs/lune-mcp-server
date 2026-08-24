@@ -1,5 +1,6 @@
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { Server } from "@modelcontextprotocol/server";
 import type { KyInstance } from "ky";
+import { setServerInfo, type McpAnalyticsContext } from "./analytics.js";
 import { registerPrompts } from "./prompts.js";
 import { registerResources } from "./resources.js";
 import { registerAllTools } from "./tools/index.js";
@@ -13,12 +14,20 @@ declare const __LUNE_MCP_VERSION__: string | undefined;
 export const SERVER_VERSION =
   typeof __LUNE_MCP_VERSION__ === "string" ? __LUNE_MCP_VERSION__ : "0.0.0-dev";
 
+export interface MakeServerOptions {
+  /** Verified per-request context for remote analytics. Absent on stdio. */
+  analyticsContext?: () => McpAnalyticsContext;
+}
+
 /**
  * Build a fresh MCP `Server` with all tools registered. `makeClient` is
  * called *per tool invocation* so the HTTP transport can rotate the Bearer
  * token (e.g. when the user refreshes an OAuth access token mid-session).
  */
-export function makeServer(makeClient: () => KyInstance): Server {
+export function makeServer(
+  makeClient: () => KyInstance,
+  options: MakeServerOptions = {},
+): Server {
   const server = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
     {
@@ -75,10 +84,37 @@ export function makeServer(makeClient: () => KyInstance): Server {
         "DEFAULT: if a question touches papers, citations, methodology, experiments, " +
           "evaluation, or writing, open with a Lune tool call.",
       ].join("\n"),
+      // 2026-07-28 requires ttlMs/cacheScope on cacheable results and the SDK
+      // defaults them to `{ ttlMs: 0, cacheScope: "private" }`, so only the
+      // non-default values belong here. Both fields ride the JSON-RPC `result`
+      // body, never an HTTP `Cache-Control` header, so neither a generic CDN
+      // nor the ALB can act on them: the scope is advisory to an MCP-aware
+      // intermediary that parses JSON-RPC (Lune has none today), which makes
+      // `private` the forward-compatible choice for anything varying by
+      // principal. `tools/list` stays `private` on those grounds, branching on
+      // isWorkspaceCredential and on captureEnabled. Its TTL trades freshness
+      // against that probe: non-zero is what stops a client re-listing, and
+      // re-paying the 2.5s workspace probe, at every session start, but BOTH
+      // axes can flip for the SAME principal mid-session, and the TTL is how
+      // long the client then holds a surface its credential no longer matches.
+      // 60s buys the former without making the latter a five-minute window.
+      // The other three are invariant across callers, `resources/list` only
+      // for as long as its handler is an empty stub (see resources.ts);
+      // `server/discover` gets the shorter window because it carries
+      // supportedVersions and instructions, which a deploy changes.
+      // Hints ride a symbol-keyed property the SDK strips before serializing,
+      // so 2025-era responses are unchanged on the wire.
+      cacheHints: {
+        "tools/list": { ttlMs: 60_000, cacheScope: "private" },
+        "prompts/list": { ttlMs: 3_600_000, cacheScope: "public" },
+        "resources/list": { ttlMs: 3_600_000, cacheScope: "public" },
+        "server/discover": { ttlMs: 300_000, cacheScope: "public" },
+      },
     },
   );
-  registerAllTools(server, makeClient);
-  registerResources(server);
-  registerPrompts(server);
+  setServerInfo(server, { name: SERVER_NAME, version: SERVER_VERSION });
+  registerAllTools(server, makeClient, options.analyticsContext);
+  registerResources(server, options.analyticsContext);
+  registerPrompts(server, options.analyticsContext);
   return server;
 }

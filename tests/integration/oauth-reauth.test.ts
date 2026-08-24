@@ -14,16 +14,19 @@
  * frozen to the deployed defaults at import (hence resource_metadata still points
  * at mcp.luneresearch.com, which we assert).
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { AddressInfo } from "node:net";
 import type { Server as HttpServer } from "node:http";
 import http from "node:http";
-import { SignJWT, exportJWK, generateKeyPair } from "jose";
+import { SignJWT, exportJWK, generateKeyPair, type CryptoKey } from "jose";
 import { buildHttpApp } from "../../src/transport/streamableHttp.js";
+import { inspectAccessToken } from "../../src/auth/verify.js";
 
 const KID = "reauth-test-1";
+// These requests hit the legacy `/mcp` alias, and the challenge is path-aware
+// (RFC 9728 §3.3), so it points at that alias's metadata document.
 const METADATA_URL =
-  "https://mcp.luneresearch.com/.well-known/oauth-protected-resource";
+  "https://mcp.luneresearch.com/.well-known/oauth-protected-resource/mcp";
 
 function initBody(id: number) {
   return {
@@ -144,7 +147,7 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
     expect(body.error.data._meta["mcp/www_authenticate"]).toBe(wa);
   });
 
-  it("lets a VALID access token through the gate (reaches the transport, mints a session)", async () => {
+  it("lets a VALID access token through the gate (reaches the transport)", async () => {
     const valid = await mint(3600);
     const r = await post(
       port,
@@ -153,9 +156,9 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
     );
 
     expect(r.status).toBe(200);
-    // A real initialize handshake assigns a session id; proves we passed the gate
-    // and executed, not just skipped the 401.
-    expect(r.headers.get("mcp-session-id")).toBeTruthy();
+    // Stateless serving mints no session id, so the handshake's own result is
+    // what proves we passed the gate and executed rather than skipped the 401.
+    expect(await r.text()).toContain("lune-research");
   });
 
   it("lets an opaque PAT through the gate (validated downstream, not here)", async () => {
@@ -176,5 +179,111 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
     // Anonymous discovery: bare challenge, NO error code (RFC 6750 §3).
     expect(wa).toBe(`Bearer resource_metadata="${METADATA_URL}"`);
     expect(wa).not.toContain("error=");
+  });
+});
+
+/**
+ * A key rotation must not make an otherwise valid token intermittently 401.
+ *
+ * jose re-fetches the JWKS on an unknown `kid` only once the cached set is past
+ * `cooldownDuration`; inside that window it throws `ERR_JWKS_NO_MATCHING_KEY`,
+ * which `TOKEN_ERROR_CODES` reads as a token fault and answers with a 401
+ * `invalid_token`. The client then refreshes, gets a token carrying the SAME new
+ * kid, and 401s again, which is what trips its "401 after successful auth"
+ * circuit breaker. Each task holds its own cache, so at `max: 6` the same token
+ * works on one call and fails on the next.
+ *
+ * Both sides of the window are asserted because the value is a tradeoff, not a
+ * safe-by-default: no cooldown at all lets a burst of forged kids drive one JWKS
+ * fetch per request. `LUNE_AUTH_SERVER_URL` moves to a fresh port here, which is
+ * what gives this group its own resolver (`remoteJwks` rebuilds per origin).
+ */
+describe("JWKS cooldown after a signing-key rotation", () => {
+  let jwks: HttpServer;
+  let issuer: string;
+  let served: Array<Record<string, unknown>> = [];
+
+  async function keyFor(kid: string) {
+    const { publicKey, privateKey } = await generateKeyPair("RS256");
+    const jwk = {
+      ...(await exportJWK(publicKey)),
+      kid,
+      alg: "RS256",
+      use: "sig",
+    };
+    return { jwk, privateKey };
+  }
+
+  function mintWith(privateKey: CryptoKey, kid: string, subject: string) {
+    const now = Math.floor(Date.now() / 1000);
+    return new SignJWT({ org_id: "org-1" })
+      .setProtectedHeader({ alg: "RS256", kid })
+      .setIssuer(issuer)
+      .setSubject(subject)
+      .setIssuedAt(now - 120)
+      .setExpirationTime(now + 3600)
+      .sign(privateKey);
+  }
+
+  beforeAll(async () => {
+    jwks = http.createServer((req, res) => {
+      if (req.url?.startsWith("/.well-known/jwks.json")) {
+        res.setHeader("content-type", "application/json");
+        res.setHeader("Connection", "close");
+        res.end(JSON.stringify({ keys: served }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end();
+    });
+    jwks.listen(0);
+    await new Promise<void>((resolve) => jwks.once("listening", resolve));
+    issuer = `http://127.0.0.1:${(jwks.address() as AddressInfo).port}`;
+    vi.stubEnv("LUNE_AUTH_SERVER_URL", issuer);
+  });
+
+  afterAll(async () => {
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
+    jwks.closeAllConnections?.();
+    await new Promise<void>((resolve) => jwks.close(() => resolve()));
+  });
+
+  it("accepts a token signed by a rotated-in key within seconds, not half a minute", async () => {
+    const oldKey = await keyFor("rotation-old");
+    const newKey = await keyFor("rotation-new");
+    served = [oldKey.jwk];
+
+    // Warm the cache with the pre-rotation key set, which is what starts the
+    // cooldown clock; only `Date` is faked, so the real fetch still works.
+    const before = await mintWith(
+      oldKey.privateKey,
+      "rotation-old",
+      "user-old",
+    );
+    await expect(inspectAccessToken(before)).resolves.toMatchObject({
+      needsReauth: false,
+      verifiedIdentity: { distinctId: "user-old" },
+    });
+
+    // Rotate. The AS keeps the previous key live (`oauth_keys.py:all_pubkeys`
+    // yields current + previous), so tokens minted BEFORE the flip keep working
+    // and only freshly minted ones can land on an unknown kid.
+    served = [newKey.jwk, oldKey.jwk];
+    const warmedAt = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const after = await mintWith(newKey.privateKey, "rotation-new", "user-new");
+
+    vi.setSystemTime(warmedAt + 3_000);
+    await expect(inspectAccessToken(after)).resolves.toEqual({
+      needsReauth: true,
+    });
+
+    vi.setSystemTime(warmedAt + 6_000);
+    await expect(inspectAccessToken(after)).resolves.toMatchObject({
+      needsReauth: false,
+      verifiedIdentity: { distinctId: "user-new" },
+    });
+    vi.useRealTimers();
   });
 });

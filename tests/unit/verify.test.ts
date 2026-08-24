@@ -18,9 +18,13 @@ import {
   SignJWT,
   generateKeyPair,
   errors as joseErrors,
+  type CryptoKey,
   type JWTVerifyGetKey,
 } from "jose";
-import { accessTokenNeedsReauth } from "../../src/auth/verify.js";
+import {
+  accessTokenNeedsReauth,
+  inspectAccessToken,
+} from "../../src/auth/verify.js";
 
 const ISSUER = "https://api.luneresearch.com";
 
@@ -57,6 +61,17 @@ describe("accessTokenNeedsReauth", () => {
     expect(await accessTokenNeedsReauth(token, keyResolver(publicKey))).toBe(
       false,
     );
+  });
+
+  it("returns an analytics identity only for a cryptographically verified Lune OAuth token", async () => {
+    const { publicKey, privateKey } = await makeKeys();
+    const token = await sign(privateKey, { expSecondsFromNow: 3600 });
+    await expect(
+      inspectAccessToken(token, keyResolver(publicKey)),
+    ).resolves.toEqual({
+      needsReauth: false,
+      verifiedIdentity: { distinctId: "user-1", orgId: "org-1" },
+    });
   });
 
   it("flags an EXPIRED Lune OAuth access token for reauth (the reported bug)", async () => {
@@ -116,6 +131,9 @@ describe("accessTokenNeedsReauth", () => {
       throw new TypeError("fetch failed"); // raw network error, no jose code.
     };
     expect(await accessTokenNeedsReauth(token, generic)).toBe(false);
+    await expect(inspectAccessToken(token, timeout)).resolves.toEqual({
+      needsReauth: false,
+    });
   });
 
   it("challenges an EXPIRED token even under a JWKS infra fault (exp decoded locally)", async () => {
@@ -154,6 +172,9 @@ describe("accessTokenNeedsReauth", () => {
     // Not a Lune OAuth token: we do not adjudicate it (alg gate short-circuits
     // before the resolver), the API does.
     expect(await accessTokenNeedsReauth(es)).toBe(false);
+    await expect(inspectAccessToken(es)).resolves.toEqual({
+      needsReauth: false,
+    });
   });
 
   it("FAILS OPEN when LUNE_AUTH_SERVER_URL is malformed (no 500 on misconfig)", async () => {

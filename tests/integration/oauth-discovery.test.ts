@@ -21,10 +21,13 @@ import { buildHttpApp } from "../../src/transport/streamableHttp.js";
 type Json = Record<string, unknown>;
 
 // Deployed defaults (code defaults in streamableHttp.ts; wired in infra/mcp.ts).
-const RESOURCE = "https://mcp.luneresearch.com/mcp";
+const RESOURCE = "https://mcp.luneresearch.com";
 const RESOURCE_ORIGIN = "https://mcp.luneresearch.com";
 const AUTH_SERVER = "https://api.luneresearch.com";
 const METADATA_URL = `${RESOURCE_ORIGIN}/.well-known/oauth-protected-resource`;
+// The requests below hit the legacy `/mcp` alias; RFC 9728 §3.3 makes both the
+// challenge and the document it names path-aware, so they carry that suffix.
+const MCP_METADATA_URL = `${METADATA_URL}/mcp`;
 
 describe("oauth discovery", () => {
   let server: HttpServer;
@@ -72,7 +75,7 @@ describe("oauth discovery", () => {
     expect(body.bearer_methods_supported).toEqual(["header"]);
   });
 
-  it("serves identical metadata at the /mcp and /v1/mcp suffixed well-known paths", async () => {
+  it("serves each alias its OWN resource identifier at the suffixed well-known paths", async () => {
     // Sequential (not Promise.all): concurrent fetches against express on an
     // ephemeral port intermittently ECONNRESET under load in CI.
     const paths = [
@@ -88,10 +91,16 @@ describe("oauth discovery", () => {
     }
 
     const [root, mcp, v1] = bodies;
+    // RFC 9728 §3.3: `resource` MUST be identical to the identifier the
+    // well-known suffix was inserted into, so these documents differ in exactly
+    // that field. A client on the legacy URL therefore keeps binding the legacy
+    // identifier (no re-binding, no refresh churn) while a new client on the
+    // origin binds the canonical one.
     expect(root!.resource).toBe(RESOURCE);
-    // The suffixed alias paths MUST serve the exact same document as the root.
-    expect(mcp).toEqual(root);
-    expect(v1).toEqual(root);
+    expect(mcp!.resource).toBe(`${RESOURCE}/mcp`);
+    expect(v1!.resource).toBe(`${RESOURCE}/v1/mcp`);
+    expect({ ...mcp, resource: RESOURCE }).toEqual(root);
+    expect({ ...v1, resource: RESOURCE }).toEqual(root);
   });
 
   it("rejects anonymous POST /mcp with a 401 carrying the resource_metadata pointer", async () => {
@@ -114,7 +123,7 @@ describe("oauth discovery", () => {
     // The connector keys off this exact header to start OAuth discovery; the
     // resource_metadata value MUST be the absolute well-known URL.
     const wwwAuth = r.headers.get("www-authenticate");
-    expect(wwwAuth).toBe(`Bearer resource_metadata="${METADATA_URL}"`);
+    expect(wwwAuth).toBe(`Bearer resource_metadata="${MCP_METADATA_URL}"`);
 
     // The JSON-RPC error body MUST echo that same header so a client that only
     // parses the body (not headers) can still discover the AS.
@@ -138,10 +147,10 @@ describe("oauth discovery", () => {
     expect(echoed).toStrictEqual(wwwAuth);
     expect((echoed as string).length).toBe((wwwAuth as string).length);
     // And the shared value carries the absolute metadata URL.
-    expect(echoed).toContain(`resource_metadata="${METADATA_URL}"`);
+    expect(echoed).toContain(`resource_metadata="${MCP_METADATA_URL}"`);
   });
 
-  it("rejects anonymous POST /v1/mcp the same way as /mcp (alias shares the handler)", async () => {
+  it("rejects anonymous POST /v1/mcp with ITS own metadata pointer", async () => {
     const r = await fetch(`http://127.0.0.1:${port}/v1/mcp`, {
       method: "POST",
       headers: {
@@ -158,7 +167,7 @@ describe("oauth discovery", () => {
 
     expect(r.status).toBe(401);
     expect(r.headers.get("www-authenticate")).toBe(
-      `Bearer resource_metadata="${METADATA_URL}"`,
+      `Bearer resource_metadata="${METADATA_URL}/v1/mcp"`,
     );
     const body = (await r.json()) as Json;
     expect(body.id).toBe(7);

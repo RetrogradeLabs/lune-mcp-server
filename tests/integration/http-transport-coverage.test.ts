@@ -1,24 +1,20 @@
 /**
- * Streamable HTTP transport guard + session-transition coverage.
+ * Streamable HTTP guard coverage plus the verbs the stateless handler answers.
  *
  * Complements `full-http.test.ts` and `http-app.test.ts` rather than repeating
  * them. The additive assertions here are:
- *   - a follow-up POST (the `notifications/initialized` notification) on a freshly
- *     issued `mcp-session-id` is accepted (202), proving session reuse on a path
- *     full-http does not exercise (it reuses via `tools/list`);
- *   - an unknown-session POST is served statelessly (200; see
- *     orphaned-session.test.ts for the full contract), and the GET stream for
- *     the same id is declined with 405 (not 404 = session death);
- *   - a no-session non-initialize POST mints NO `mcp-session-id` header
- *     (400 / -32000);
+ *   - a `notifications/initialized` notification is acknowledged (202) whether
+ *     or not it carries a session id, a path full-http does not exercise;
+ *   - no response ever carries an `mcp-session-id` header, on any verb: that
+ *     header is what a client would try to pin a conversation to;
  *   - host guard BOTH directions: deny on GET (403 / -32003) and admit (the
- *     configured public host AND loopback) far enough to reach session
- *     handling (200 / 405, anything but 403), proving the guard sits upstream
- *     of session handling;
- *   - origin guard BOTH directions: deny (403 / -32003), admit https://claude.ai
- *     to session handling (200), and admit an absent Origin (initialize succeeds);
+ *     configured public host AND loopback) far enough to reach the handler
+ *     (200 / 405, anything but 403), proving the guard sits upstream of it;
+ *   - origin guard BOTH directions: deny (403 / -32003) and admit
+ *     https://claude.ai and an absent Origin through to the handler (200);
  *   - CORS preflight: an allowed origin yields 204 with ACAO echoed and
- *     Allow-Credentials: true, while a disallowed origin omits ACAO.
+ *     Allow-Credentials: true, a disallowed origin omits ACAO, and the modern
+ *     `Mcp-Method` / `Mcp-Name` headers are admitted.
  *
  * Host/Origin cannot be set through WHATWG `fetch`, so these drive a raw
  * `http.request` (the same approach as `http-app.test.ts`); CORS preflight uses
@@ -124,8 +120,24 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
-describe("http transport: session creation and reuse", () => {
-  it("mints a session id on initialize, then accepts a follow-up notification on that id (202)", async () => {
+describe("http transport: the stateless exchange", () => {
+  it("acknowledges a notification with (202) and without a session id", async () => {
+    const cases: Record<string, string>[] = [
+      { accept: ACCEPT, authorization: AUTH },
+      { accept: ACCEPT, authorization: AUTH, "mcp-session-id": "stale-id" },
+    ];
+    for (const headers of cases) {
+      const res = await rawRequest(port, "POST", "/mcp", headers, {
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+      });
+      expect(res.status).toBe(202);
+    }
+  });
+
+  it("never mints an mcp-session-id, on any verb", async () => {
+    // A minted id is what a client pins a conversation to, and pinning is what
+    // made a deploy or task death drop every connected client.
     const init = await rawRequest(
       port,
       "POST",
@@ -134,35 +146,34 @@ describe("http transport: session creation and reuse", () => {
       initBody(),
     );
     expect(init.status).toBe(200);
-    const sessionId = init.headers["mcp-session-id"];
-    expect(typeof sessionId).toBe("string");
-    expect((sessionId as string).length).toBeGreaterThan(0);
+    expect(init.headers["mcp-session-id"]).toBeUndefined();
 
-    // A second request that reuses the issued id must resolve against the live
-    // session. The `initialized` notification carries no id, so a found session
-    // replies 202 Accepted; a missing/unknown one would 404. This proves reuse
-    // without duplicating full-http's initialize -> tools/list reuse path.
-    const followUp = await rawRequest(
+    const list = await rawRequest(
       port,
       "POST",
       "/mcp",
-      {
+      { accept: ACCEPT, authorization: AUTH },
+      toolsListBody(2),
+    );
+    expect(list.status).toBe(200);
+    expect(list.headers["mcp-session-id"]).toBeUndefined();
+    expect(parseJsonRpc(list.body).error).toBeUndefined();
+
+    for (const method of ["GET", "DELETE"]) {
+      const res = await rawRequest(port, method, "/mcp", {
         accept: ACCEPT,
         authorization: AUTH,
-        "mcp-session-id": sessionId as string,
-      },
-      { jsonrpc: "2.0", method: "notifications/initialized" },
-    );
-    expect(followUp.status).toBe(202);
+      });
+      expect(res.status).toBe(405);
+      expect(res.headers["mcp-session-id"]).toBeUndefined();
+    }
   });
-});
 
-describe("http transport: unknown session id", () => {
-  it("serves an unknown-session POST statelessly instead of 404", async () => {
-    // Orphaned ids (idle eviction, LRU eviction, task restart) get a fresh
-    // stateless transport per request; the Anthropic managed-agents client
-    // never re-initializes after a 404, so a 404 here bricked dashboard
-    // follow-up turns (2026-06-10). Full contract: orphaned-session.test.ts.
+  it("serves a stale session id instead of refusing it", async () => {
+    // Ids minted before the migration keep arriving for as long as clients hold
+    // them; the Anthropic managed-agents client never re-initializes after a
+    // 404, so a 404 here bricked dashboard follow-up turns (2026-06-10). Full
+    // contract: orphaned-session.test.ts.
     const res = await rawRequest(
       port,
       "POST",
@@ -172,37 +183,19 @@ describe("http transport: unknown session id", () => {
         authorization: AUTH,
         "mcp-session-id": "definitely-not-real",
       },
-      toolsListBody(2),
+      toolsListBody(3),
     );
     expect(res.status).toBe(200);
     expect(parseJsonRpc(res.body).error).toBeUndefined();
   });
 
-  it("declines an unknown-session GET stream with 405 (not 404 = session death)", async () => {
+  it("declines a stale-id GET stream with 405 (not 404 = session death)", async () => {
     const res = await rawRequest(port, "GET", "/mcp", {
       accept: "text/event-stream",
       authorization: AUTH,
       "mcp-session-id": "definitely-not-real",
     });
     expect(res.status).toBe(405);
-  });
-});
-
-describe("http transport: no-session non-initialize POST", () => {
-  it("rejects with 400 / -32000 and mints no session id", async () => {
-    const res = await rawRequest(
-      port,
-      "POST",
-      "/mcp",
-      { accept: ACCEPT, authorization: AUTH },
-      toolsListBody(7),
-    );
-    expect(res.status).toBe(400);
-    // No id header is issued: a non-initialize call may not mint a session.
-    expect(res.headers["mcp-session-id"]).toBeUndefined();
-    const body = parseJsonRpc(res.body);
-    expect(body.error?.code).toBe(-32000);
-    expect(body.error?.message ?? "").toMatch(/no valid session/i);
   });
 });
 
@@ -220,7 +213,7 @@ describe("http transport: host guard (both directions)", () => {
     expect(body.error?.message ?? "").toMatch(/host not allowed/i);
   });
 
-  it("admits the configured public host past the guard to session handling (200, not 403)", async () => {
+  it("admits the configured public host past the guard to the handler (200, not 403)", async () => {
     const res = await rawRequest(
       port,
       "POST",
@@ -233,12 +226,12 @@ describe("http transport: host guard (both directions)", () => {
       },
       toolsListBody(3),
     );
-    // Reaching the stateless orphan handler proves the guard let the request
-    // through; a 403 here would mean the allowlisted host was wrongly rejected.
+    // Reaching the MCP handler proves the guard let the request through; a 403
+    // here would mean the allowlisted host was wrongly rejected.
     expect(res.status).toBe(200);
   });
 
-  it("admits a loopback Host past the guard to session handling (405, not 403)", async () => {
+  it("admits a loopback Host past the guard to the handler (405, not 403)", async () => {
     const res = await rawRequest(port, "GET", "/mcp", {
       accept: "text/event-stream",
       authorization: AUTH,
@@ -268,7 +261,7 @@ describe("http transport: origin guard (both directions)", () => {
     expect(body.error?.message ?? "").toMatch(/origin not allowed/i);
   });
 
-  it("admits the allowed https://claude.ai Origin past the guard to session handling (200)", async () => {
+  it("admits the allowed https://claude.ai Origin past the guard to the handler (200)", async () => {
     const res = await rawRequest(
       port,
       "POST",
@@ -284,7 +277,7 @@ describe("http transport: origin guard (both directions)", () => {
     expect(res.status).toBe(200);
   });
 
-  it("admits a request with no Origin header (initialize succeeds and a session is minted)", async () => {
+  it("admits a request with no Origin header (the handshake still answers)", async () => {
     const res = await rawRequest(
       port,
       "POST",
@@ -293,7 +286,7 @@ describe("http transport: origin guard (both directions)", () => {
       initBody(),
     );
     expect(res.status).toBe(200);
-    expect(typeof res.headers["mcp-session-id"]).toBe("string");
+    expect(res.body).toContain("lune-research");
   });
 });
 
@@ -316,6 +309,14 @@ describe("http transport: CORS preflight (both directions)", () => {
     expect(res.headers.get("access-control-allow-methods") ?? "").toContain(
       "POST",
     );
+    // `Mcp-Method` is MANDATORY on a 2026-07-28 request, so a browser client
+    // blocked from sending it fails every modern call at preflight while its
+    // legacy calls keep working.
+    const allowed = (
+      res.headers.get("access-control-allow-headers") ?? ""
+    ).toLowerCase();
+    expect(allowed).toContain("mcp-method");
+    expect(allowed).toContain("mcp-name");
   });
 
   it("does not echo Access-Control-Allow-Origin for a disallowed preflight origin", async () => {
@@ -329,49 +330,5 @@ describe("http transport: CORS preflight (both directions)", () => {
     // The preflight still short-circuits (204), but with no allow-origin grant
     // the browser blocks the cross-origin response.
     expect(res.headers.get("access-control-allow-origin")).toBeNull();
-  });
-});
-
-describe("http transport: GET/DELETE enforce the session principal", () => {
-  it("DELETE with a foreign bearer is a benign no-op, not a teardown", async () => {
-    // A leaked session id alone (plus any other valid bearer) must not let a
-    // different principal tear down someone's live session. White-box: inspect
-    // the in-process store since both the benign no-op and a real teardown end 204.
-    const app = buildHttpApp();
-    const store = app.locals.sessionStore as { get: (id: string) => unknown };
-    const srv = app.listen(0);
-    await new Promise<void>((r) => srv.once("listening", r));
-    const p = (srv.address() as AddressInfo).port;
-    try {
-      const init = await rawRequest(
-        p,
-        "POST",
-        "/mcp",
-        { accept: ACCEPT, authorization: AUTH },
-        initBody(),
-      );
-      const sid = init.headers["mcp-session-id"] as string;
-      expect(typeof sid).toBe("string");
-
-      const foreign = await rawRequest(p, "DELETE", "/mcp", {
-        accept: ACCEPT,
-        authorization: "Bearer lune_a_different_principal_token",
-        "mcp-session-id": sid,
-      });
-      expect(foreign.status).toBe(204);
-      expect(store.get(sid)).toBeDefined(); // session preserved
-
-      const owner = await rawRequest(p, "DELETE", "/mcp", {
-        accept: ACCEPT,
-        authorization: AUTH,
-        "mcp-session-id": sid,
-      });
-      // The SDK transport answers a real termination 200; the benign no-op above
-      // is our own 204. Either way the load-bearing contract is the store state.
-      expect([200, 204]).toContain(owner.status);
-      expect(store.get(sid)).toBeUndefined(); // owner tore it down
-    } finally {
-      await new Promise<void>((r) => srv.close(() => r()));
-    }
   });
 });

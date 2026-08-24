@@ -206,20 +206,36 @@ describe("paper tools", () => {
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toMatch(/rate limited/i);
     expect(r.content[0]!.text).toContain("retry_after_seconds=1");
+    // Must not be mistaken for a quota block: this one clears on its own.
+    expect(r.content[0]!.text).toContain("burst guard");
   });
 
   it("surfaces a 402 (quota/credits exhausted) as an isError tool result with buy-credits guidance", async () => {
     const { ky, setError } = fakeKy();
     setError(402, {
       error: "out_of_credits",
+      tier: "free",
+      units_required: 1,
+      daily_limit: 10,
+      used_today: 10,
+      remaining_today: 0,
+      credits_remaining: 0,
+      resets_at: "2026-08-16T00:00:00Z",
+      upgrade_hint:
+        "A higher plan raises the daily allowance: Pro 300/day, Max 600/day.",
+      upgrade_url: "https://lune/dashboard/settings/billing",
       buy_credits_url: "https://lune/dashboard/settings/billing",
     });
     const r = await callPaperTool(ky, "search_papers", {
       query: "side channels",
     });
     expect(r.isError).toBe(true);
-    expect(r.content[0]!.text).toContain("Quota exhausted");
-    expect(r.content[0]!.text).toContain(
+    const text = r.content[0]!.text;
+    expect(text).toContain("Lune quota exhausted");
+    expect(text).toContain("10/10 requests used in today's allowance");
+    expect(text).toContain("resets at 2026-08-16T00:00:00Z");
+    expect(text).toContain("Pro 300/day, Max 600/day");
+    expect(text).toContain(
       "buy_credits_url=https://lune/dashboard/settings/billing",
     );
   });

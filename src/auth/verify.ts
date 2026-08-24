@@ -70,9 +70,23 @@ function remoteJwks(): ReturnType<typeof createRemoteJWKSet> {
       // (default 5s); on timeout jose throws `ERR_JWKS_TIMEOUT`, which is NOT a
       // token-error code, so the gate fails open. JWKS is co-located with the AS
       // (~ms healthy), so 3s only bites a real outage.
+      //
+      // `cooldownDuration` is how long jose REFUSES to re-fetch after an unknown
+      // `kid`, and it is a straight tradeoff: it bounds the window in which a
+      // token signed by a freshly rotated key throws `ERR_JWKS_NO_MATCHING_KEY`
+      // (a 401 the client answers with a refresh that returns the SAME new kid,
+      // so it 401s again) against how hard a burst of forged kids may hammer the
+      // AS. 5s rather than jose's 30s default because that window is now
+      // PER TASK: the service runs several, each with its own cache, so a client
+      // sees the same token work on one call and fail on the next, which is
+      // exactly the pattern a consecutive-401 circuit breaker trips on. The
+      // reason it is degraded UX and not an outage at all is `oauth_keys.py`
+      // keeping the previous key live across a rotation, so only tokens minted
+      // after the flip are affected. 5s x 6 tasks is at most 6 extra JWKS GETs
+      // per rotation against an endpoint that serves a static document.
       resolve: createRemoteJWKSet(new URL(`${origin}/.well-known/jwks.json`), {
         timeoutDuration: 3000,
-        cooldownDuration: 30_000,
+        cooldownDuration: 5_000,
         cacheMaxAge: 600_000,
       }),
     };
@@ -89,17 +103,32 @@ function remoteJwks(): ReturnType<typeof createRemoteJWKSet> {
  *
  * `keyResolver` is injectable for tests; production uses the cached remote JWKS.
  */
-export async function accessTokenNeedsReauth(
+export interface VerifiedOAuthIdentity {
+  distinctId: string;
+  orgId?: string;
+}
+
+export interface AccessTokenInspection {
+  needsReauth: boolean;
+  verifiedIdentity?: VerifiedOAuthIdentity;
+}
+
+/**
+ * Inspect a bearer without changing the resource-server decision contract.
+ * Only a successfully verified Lune RS256 token yields an analytics identity;
+ * every fail-open path remains admissible but anonymous until the API decides.
+ */
+export async function inspectAccessToken(
   token: string,
   keyResolver?: JWTVerifyGetKey,
-): Promise<boolean> {
+): Promise<AccessTokenInspection> {
   let alg: string | undefined;
   try {
     alg = decodeProtectedHeader(token).alg;
   } catch {
-    return false; // not a JWT (PAT / opaque bearer) -> defer to the API.
+    return { needsReauth: false }; // PAT / opaque bearer -> API authority.
   }
-  if (alg !== "RS256") return false; // not a Lune OAuth token (e.g. Supabase ES256).
+  if (alg !== "RS256") return { needsReauth: false };
   try {
     // Resolve the JWKS INSIDE the try so a malformed `LUNE_AUTH_SERVER_URL` (the
     // `new URL(...)` in `remoteJwks()` throwing) fails open like any other JWKS
@@ -115,14 +144,27 @@ export async function accessTokenNeedsReauth(
     // worse than the original bug: the refreshed token carries the same iss, so it
     // would 401 too and trip the client's "401 after successful auth" circuit
     // breaker, hard-breaking OAuth for everyone. The API stays the iss authority.
-    await jwtVerify(token, resolve, {
+    const { payload } = await jwtVerify(token, resolve, {
       algorithms: ["RS256"],
       clockTolerance: CLOCK_TOLERANCE_S,
     });
-    return false; // signature + exp valid.
+    if (typeof payload.sub !== "string" || !payload.sub) {
+      return { needsReauth: false };
+    }
+    return {
+      needsReauth: false,
+      verifiedIdentity: {
+        distinctId: payload.sub,
+        ...(typeof payload.org_id === "string" && payload.org_id
+          ? { orgId: payload.org_id }
+          : {}),
+      },
+    };
   } catch (e) {
     const code = (e as { code?: string }).code;
-    if (code !== undefined && TOKEN_ERROR_CODES.has(code)) return true;
+    if (code !== undefined && TOKEN_ERROR_CODES.has(code)) {
+      return { needsReauth: true };
+    }
     // Fail-open path (JWKS infra fault, network error): we could not VERIFY the
     // token, so normally we forward it and let the API decide. But if the token
     // is plainly past its own `exp`, forwarding it dead-ends as an API 401 mapped
@@ -136,11 +178,18 @@ export async function accessTokenNeedsReauth(
         typeof exp === "number" &&
         exp < Date.now() / 1000 - CLOCK_TOLERANCE_S
       ) {
-        return true;
+        return { needsReauth: true };
       }
     } catch {
       // Not a decodable JWT payload; fall through to fail-open.
     }
-    return false;
+    return { needsReauth: false };
   }
+}
+
+export async function accessTokenNeedsReauth(
+  token: string,
+  keyResolver?: JWTVerifyGetKey,
+): Promise<boolean> {
+  return (await inspectAccessToken(token, keyResolver)).needsReauth;
 }

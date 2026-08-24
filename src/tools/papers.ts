@@ -1,4 +1,4 @@
-import { McpError } from "@modelcontextprotocol/sdk/types.js";
+import { ProtocolError } from "@modelcontextprotocol/server";
 import type { KyInstance } from "ky";
 import { cachedJson } from "../api/cached-fetch.js";
 import { HEAVY_TOOL_TIMEOUT_MS } from "../api/client.js";
@@ -346,7 +346,7 @@ async function resolveConferenceArg(
     case "match":
       return result.short_name;
     case "ambiguous":
-      throw new McpError(
+      throw new ProtocolError(
         LuneErrorCode.InvalidParams,
         `Conference "${raw}" is ambiguous, matches: ${result.candidates.join(
           ", ",

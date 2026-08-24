@@ -107,6 +107,11 @@ const PER_PRINCIPAL_PATHS: RegExp[] = [
 // unauthorized/over-quota caller the authorized leader's response (scope + meter
 // bypass) - those live on PER_PRINCIPAL_PATHS instead. The conferences LIST is in
 // the API PUBLIC_PATHS (anonymous), so it is the only globally-shareable fetch.
+// Anonymity is also what keeps ERROR bodies tenant-safe here: the single-flight
+// shares a leader's REJECTION with its followers, and a 402 body carries the
+// leader's tier / usage / credit balance (`quota.out_of_credits_payload`). A path
+// on this list can never 402 because it never hydrates a principal; anything that
+// can must stay off it.
 const GLOBAL_CACHEABLE_PATHS: RegExp[] = [/^conferences$/];
 
 function isPerPrincipalPath(path: string): boolean {

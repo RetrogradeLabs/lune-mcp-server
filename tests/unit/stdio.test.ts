@@ -1,19 +1,17 @@
 /**
  * Unit coverage for the stdio transport runner (`src/transport/stdio.ts`).
  *
- * `runStdio` captures the Bearer token once, builds a server, and connects
- * a `StdioServerTransport`. We mock the SDK transport and the server factory
- * so no real stdio handshake is attempted, and assert the wiring order.
+ * `runStdio` captures the Bearer token once, then hands ONE factory to
+ * `serveStdio`, which owns the era decision for the connection. We mock both so
+ * no real stdio handshake is attempted, and assert the wiring order.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const connect = vi.fn<() => Promise<void>>();
-const fakeServer = { connect };
-const makeServer = vi.fn<(factory: () => unknown) => typeof fakeServer>(
-  () => fakeServer,
-);
+const makeServer = vi.fn<(factory: () => unknown) => object>(() => ({}));
 const makeClient = vi.fn<(token: string) => unknown>();
-const StdioServerTransport = vi.fn<() => void>();
+const serveStdio = vi.fn<(factory: () => unknown) => { close: () => void }>(
+  () => ({ close: () => {} }),
+);
 
 vi.mock("../../src/server.js", () => ({
   makeServer: (factory: () => unknown) => makeServer(factory),
@@ -21,12 +19,8 @@ vi.mock("../../src/server.js", () => ({
 vi.mock("../../src/api/client.js", () => ({
   makeClient: (token: string) => makeClient(token),
 }));
-vi.mock("@modelcontextprotocol/sdk/server/stdio.js", () => ({
-  StdioServerTransport: class {
-    constructor() {
-      StdioServerTransport();
-    }
-  },
+vi.mock("@modelcontextprotocol/server/stdio", () => ({
+  serveStdio: (factory: () => unknown) => serveStdio(factory),
 }));
 
 describe("runStdio", () => {
@@ -35,28 +29,31 @@ describe("runStdio", () => {
     vi.clearAllMocks();
   });
 
-  it("captures the token, builds a server, and connects a stdio transport", async () => {
+  it("captures the token, builds a server, and serves it over stdio", async () => {
     vi.stubEnv("LUNE_API_KEY", "lune_stdio_token");
-    connect.mockResolvedValue(undefined);
     const { runStdio } = await import("../../src/transport/stdio.js");
 
     await runStdio();
 
-    expect(makeServer).toHaveBeenCalledTimes(1);
-    expect(StdioServerTransport).toHaveBeenCalledTimes(1);
-    expect(connect).toHaveBeenCalledTimes(1);
+    expect(serveStdio).toHaveBeenCalledTimes(1);
 
-    // The factory passed into makeServer must, when invoked, build a client
-    // bound to the token captured at startup.
-    const factory = makeServer.mock.calls[0]![0];
+    // `serveStdio` calls the factory itself (once per connection, plus once for
+    // a discarded `server/discover` probe), so nothing is built until it does.
+    expect(makeServer).not.toHaveBeenCalled();
+    const factory = serveStdio.mock.calls[0]![0];
     factory();
+    expect(makeServer).toHaveBeenCalledTimes(1);
+
+    // The client factory passed into makeServer must, when invoked, build a
+    // client bound to the token captured at startup.
+    makeServer.mock.calls[0]![0]();
     expect(makeClient).toHaveBeenCalledWith("lune_stdio_token");
   });
 
-  it("throws when LUNE_API_KEY is missing before any server is built", async () => {
+  it("throws when LUNE_API_KEY is missing before anything is served", async () => {
     vi.stubEnv("LUNE_API_KEY", "");
     const { runStdio } = await import("../../src/transport/stdio.js");
     await expect(runStdio()).rejects.toThrow(/LUNE_API_KEY/);
-    expect(makeServer).not.toHaveBeenCalled();
+    expect(serveStdio).not.toHaveBeenCalled();
   });
 });

@@ -167,9 +167,9 @@ describe("analytical tools forward source in the request body", () => {
       source: "workspace",
     });
     const post = calls.find((c) => c.url === "claims/verify");
-    expect((post?.opts?.json as Record<string, unknown>).source).toBe(
-      "workspace",
-    );
+    expect(
+      (post?.opts?.json as Record<string, unknown> | undefined)?.source,
+    ).toBe("workspace");
   });
 
   it("extract_from_papers sends source", async () => {
@@ -185,9 +185,9 @@ describe("analytical tools forward source in the request body", () => {
       source: "workspace",
     });
     const post = calls.find((c) => c.url === "papers/extract");
-    expect((post?.opts?.json as Record<string, unknown>).source).toBe(
-      "workspace",
-    );
+    expect(
+      (post?.opts?.json as Record<string, unknown> | undefined)?.source,
+    ).toBe("workspace");
   });
 
   it("gather_evidence sends source", async () => {
@@ -207,9 +207,9 @@ describe("analytical tools forward source in the request body", () => {
       source: "workspace",
     });
     const post = calls.find((c) => c.url === "evidence/gather");
-    expect((post?.opts?.json as Record<string, unknown>).source).toBe(
-      "workspace",
-    );
+    expect(
+      (post?.opts?.json as Record<string, unknown> | undefined)?.source,
+    ).toBe("workspace");
   });
 });
 

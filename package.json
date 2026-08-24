@@ -1,6 +1,6 @@
 {
   "name": "@retrograde-labs/lune-mcp-server",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "mcpName": "com.luneresearch/lune",
   "description": "Lune Research MCP server (stdio + Streamable HTTP) proxying api.luneresearch.com",
   "license": "MIT",
@@ -30,29 +30,31 @@
   ],
   "scripts": {
     "build": "tsup",
-    "dev": "tsx src/cli.ts",
+    "dev": "bun src/cli.ts",
     "dev:watch": "tsup --watch",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/core": "2.0.0",
+    "@modelcontextprotocol/node": "2.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
     "express": "^5.2.1",
-    "jose": "^6.2.3",
-    "ky": "^2.0.2",
-    "redis": "^6.2.0",
+    "jose": "^6.2.10",
+    "ky": "catalog:",
+    "redis": "^6.2.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
-    "@types/node": "^26.1.2",
-    "@vitest/coverage-v8": "4.1.8",
-    "tsup": "^8.5.1",
-    "tsx": "^4.23.6",
-    "typescript": "^6.0.3",
-    "vite": "^8.2.0",
-    "vitest": "4.1.8"
+    "@types/node": "catalog:",
+    "@typescript/native": "catalog:",
+    "@vitest/coverage-v8": "catalog:",
+    "tsup": "catalog:",
+    "typescript": "catalog:",
+    "vite": "^8.2.2",
+    "vitest": "catalog:"
   },
   "engines": {
     "node": ">=20"

@@ -31,6 +31,8 @@ function fakeKy(response: unknown = {}): KyInstance {
     post: make(),
     delete: make(),
     put: make(),
+    // `registerAllTools` extends every client with `X-Lune-Client`.
+    extend: () => fakeKy(response),
   } as unknown as KyInstance;
 }
 
@@ -53,6 +55,7 @@ function erroringKy(status: number, body: unknown): KyInstance {
     post: make(),
     delete: make(),
     put: make(),
+    extend: () => erroringKy(status, body),
   } as unknown as KyInstance;
 }
 
@@ -194,6 +197,30 @@ describe("alwaysLoad entry tools (tool-selection: get picked over web_search)", 
     expect(t.description.slice(0, 400)).toContain("web_search");
     // Cross-reference that routes single questions to the cheaper entry tool.
     expect(t.description).toContain("use `search_papers` instead");
+  });
+});
+
+describe("deterministic tools/list ordering", () => {
+  it("returns tools in a deterministic order across calls", () => {
+    // 2026-07-28 SHOULD: a stable order lets clients cache the catalogue and
+    // raises their LLM prompt-cache hit rate. It is also the precondition for
+    // the `tools/list` cache hint being worth anything. Comparing two calls to
+    // each other cannot fail (the source is one module-level array), so pin
+    // the order itself: entry tools first, then the heavier ones.
+    expect(listToolsResponse(true).tools.map((t) => t.name)).toEqual([
+      "search_papers",
+      "search_papers_many",
+      "get_paper_fulltext",
+      "get_paper_citations",
+      "list_conferences",
+      "get_conference_papers",
+      "search_related_papers",
+      "extract_from_papers",
+      "verify_claims",
+      "gather_evidence",
+      "search_research_guidance",
+      "get_research_guidance_doc",
+    ]);
   });
 });
 
@@ -392,7 +419,7 @@ describe("registerAllTools", () => {
       params: { name: "search_papers", arguments: { query: "x" } },
     })) as { isError?: boolean; content: Array<{ text: string }> };
     expect(res.isError).toBe(true);
-    expect(res.content[0]!.text).toContain("Quota exhausted");
+    expect(res.content[0]!.text).toContain("Lune quota exhausted");
     expect(res.content[0]!.text).toContain("buy_credits_url=");
   });
 

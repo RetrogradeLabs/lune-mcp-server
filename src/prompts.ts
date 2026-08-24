@@ -1,8 +1,10 @@
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import type { Server, ServerContext } from "@modelcontextprotocol/server";
 import {
-  GetPromptRequestSchema,
-  ListPromptsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+  analyticsEnabled,
+  attributeFromEnvelope,
+  captureMcp,
+  type McpAnalyticsContext,
+} from "./analytics.js";
 
 /**
  * MCP Prompts: reusable, user-invokable research workflows (surfaced as slash
@@ -320,16 +322,35 @@ export function getPromptResult(
 }
 
 /**
- * Wire the real `prompts/list` + `prompts/get` handlers. Call AFTER
- * `registerAllTools` (which no longer registers an empty prompts handler). The
- * `prompts: {}` capability is already declared in `makeServer`.
+ * Wire the real `prompts/list` + `prompts/get` handlers. The `prompts: {}`
+ * capability is already declared in `makeServer`.
  */
-export function registerPrompts(server: Server): void {
-  server.setRequestHandler(ListPromptsRequestSchema, async () => listPrompts());
+export function registerPrompts(
+  server: Server,
+  analyticsContext?: () => McpAnalyticsContext,
+): void {
+  // These two make no upstream API call, so the request envelope is their ONLY
+  // source of client identity now that the initialize handshake is gone.
+  server.setRequestHandler("prompts/list", async (_req, ctx) => {
+    attributeFromEnvelope(server, ctx);
+    if (analyticsEnabled()) {
+      captureMcp("$mcp_prompts_list", server, analyticsContext?.(), {});
+    }
+    return listPrompts();
+  });
   server.setRequestHandler(
-    GetPromptRequestSchema,
-    async (req: {
-      params: { name: string; arguments?: Record<string, string> };
-    }) => getPromptResult(req.params.name, req.params.arguments ?? {}),
+    "prompts/get",
+    async (
+      req: { params: { name: string; arguments?: Record<string, string> } },
+      ctx: ServerContext,
+    ) => {
+      attributeFromEnvelope(server, ctx);
+      if (analyticsEnabled()) {
+        captureMcp("$mcp_prompt_get", server, analyticsContext?.(), {
+          $mcp_resource_name: req.params.name,
+        });
+      }
+      return getPromptResult(req.params.name, req.params.arguments ?? {});
+    },
   );
 }

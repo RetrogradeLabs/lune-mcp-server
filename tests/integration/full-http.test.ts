@@ -46,7 +46,9 @@ describe("HTTP transport", () => {
     const wa = r.headers.get("www-authenticate");
     expect(wa).toMatch(/^Bearer\s/);
     expect(wa).toContain('resource_metadata="');
-    expect(wa).toContain('/.well-known/oauth-protected-resource"');
+    // Path-aware per RFC 9728 §3.3: the challenge points at the metadata for the
+    // endpoint the client actually called, here the legacy `/mcp` alias.
+    expect(wa).toContain('/.well-known/oauth-protected-resource/mcp"');
     const body = (await r.json()) as {
       id: number;
       error: {
@@ -70,7 +72,7 @@ describe("HTTP transport", () => {
       scopes_supported: string[];
       bearer_methods_supported: string[];
     };
-    expect(body.resource).toBe("https://mcp.luneresearch.com/mcp");
+    expect(body.resource).toBe("https://mcp.luneresearch.com");
     expect(body.authorization_servers.length).toBeGreaterThan(0);
     expect(body.authorization_servers[0]).toMatch(/^https?:\/\//);
     expect(body.scopes_supported).toContain("papers:read");
@@ -87,6 +89,7 @@ describe("HTTP transport", () => {
       authorization_servers: string[];
       scopes_supported: string[];
     };
+    // RFC 9728 §3.3: identical to the identifier the suffix was inserted into.
     expect(body.resource).toBe("https://mcp.luneresearch.com/mcp");
     expect(body.authorization_servers).toContain(
       "https://api.luneresearch.com",
@@ -94,7 +97,7 @@ describe("HTTP transport", () => {
     expect(body.scopes_supported).toContain("papers:read");
   });
 
-  it("exposes canonical resource metadata for the /v1/mcp alias", async () => {
+  it("exposes path-specific resource metadata for the /v1/mcp alias", async () => {
     const r = await fetch(
       `http://localhost:${port}/.well-known/oauth-protected-resource/v1/mcp`,
     );
@@ -103,7 +106,7 @@ describe("HTTP transport", () => {
       resource: string;
       authorization_servers: string[];
     };
-    expect(body.resource).toBe("https://mcp.luneresearch.com/mcp");
+    expect(body.resource).toBe("https://mcp.luneresearch.com/v1/mcp");
     expect(body.authorization_servers).toContain(
       "https://api.luneresearch.com",
     );
@@ -127,7 +130,7 @@ describe("HTTP transport", () => {
     expect(r.status).toBe(401);
   });
 
-  it("serves a present-but-unknown (stale) session ID statelessly", async () => {
+  it("serves a stale session ID from before the stateless migration", async () => {
     const r = await fetch(`http://localhost:${port}/mcp`, {
       method: "POST",
       headers: {
@@ -143,17 +146,16 @@ describe("HTTP transport", () => {
         params: {},
       }),
     });
-    // Present-but-unknown session id (idle-evicted / restart-orphaned) is
-    // served through an ephemeral stateless transport rather than the spec's
-    // 404: the Anthropic managed-agents MCP client never re-initializes after
-    // a 404, which bricked dashboard follow-up turns (2026-06-10). The full
-    // contract lives in orphaned-session.test.ts.
+    // The stateless handler IGNORES an unexpected session id rather than
+    // rejecting it: the Anthropic managed-agents MCP client never
+    // re-initializes after a 404, which bricked dashboard follow-up turns
+    // (2026-06-10). The full contract lives in orphaned-session.test.ts.
     expect(r.status).toBe(200);
   });
 
-  it("rejects a POST /mcp with no session ID and a non-initialize method", async () => {
-    // No `mcp-session-id` header and the body is `tools/list`, not
-    // `initialize`: the transport refuses to mint a session.
+  it("serves a POST /mcp with no session ID and a non-initialize method", async () => {
+    // The session transport refused this (only `initialize` could mint a
+    // session); stateless serving has nothing to look up, so it answers.
     const r = await fetch(`http://localhost:${port}/mcp`, {
       method: "POST",
       headers: {
@@ -168,12 +170,7 @@ describe("HTTP transport", () => {
         params: {},
       }),
     });
-    expect(r.status).toBe(400);
-    const body = (await r.json()) as {
-      error: { code: number; message: string };
-    };
-    expect(body.error.code).toBe(-32000);
-    expect(body.error.message).toMatch(/no valid session/i);
+    expect(r.status).toBe(200);
   });
 
   it("serves the OpenAI Apps domain-ownership challenge as plain text", async () => {
@@ -234,15 +231,15 @@ describe("HTTP transport", () => {
     expect(r.headers.get("access-control-allow-methods")).toContain("POST");
   });
 
-  it("handles an initialize → tools/list → DELETE session lifecycle", async () => {
-    // Parse the SSE-framed JSON-RPC body the Streamable HTTP transport emits.
+  it("handles a legacy initialize then tools/list with no session between them", async () => {
+    // Parse the SSE-framed JSON-RPC body the legacy stateless fallback emits.
     const parseSse = (raw: string): Record<string, unknown> => {
       const dataLine = raw.split("\n").find((l) => l.startsWith("data:"));
       if (!dataLine) throw new Error(`no SSE data frame in: ${raw}`);
       return JSON.parse(dataLine.slice(5).trim()) as Record<string, unknown>;
     };
 
-    // 1. initialize: mints a new session, returns the id in a response header.
+    // 1. initialize: answered, and deliberately mints NO session id.
     const initRes = await fetch(`http://localhost:${port}/mcp`, {
       method: "POST",
       headers: {
@@ -262,21 +259,19 @@ describe("HTTP transport", () => {
       }),
     });
     expect(initRes.status).toBe(200);
-    const sessionId = initRes.headers.get("mcp-session-id");
-    expect(sessionId).toBeTruthy();
+    expect(initRes.headers.get("mcp-session-id")).toBeNull();
     const initBody = parseSse(await initRes.text()) as {
       result: { serverInfo: { name: string } };
     };
     expect(initBody.result.serverInfo.name).toBe("lune-research");
 
-    // 2. tools/list on the established session: no API call, fully local.
+    // 2. tools/list carrying no session: no API call, fully local.
     const listRes = await fetch(`http://localhost:${port}/mcp`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
         authorization: "Bearer lune_fake_session_token",
-        "mcp-session-id": sessionId!,
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -291,75 +286,39 @@ describe("HTTP transport", () => {
     };
     expect(listBody.result.tools.length).toBe(12);
 
-    // 3. GET /mcp opens the standalone SSE stream for the live session.
-    const streamRes = await fetch(`http://localhost:${port}/mcp`, {
-      method: "GET",
-      headers: {
-        accept: "text/event-stream",
-        authorization: "Bearer lune_fake_session_token",
-        "mcp-session-id": sessionId!,
-      },
-    });
-    expect(streamRes.status).toBe(200);
-    // Cancel the long-lived stream so the test can proceed.
-    await streamRes.body?.cancel();
-
-    // 4. DELETE /mcp tears the session down.
-    const delRes = await fetch(`http://localhost:${port}/mcp`, {
-      method: "DELETE",
-      headers: {
-        authorization: "Bearer lune_fake_session_token",
-        "mcp-session-id": sessionId!,
-      },
-    });
-    expect([200, 204]).toContain(delRes.status);
-
-    // 5. Re-using the now-deleted session id still works, statelessly.
-    const afterDelete = await fetch(`http://localhost:${port}/mcp`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-        authorization: "Bearer lune_fake_session_token",
-        "mcp-session-id": sessionId!,
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 3,
-        method: "tools/list",
-        params: {},
-      }),
-    });
-    // The DELETE dropped the stateful entry, so the id is now
-    // present-but-unknown: served through the ephemeral stateless path like
-    // any orphaned id (a 404 would brick clients that never re-initialize;
-    // see orphaned-session.test.ts). Auth is still enforced per request, so
-    // serving a spec-violating client that reuses a deleted id is harmless.
-    expect(afterDelete.status).toBe(200);
+    // 3. The 2025 session verbs are declined without ceremony: there is no
+    // standalone stream to open and nothing to tear down.
+    for (const method of ["GET", "DELETE"]) {
+      const res = await fetch(`http://localhost:${port}/mcp`, {
+        method,
+        headers: {
+          accept: "text/event-stream",
+          authorization: "Bearer lune_fake_session_token",
+        },
+      });
+      expect(res.status).toBe(405);
+      await res.text();
+    }
   });
 
-  it("GET /mcp without a session id returns 400", async () => {
+  it("GET /mcp declines the standalone stream with 405", async () => {
     const r = await fetch(`http://localhost:${port}/mcp`, {
       method: "GET",
       headers: { accept: "text/event-stream" },
     });
-    expect(r.status).toBe(400);
-    expect(await r.text()).toMatch(/invalid or missing session/i);
+    expect(r.status).toBe(405);
   });
 
-  it("DELETE /mcp for an unknown session is a 204 no-op", async () => {
-    const r = await fetch(`http://localhost:${port}/mcp`, {
-      method: "DELETE",
-      headers: { "mcp-session-id": "never-existed" },
-    });
-    expect(r.status).toBe(204);
-  });
-
-  it("DELETE /mcp with no session id header is a 204 no-op", async () => {
-    // Exercises the `sid ? ... : undefined` branch with no header at all.
-    const r = await fetch(`http://localhost:${port}/mcp`, { method: "DELETE" });
-    expect(r.status).toBe(204);
-  });
+  it.each([["never-existed"], [undefined]])(
+    "DELETE /mcp answers 405 for session id %s",
+    async (sid) => {
+      const r = await fetch(`http://localhost:${port}/mcp`, {
+        method: "DELETE",
+        headers: sid ? { "mcp-session-id": sid } : {},
+      });
+      expect(r.status).toBe(405);
+    },
+  );
 
   it("the 401 body id defaults to null when the request body carries no id", async () => {
     const r = await fetch(`http://localhost:${port}/mcp`, {
@@ -391,11 +350,11 @@ describe("HTTP transport", () => {
   });
 
   it("dispatches a real tools/call through the per-request client factory", async () => {
-    // A genuine `tools/call` over HTTP exercises the `makeClient` closure
-    // and the live-token getter on the session entry. `getBaseUrl()` is
-    // read per request, so we point it at a guaranteed-closed local port:
-    // the tool's upstream fetch fails fast (connection refused, no real
-    // network), but the token-rotation closures have already executed.
+    // A genuine `tools/call` over HTTP exercises the per-request `makeClient`
+    // closure the handler factory builds. `getBaseUrl()` is read per request,
+    // so we point it at a guaranteed-closed local port: the tool's upstream
+    // fetch fails fast (connection refused, no real network), but the client
+    // factory has already executed.
     const savedBaseUrl = process.env.LUNE_API_BASE_URL;
     process.env.LUNE_API_BASE_URL = "http://127.0.0.1:1";
     const parseSse = (raw: string): Record<string, unknown> => {
@@ -405,33 +364,12 @@ describe("HTTP transport", () => {
     };
 
     try {
-      const initRes = await fetch(`http://localhost:${port}/mcp`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json, text/event-stream",
-          authorization: "Bearer lune_toolcall_token",
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "initialize",
-          params: {
-            protocolVersion: "2024-11-05",
-            capabilities: {},
-            clientInfo: { name: "vitest", version: "0.0.0" },
-          },
-        }),
-      });
-      const sessionId = initRes.headers.get("mcp-session-id")!;
-
       const callRes = await fetch(`http://localhost:${port}/mcp`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           accept: "application/json, text/event-stream",
           authorization: "Bearer lune_toolcall_token",
-          "mcp-session-id": sessionId,
         },
         body: JSON.stringify({
           jsonrpc: "2.0",
@@ -451,17 +389,8 @@ describe("HTTP transport", () => {
       };
       expect(body.id).toBe(2);
       // Either an MCP error or an error-flagged result is fine; the point
-      // is the request round-tripped through the token-rotation closures.
+      // is the request round-tripped through the per-request client factory.
       expect(body.result ?? body.error).toBeDefined();
-
-      // Clean up the session.
-      await fetch(`http://localhost:${port}/mcp`, {
-        method: "DELETE",
-        headers: {
-          authorization: "Bearer lune_toolcall_token",
-          "mcp-session-id": sessionId,
-        },
-      });
     } finally {
       if (savedBaseUrl === undefined) delete process.env.LUNE_API_BASE_URL;
       else process.env.LUNE_API_BASE_URL = savedBaseUrl;

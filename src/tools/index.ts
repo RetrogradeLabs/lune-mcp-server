@@ -1,11 +1,14 @@
-import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import type { Server, ServerContext } from "@modelcontextprotocol/server";
 import type { KyInstance } from "ky";
 import { z } from "zod";
 
+import {
+  analyticsEnabled,
+  attributeFromEnvelope,
+  captureMcp,
+  clientHeaderFor,
+  type McpAnalyticsContext,
+} from "../analytics.js";
 import { PAPER_TOOLS, callPaperTool } from "./papers.js";
 import { GUIDANCE_TOOLS, callGuidanceTool } from "./guidance.js";
 import type { ToolCallResult, ToolDef } from "./_shared.js";
@@ -91,6 +94,56 @@ async function dispatchToolCall(
 export { dispatchToolCall };
 
 /**
+ * Roadmap intake, registered ONLY when analytics is enabled (the remote
+ * deployment): an agent that needs a capability Lune lacks invokes this, and
+ * the request lands as `$mcp_missing_capability`, a direct unmet-demand
+ * signal. Local stdio installs never see the tool (analytics is never
+ * initialized there), so the published tool surface is unchanged for them.
+ */
+const GET_MORE_TOOLS_SCHEMA = z.object({
+  capability: z
+    .string()
+    .min(1)
+    .max(500)
+    .describe(
+      "Describe the missing capability generically in one or two sentences. " +
+        "Do not include user text, names, emails, credentials, or draft content.",
+    ),
+});
+
+export const GET_MORE_TOOLS_DEF = {
+  name: "get_more_tools",
+  title: "Request a missing capability",
+  description:
+    "Call this when the research task needs something Lune's tools cannot do " +
+    "yet (a data source, a filter, an analysis). The request is recorded for " +
+    "the roadmap; omit private details. It does not add tools to this session.",
+  inputSchema: z.toJSONSchema(GET_MORE_TOOLS_SCHEMA, {
+    target: "draft-2020-12",
+  }) as Record<string, unknown>,
+  annotations: { readOnlyHint: true },
+};
+
+/**
+ * The two failure facts PostHog's MCP views read off an errored call
+ * (`$mcp_error_message`, `$mcp_error_status`). `toToolError` already renders the
+ * agent-facing prose plus a machine-readable `k=v` footer, so read them back out
+ * of the result instead of threading a second error channel through every tool
+ * handler. Emitting neither is what left "extract_from_papers: 100% error rate"
+ * as a bare count with no reason attached; `captureMcp` sanitises and truncates
+ * the text on the way out.
+ */
+function errorFacts(result: ToolCallResult): Record<string, unknown> {
+  const text = result.content.map((c) => c.text).join("\n");
+  const status = /(?:^|\s)http_status=(\d{3})(?:\s|$)/.exec(text)?.[1];
+  return {
+    $mcp_error_type: "tool_error",
+    $mcp_error_message: text,
+    ...(status ? { $mcp_error_status: status } : {}),
+  };
+}
+
+/**
  * Whether the caller's credential is workspace-scoped (the managed Lune
  * Workspace session PAT, which carries an active workspace). Reads the cheap,
  * DB-free `/account/mcp-context` endpoint with the request's bearer. Any failure
@@ -125,31 +178,134 @@ async function isWorkspaceCredential(
 export function registerAllTools(
   server: Server,
   makeClient: () => KyInstance,
+  analyticsContext?: () => McpAnalyticsContext,
 ): void {
+  // Attach client attribution (X-Lune-Client) to every upstream call; the
+  // header is how API-side analytics distinguishes claude-code vs cursor vs
+  // CLI usage without any client-side telemetry. Unconditional because its
+  // absence is what makes the API read the call as `api_direct`, so an
+  // unidentified client still has to say which transport it came in on.
+  const taggedClient = (): KyInstance =>
+    makeClient().extend({
+      headers: { "X-Lune-Client": clientHeaderFor(server) },
+    });
   // The SDK's setRequestHandler infers a wide union for the response type
-  // (ServerResult | TaskResult); cast to satisfy the overload while still
-  // returning a valid ServerResult shape at runtime.
+  // (ServerResult | InputRequiredResult); cast to satisfy the overload while
+  // still returning a valid ServerResult shape at runtime.
   server.setRequestHandler(
-    ListToolsRequestSchema,
+    "tools/list",
     // Credential-aware: the workspace surface is advertised ONLY to a
     // workspace-scoped credential (the dashboard Workspace agent); external
     // clients never see the `source="workspace"` option.
-    async () => {
+    async (_req, ctx) => {
+      attributeFromEnvelope(server, ctx);
+      const contextWorkspace = analyticsContext?.()?.workspaceCredential;
+      const response = listToolsResponse(
+        contextWorkspace ?? (await isWorkspaceCredential(taggedClient)),
+      );
+      // Gated on the principal's OPT-OUT, never on `captureEnabled`: that also
+      // goes false when the shared daily event budget is spent, and a telemetry
+      // quota must not decide which tools an agent is offered. Under a spent
+      // budget the tool stays listed and `captureMcp` drops the event, which is
+      // the same thing that happens to every other event in that window.
+      if (!analyticsEnabled() || analyticsContext?.()?.captureOptOut === true) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return response as any;
+      }
+      const tools = [...response.tools, GET_MORE_TOOLS_DEF];
+      // Fires per REQUEST: the HTTP handler builds a server per request, so a
+      // de-dup flag scoped here would never be true. Repeat lists therefore
+      // spend the `claimMcpAnalyticsBudget` allowance (`.claude/rules/mcp.md`),
+      // and the cure for that is not cross-request state.
+      captureMcp("$mcp_tools_list", server, analyticsContext?.(), {
+        $mcp_listed_tool_names: tools.map((tool) => tool.name),
+      });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return listToolsResponse(await isWorkspaceCredential(makeClient)) as any;
+      return { tools } as any;
     },
   );
 
+  /**
+   * The free-text capability an agent asked for, for `$mcp_missing_capability`.
+   * Anything that is not a string is not an intent: recording `[object Object]`
+   * would pollute the intent clustering, so it reports as absent.
+   */
+  function capabilityIntent(args: Record<string, unknown>): string {
+    const raw = args.capability;
+    return typeof raw === "string" ? raw.slice(0, 500) : "";
+  }
+
   server.setRequestHandler(
-    CallToolRequestSchema,
-    async (req: {
-      params: { name: string; arguments?: Record<string, unknown> };
-    }) => {
-      const api = makeClient();
+    "tools/call",
+    async (
+      req: { params: { name: string; arguments?: Record<string, unknown> } },
+      ctx: ServerContext,
+    ) => {
+      attributeFromEnvelope(server, ctx);
       const name = req.params.name;
       const args = req.params.arguments ?? {};
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return (await dispatchToolCall(api, name, args)) as any;
+      if (name === "get_more_tools" && analyticsEnabled()) {
+        // Graceful on bad args (an isError result, not a thrown protocol
+        // error): this meta tool exists to LISTEN, so a malformed request is
+        // itself signal and must never read as a server fault to the agent.
+        const parsed = GET_MORE_TOOLS_SCHEMA.safeParse(args);
+        captureMcp("$mcp_missing_capability", server, analyticsContext?.(), {
+          $mcp_intent: parsed.success
+            ? parsed.data.capability
+            : capabilityIntent(args),
+          $mcp_is_error: !parsed.success,
+        });
+        if (!parsed.success) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text:
+                  "get_more_tools needs a `capability` string describing " +
+                  "what you were trying to do.",
+              },
+            ],
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any;
+        }
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                "Noted. Lune cannot do this yet; the request has been " +
+                "recorded for the roadmap. Continue with the existing tools.",
+            },
+          ],
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any;
+      }
+      const api = taggedClient();
+      const started = Date.now();
+      try {
+        const result = await dispatchToolCall(api, name, args);
+        if (analyticsEnabled()) {
+          captureMcp("$mcp_tool_call", server, analyticsContext?.(), {
+            $mcp_tool_name: name,
+            $mcp_duration_ms: Date.now() - started,
+            $mcp_is_error: result.isError === true,
+            ...(result.isError === true ? errorFacts(result) : {}),
+          });
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return result as any;
+      } catch (e) {
+        if (analyticsEnabled()) {
+          captureMcp("$mcp_tool_call", server, analyticsContext?.(), {
+            $mcp_tool_name: name,
+            $mcp_duration_ms: Date.now() - started,
+            $mcp_is_error: true,
+            $mcp_error_type: "protocol_error",
+          });
+        }
+        throw e;
+      }
     },
   );
 }

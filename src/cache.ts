@@ -21,7 +21,7 @@ import { createClient, type RedisClientType } from "redis";
 /* ───────────────────────────── Cache interface ─────────────────────────── */
 
 export interface Cache {
-  get(key: string): Promise<unknown | undefined>;
+  get(key: string): Promise<unknown>;
   set(key: string, value: unknown, ttlMs?: number): Promise<void>;
   clear(): Promise<void>;
 }
@@ -41,7 +41,7 @@ export class InProcessTTLCache implements Cache {
     private readonly defaultTtlMs: number,
   ) {}
 
-  async get(key: string): Promise<unknown | undefined> {
+  async get(key: string): Promise<unknown> {
     const entry = this.store.get(key);
     if (!entry) return undefined;
     if (entry.expiresAt <= Date.now()) {
@@ -138,7 +138,7 @@ export class RedisCache implements Cache {
     return `lune:${NAMESPACE_PREFIX}:${this.namespace}:${key}`;
   }
 
-  async get(key: string): Promise<unknown | undefined> {
+  async get(key: string): Promise<unknown> {
     try {
       await this.ensureConnected();
       if (!this.connected) return undefined;
