@@ -1,6 +1,6 @@
 {
   "identifier": "retrogradelabs-lune-mcp-server",
-  "name": "Lune",
+  "name": "Lune Research",
   "version": "2.1.0",
   "description": "Ground your agent in real peer-reviewed research. Search the full text of papers from top venues, follow citation trails, check draft claims against verbatim quotes, and pull up vetted methodology guidance.",
   "author": "Retrograde Labs",
@@ -21,9 +21,16 @@
   "localizations": [
     {
       "locale": "zh-CN",
-      "name": "Lune",
+      "name": "Lune Research 科研检索",
       "description": "让你的智能体基于真实的同行评审论文开展工作：全文检索顶级会议与期刊的论文，追踪引用脉络，用原文引述核对稿件中的论断，并获取经过验证的科研方法指导。",
-      "tags": ["科研", "论文", "引用", "同行评审", "学术", "文献综述"]
+      "tags": [
+        "科研",
+        "论文",
+        "引用",
+        "同行评审",
+        "学术",
+        "文献综述"
+      ]
     }
   ],
   "prompts": [
@@ -155,7 +162,11 @@
             "description": "Result ordering within the ranked shortlist: `relevance` (default), `date` (newest first), or `citations` (most-cited first).",
             "default": "relevance",
             "type": "string",
-            "enum": ["relevance", "date", "citations"]
+            "enum": [
+              "relevance",
+              "date",
+              "citations"
+            ]
           },
           "year_min": {
             "description": "Only include papers published in this year or later.",
@@ -183,7 +194,9 @@
             "type": "boolean"
           }
         },
-        "required": ["query"],
+        "required": [
+          "query"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -278,12 +291,19 @@
                         "type": "string"
                       }
                     },
-                    "required": ["text"],
+                    "required": [
+                      "text"
+                    ],
                     "additionalProperties": false
                   }
                 }
               },
-              "required": ["paper_id", "title", "authors", "citation_count"],
+              "required": [
+                "paper_id",
+                "title",
+                "authors",
+                "citation_count"
+              ],
               "additionalProperties": false
             }
           },
@@ -307,7 +327,12 @@
             "description": "True when the best rerank_score fell below the relevance floor: treat results as weak and consider broadening the query or abstaining. False when no hit was reranked (no calibrated basis to abstain) or a hit cleared the floor."
           }
         },
-        "required": ["results", "has_more", "best_score", "low_confidence"],
+        "required": [
+          "results",
+          "has_more",
+          "best_score",
+          "low_confidence"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -380,7 +405,11 @@
             "type": "boolean"
           }
         },
-        "required": ["queries", "limit", "detail"],
+        "required": [
+          "queries",
+          "limit",
+          "detail"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -475,7 +504,9 @@
                         "type": "string"
                       }
                     },
-                    "required": ["text"],
+                    "required": [
+                      "text"
+                    ],
                     "additionalProperties": false
                   }
                 },
@@ -495,7 +526,10 @@
                         "description": "1-based rank of this paper within that variant's ranked list."
                       }
                     },
-                    "required": ["query", "rank"],
+                    "required": [
+                      "query",
+                      "rank"
+                    ],
                     "additionalProperties": false
                   },
                   "description": "Which of the input queries surfaced this paper, with each variant's 1-based rank. Use it to see which fan-out variants paid off."
@@ -531,7 +565,10 @@
                   "description": "Why this variant's pipeline failed."
                 }
               },
-              "required": ["query", "reason"],
+              "required": [
+                "query",
+                "reason"
+              ],
               "additionalProperties": false
             },
             "description": "Variants whose pipeline raised; recorded here instead of sinking the whole batch. Empty when every variant ran."
@@ -541,7 +578,12 @@
             "description": "Always false: the merged shortlist is bounded, so there is no cursor to page past it. Widen the query set or filters for more coverage."
           }
         },
-        "required": ["results", "queries_run", "queries_failed", "has_more"],
+        "required": [
+          "results",
+          "queries_run",
+          "queries_failed",
+          "has_more"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -570,7 +612,10 @@
             "description": "`markdown` returns one rendered document, ready to read or quote inline. `json` returns a structured section list, useful when you want to navigate by section name (methods / results / related work).",
             "default": "markdown",
             "type": "string",
-            "enum": ["markdown", "json"]
+            "enum": [
+              "markdown",
+              "json"
+            ]
           },
           "sections": {
             "description": "Return only these sections (case-insensitive heading match), e.g. [\"Methods\", \"Results\"]. Omit to return the whole document.",
@@ -581,7 +626,9 @@
             }
           }
         },
-        "required": ["paper_id"],
+        "required": [
+          "paper_id"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -608,7 +655,10 @@
             "description": "`cited_by`: indexed papers that cite this one (forward, follow-up work). `cites`: this paper's parsed references (back, what it built on).",
             "default": "cited_by",
             "type": "string",
-            "enum": ["cited_by", "cites"]
+            "enum": [
+              "cited_by",
+              "cites"
+            ]
           },
           "limit": {
             "description": "Max citation edges to return per page (default 25, max 100).",
@@ -625,7 +675,9 @@
             "maximum": 9007199254740991
           }
         },
-        "required": ["paper_id"],
+        "required": [
+          "paper_id"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -634,7 +686,10 @@
         "properties": {
           "direction": {
             "type": "string",
-            "enum": ["cited_by", "cites"]
+            "enum": [
+              "cited_by",
+              "cites"
+            ]
           },
           "total": {
             "description": "Total visible citation edges in this direction (paging count).",
@@ -685,12 +740,16 @@
                   "maximum": 9007199254740991
                 }
               },
-              "required": ["in_corpus"],
+              "required": [
+                "in_corpus"
+              ],
               "additionalProperties": false
             }
           }
         },
-        "required": ["citations"],
+        "required": [
+          "citations"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -766,7 +825,9 @@
             }
           }
         },
-        "required": ["conferences"],
+        "required": [
+          "conferences"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -813,10 +874,15 @@
             "description": "`recency` (newest first, default) or `citations` (most-cited first).",
             "default": "recency",
             "type": "string",
-            "enum": ["recency", "citations"]
+            "enum": [
+              "recency",
+              "citations"
+            ]
           }
         },
-        "required": ["conference"],
+        "required": [
+          "conference"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -871,7 +937,12 @@
                   "type": "string"
                 }
               },
-              "required": ["paper_id", "title", "authors", "citation_count"],
+              "required": [
+                "paper_id",
+                "title",
+                "authors",
+                "citation_count"
+              ],
               "additionalProperties": false
             }
           },
@@ -886,7 +957,9 @@
             "type": "boolean"
           }
         },
-        "required": ["papers"],
+        "required": [
+          "papers"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -916,7 +989,9 @@
             "maximum": 20
           }
         },
-        "required": ["paper_id"],
+        "required": [
+          "paper_id"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -992,7 +1067,9 @@
                         "type": "string"
                       }
                     },
-                    "required": ["text"],
+                    "required": [
+                      "text"
+                    ],
                     "additionalProperties": false
                   },
                   "description": "Nearest non-abstract matched chunk(s) from this related paper, currently at most one. Empty when no parsed chunk is available."
@@ -1002,13 +1079,20 @@
                   "type": "number"
                 }
               },
-              "required": ["title", "authors", "citation_count", "contexts"],
+              "required": [
+                "title",
+                "authors",
+                "citation_count",
+                "contexts"
+              ],
               "additionalProperties": false
             },
             "description": "Semantically nearest papers by embedding distance (NOT citation links), ordered nearest-first; empty when none were found."
           }
         },
-        "required": ["papers"],
+        "required": [
+          "papers"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -1050,7 +1134,12 @@
                 },
                 "type": {
                   "type": "string",
-                  "enum": ["string", "number", "boolean", "string[]"],
+                  "enum": [
+                    "string",
+                    "number",
+                    "boolean",
+                    "string[]"
+                  ],
                   "description": "Wire type the extracted value is coerced to."
                 },
                 "description": {
@@ -1058,7 +1147,10 @@
                   "type": "string"
                 }
               },
-              "required": ["name", "type"],
+              "required": [
+                "name",
+                "type"
+              ],
               "additionalProperties": false
             },
             "description": "1 to 12 fields to extract per paper. Each becomes a typed column on every row, keyed by its `name`."
@@ -1077,7 +1169,11 @@
             }
           }
         },
-        "required": ["paper_ids", "fields", "instruction"],
+        "required": [
+          "paper_ids",
+          "fields",
+          "instruction"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -1106,7 +1202,11 @@
                   "description": "True when the paper's full text overflowed the char budget and the tail was dropped before extraction; treat the row as partial-context rather than authoritative."
                 }
               },
-              "required": ["paper_id", "fields", "truncated"],
+              "required": [
+                "paper_id",
+                "fields",
+                "truncated"
+              ],
               "additionalProperties": false
             },
             "description": "One row per successfully extracted paper."
@@ -1130,13 +1230,20 @@
                   "description": "Why this paper yielded no row: `no_fulltext` (nothing parsed), `extraction_failed` (the model returned no valid row), or an exception class name."
                 }
               },
-              "required": ["paper_id", "reason"],
+              "required": [
+                "paper_id",
+                "reason"
+              ],
               "additionalProperties": false
             },
             "description": "Papers that yielded no row; recorded here instead of sinking the batch. Empty when every paper extracted."
           }
         },
-        "required": ["rows", "papers_processed", "papers_failed"],
+        "required": [
+          "rows",
+          "papers_processed",
+          "papers_failed"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -1199,7 +1306,9 @@
             }
           }
         },
-        "required": ["claims"],
+        "required": [
+          "claims"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -1217,7 +1326,11 @@
                 },
                 "verdict": {
                   "type": "string",
-                  "enum": ["supported", "unsupported", "insufficient_evidence"],
+                  "enum": [
+                    "supported",
+                    "unsupported",
+                    "insufficient_evidence"
+                  ],
                   "description": "`supported`: a retrieved passage directly substantiates the claim. `unsupported`: a retrieved passage directly contradicts it. `insufficient_evidence`: the corpus passages neither confirm nor deny it (also the safe degrade when verification was unavailable)."
                 },
                 "supporting_paper_ids": {
@@ -1266,7 +1379,10 @@
             "description": "Total claims judged; equals verdicts.length."
           }
         },
-        "required": ["verdicts", "claims_processed"],
+        "required": [
+          "verdicts",
+          "claims_processed"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -1317,7 +1433,10 @@
                   "description": "What evidence this slot needs."
                 }
               },
-              "required": ["key", "description"],
+              "required": [
+                "key",
+                "description"
+              ],
               "additionalProperties": false
             }
           },
@@ -1366,7 +1485,11 @@
             }
           }
         },
-        "required": ["task", "queries", "max_iterations"],
+        "required": [
+          "task",
+          "queries",
+          "max_iterations"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -1386,7 +1509,11 @@
                 },
                 "status": {
                   "type": "string",
-                  "enum": ["covered", "partial", "missing"]
+                  "enum": [
+                    "covered",
+                    "partial",
+                    "missing"
+                  ]
                 },
                 "supporting_span_ids": {
                   "type": "array",
@@ -1439,7 +1566,10 @@
                 },
                 "span_kind": {
                   "type": "string",
-                  "enum": ["chunk", "abstract"]
+                  "enum": [
+                    "chunk",
+                    "abstract"
+                  ]
                 },
                 "paper_id": {
                   "type": "string",
@@ -1520,7 +1650,10 @@
                         "maximum": 9007199254740991
                       }
                     },
-                    "required": ["query", "rank"],
+                    "required": [
+                      "query",
+                      "rank"
+                    ],
                     "additionalProperties": false
                   }
                 }
@@ -1632,7 +1765,10 @@
                   "type": "string"
                 }
               },
-              "required": ["query", "reason"],
+              "required": [
+                "query",
+                "reason"
+              ],
               "additionalProperties": false
             },
             "description": "Per-query failures (non-CircuitBreaker); a systemic outage 503s instead."
@@ -1693,7 +1829,9 @@
             "maximum": 20
           }
         },
-        "required": ["query"],
+        "required": [
+          "query"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -1721,12 +1859,19 @@
                   "type": "string"
                 }
               },
-              "required": ["doc_id", "doc_title", "section", "excerpt"],
+              "required": [
+                "doc_id",
+                "doc_title",
+                "section",
+                "excerpt"
+              ],
               "additionalProperties": false
             }
           }
         },
-        "required": ["results"],
+        "required": [
+          "results"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -1753,7 +1898,9 @@
             "description": "Guidance document UUID, from a `search_research_guidance` hit. NOT a corpus paper_id (those come from `search_papers`)."
           }
         },
-        "required": ["doc_id"],
+        "required": [
+          "doc_id"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
@@ -1798,12 +1945,19 @@
                   "type": "string"
                 }
               },
-              "required": ["heading", "text"],
+              "required": [
+                "heading",
+                "text"
+              ],
               "additionalProperties": false
             }
           }
         },
-        "required": ["doc_id", "title", "tags"],
+        "required": [
+          "doc_id",
+          "title",
+          "tags"
+        ],
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false
       },
