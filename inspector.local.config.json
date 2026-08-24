@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "lune-stdio-modern": {
+      "type": "stdio",
+      "command": "tooling/scripts/run-mcp-inspector-stdio.sh",
+      "protocolEra": "modern"
+    },
+    "lune-stdio-legacy": {
+      "type": "stdio",
+      "command": "tooling/scripts/run-mcp-inspector-stdio.sh",
+      "protocolEra": "legacy"
+    }
+  }
+}

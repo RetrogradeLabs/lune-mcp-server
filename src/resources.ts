@@ -1,4 +1,7 @@
-import type { Server } from "@modelcontextprotocol/server";
+import {
+  ResourceNotFoundError,
+  type Server,
+} from "@modelcontextprotocol/server";
 import {
   analyticsEnabled,
   attributeFromEnvelope,
@@ -7,14 +10,14 @@ import {
 } from "./analytics.js";
 
 /**
- * Wire the `resources/list` handler. The `resources: {}` capability is already
+ * Wire the resource discovery handlers. The `resources: {}` capability is already
  * declared in `makeServer` (without it the SDK throws "Server does not support
  * resources" at startup).
  *
  * The server advertises the `resources` capability but exposes none yet:
  * several connectors (Smithery, ChatGPT's custom-connector UI, the MCP
  * Inspector) probe `resources/list` defensively at session-init, and
- * `{resources: []}` lets them complete without a `-32601 Method not found`
+ * empty lists let them complete without `-32601 Method not found`
  * warning. When we add real resources, fill this handler in (mirroring how
  * `registerPrompts` wires `prompts/list` + `prompts/get`) AND revisit the
  * `resources/list` cache hint in `server.ts`: `cacheScope: "public"` is sound
@@ -36,5 +39,13 @@ export function registerResources(
       captureMcp("$mcp_resources_list", server, analyticsContext?.(), {});
     }
     return { resources: [] };
+  });
+  server.setRequestHandler("resources/templates/list", async (_req, ctx) => {
+    attributeFromEnvelope(server, ctx);
+    return { resourceTemplates: [] };
+  });
+  server.setRequestHandler("resources/read", async (req, ctx) => {
+    attributeFromEnvelope(server, ctx);
+    throw new ResourceNotFoundError(req.params.uri);
   });
 }

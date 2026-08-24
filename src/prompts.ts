@@ -1,4 +1,9 @@
-import type { Server, ServerContext } from "@modelcontextprotocol/server";
+import {
+  ProtocolError,
+  ProtocolErrorCode,
+  type Server,
+  type ServerContext,
+} from "@modelcontextprotocol/server";
 import {
   analyticsEnabled,
   attributeFromEnvelope,
@@ -269,7 +274,8 @@ export const PROMPTS: PromptDef[] = [
           'ablate X"), supplement with search_papers.',
         "",
         "Give concrete, actionable advice grounded in the guidance corpus, citing each " +
-          "guidance entry (doc_id) and any papers you draw on. Be explicit when the corpus " +
+          "guidance entry by title, author, and source URL, plus any papers you draw on. " +
+          "Treat doc_id as a fetch handle, not a citation. Be explicit when the corpus " +
           "does not cover part of the question.",
       ].join("\n"),
   },
@@ -307,10 +313,18 @@ export function getPromptResult(
   messages: { role: "user"; content: { type: "text"; text: string } }[];
 } {
   const def = PROMPTS.find((p) => p.name === name);
-  if (!def) throw new Error(`unknown prompt: ${name}`);
+  if (!def) {
+    throw new ProtocolError(
+      ProtocolErrorCode.InvalidParams,
+      `Unknown prompt: ${name}`,
+    );
+  }
   for (const arg of def.arguments) {
     if (arg.required && !present(args[arg.name])) {
-      throw new Error(`missing required argument: ${arg.name}`);
+      throw new ProtocolError(
+        ProtocolErrorCode.InvalidParams,
+        `Missing required argument: ${arg.name}`,
+      );
     }
   }
   return {

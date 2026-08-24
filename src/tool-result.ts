@@ -7,11 +7,11 @@
 export interface ToolCallResult {
   content: Array<{ type: "text"; text: string }>;
   /**
-   * Per MCP 2025-06-18: when a tool declares `outputSchema`, the response
-   * SHOULD include `structuredContent` matching that schema. We populate
-   * both fields (text + structured) so older clients that only read
-   * `content` keep working.
+   * MCP 2026-07-28 permits any JSON value here. When a tool declares an
+   * `outputSchema`, successful output must match it. We also return the JSON as
+   * text so older clients keep working.
    */
-  structuredContent?: Record<string, unknown>;
+  structuredContent?: JSONValue;
   isError?: boolean;
 }
+import type { JSONValue } from "@modelcontextprotocol/server";

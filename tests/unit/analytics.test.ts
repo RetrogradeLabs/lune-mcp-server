@@ -450,12 +450,20 @@ describe("clientInfoFromEnvelope (2026-07-28 client attribution)", () => {
    */
   function recordingTools(serverExtras: Record<string, unknown> = {}) {
     const stamped: (Record<string, string> | undefined)[] = [];
+    const signals: (AbortSignal | undefined)[] = [];
     const recordingKy = (): KyInstance =>
       ({
         get: () => ({ json: async () => ({}) }),
         post: () => ({ json: async () => ({}) }),
-        extend: ({ headers }: { headers?: Record<string, string> }) => {
+        extend: ({
+          headers,
+          signal,
+        }: {
+          headers?: Record<string, string>;
+          signal?: AbortSignal;
+        }) => {
           stamped.push(headers);
+          signals.push(signal);
           return recordingKy();
         },
       }) as unknown as KyInstance;
@@ -464,7 +472,7 @@ describe("clientInfoFromEnvelope (2026-07-28 client attribution)", () => {
       server as unknown as Parameters<typeof registerAllTools>[0],
       recordingKy,
     );
-    return { handler, stamped };
+    return { handler, signals, stamped };
   }
 
   it("stamps X-Lune-Client on the upstream calls of a modern request", async () => {
@@ -505,6 +513,45 @@ describe("clientInfoFromEnvelope (2026-07-28 client attribution)", () => {
       { "X-Lune-Client": "mcp-stdio/claude-code/2.1.0" },
     ]);
   });
+
+  it("propagates bounded W3C trace context and the cancellation signal", async () => {
+    const controller = new AbortController();
+    const { handler, signals, stamped } = recordingTools();
+    const ctx = {
+      mcpReq: {
+        _meta: {
+          traceparent:
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+          tracestate: "vendor=value",
+          baggage: "unsafe=value\nInjected: true",
+        },
+        signal: controller.signal,
+      },
+    };
+    await handler("tools/call")(
+      { params: { name: "list_conferences", arguments: {} } },
+      ctx,
+    );
+    expect(stamped[0]).toMatchObject({
+      traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      tracestate: "vendor=value",
+    });
+    expect(stamped[0]).not.toHaveProperty("baggage");
+    expect(signals).toEqual([controller.signal]);
+  });
+
+  it.each([
+    ["traceparent", "bad\u0000value"],
+    ["tracestate", "café"],
+    ["baggage", "emoji=😀"],
+  ])("drops a non-HTTP-safe %s value", async (name, value) => {
+    const { handler, stamped } = recordingTools();
+    await handler("tools/call")(
+      { params: { name: "list_conferences", arguments: {} } },
+      { mcpReq: { _meta: { [name]: value } } },
+    );
+    expect(stamped[0]).not.toHaveProperty(name);
+  });
 });
 
 describe("analyticsIdentityOf", () => {
@@ -513,6 +560,7 @@ describe("analyticsIdentityOf", () => {
       analyticsIdentityOf("opaque", {
         distinctId: "user-1",
         orgId: "org-1",
+        scopes: ["papers:read"],
       }),
     ).toEqual({ distinctId: "user-1", personless: false });
   });
@@ -574,7 +622,7 @@ describe("get_more_tools (analytics-gated roadmap intake)", () => {
         arguments: { capability: "search preprint servers" },
       },
     })) as { content: { type: string; text: string }[] };
-    expect(result.content[0]!.text).toMatch(/recorded for the roadmap/);
+    expect(result.content[0]!.text).toMatch(/submitted for roadmap review/);
 
     const missing = kyPost.mock.calls
       .map(
@@ -588,6 +636,24 @@ describe("get_more_tools (analytics-gated roadmap intake)", () => {
       .find((p) => p.event === "$mcp_missing_capability")!;
     expect(missing).toBeDefined();
     expect(missing.properties.$mcp_intent).toBe("search preprint servers");
+  });
+
+  it("does not claim a roadmap event was stored when capture is unavailable", async () => {
+    vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+    initAnalytics();
+    const { server, handler } = recordingServer();
+    registerAllTools(
+      server as unknown as Parameters<typeof registerAllTools>[0],
+      () => fakeKy(),
+      () => ({ captureEnabled: false }),
+    );
+    const result = (await handler("tools/call")({
+      params: {
+        name: "get_more_tools",
+        arguments: { capability: "search preprint servers" },
+      },
+    })) as { content: { text: string }[] };
+    expect(result.content[0]!.text).toContain("No roadmap event was stored");
   });
 
   it("records canonical list, resource, and prompt lifecycle events", async () => {
@@ -779,6 +845,46 @@ describe("get_more_tools (analytics-gated roadmap intake)", () => {
     );
   });
 
+  it("records output contract drift as a model-readable tool error", async () => {
+    vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+    initAnalytics();
+    const { server, handler } = recordingServer();
+    registerAllTools(
+      server as unknown as Parameters<typeof registerAllTools>[0],
+      () => fakeKy(),
+      () => ({
+        identity: { distinctId: "credential:deadbeef", personless: true },
+      }),
+    );
+    const result = (await handler("tools/call")({
+      params: {
+        name: "extract_from_papers",
+        arguments: {
+          paper_ids: ["3f0d3b3e-0f4a-4c1a-9f2b-1c2d3e4f5a6b"],
+          fields: [{ name: "dataset", type: "string" }],
+          instruction: "extract the dataset",
+        },
+      },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("Stop retrying");
+
+    const payload = kyPost.mock.calls
+      .map(
+        (call) =>
+          (
+            call[1] as {
+              json: { event: string; properties: Record<string, unknown> };
+            }
+          ).json,
+      )
+      .find((event) => event.event === "$mcp_tool_call")!;
+    expect(payload.properties.$mcp_error_type).toBe("output_schema_violation");
+    expect(payload.properties.$mcp_error_message).toContain(
+      "invalid response for extract_from_papers",
+    );
+  });
+
   it("records protocol failures without exporting the thrown message", async () => {
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
     initAnalytics();
@@ -797,7 +903,7 @@ describe("get_more_tools (analytics-gated roadmap intake)", () => {
           arguments: {},
         },
       }),
-    ).rejects.toThrow(/unknown tool/);
+    ).rejects.toThrow(/unknown tool/i);
     const payload = kyPost.mock.calls
       .map(
         (call) =>

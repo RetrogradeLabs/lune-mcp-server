@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "lune-remote-modern": {
+      "type": "http",
+      "url": "https://mcp.luneresearch.com",
+      "protocolEra": "modern"
+    },
+    "lune-remote-legacy": {
+      "type": "http",
+      "url": "https://mcp.luneresearch.com",
+      "protocolEra": "legacy"
+    }
+  }
+}

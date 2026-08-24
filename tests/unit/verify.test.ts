@@ -27,6 +27,7 @@ import {
 } from "../../src/auth/verify.js";
 
 const ISSUER = "https://api.luneresearch.com";
+const AUDIENCE = "https://mcp.luneresearch.com";
 
 // Wrap a public key as the getKey resolver jwtVerify expects (jose calls it with
 // the token's protected header; a fixed key ignores that, like a one-key JWKS).
@@ -42,12 +43,18 @@ async function makeKeys() {
 
 function sign(
   privateKey: CryptoKey,
-  opts: { expSecondsFromNow: number; issuer?: string; kid?: string },
+  opts: {
+    expSecondsFromNow: number;
+    issuer?: string;
+    audience?: string;
+    kid?: string;
+  },
 ): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   return new SignJWT({ org_id: "org-1", scopes: ["papers:read"] })
     .setProtectedHeader({ alg: "RS256", kid: opts.kid ?? "k1" })
     .setIssuer(opts.issuer ?? ISSUER)
+    .setAudience(opts.audience ?? AUDIENCE)
     .setSubject("user-1")
     .setIssuedAt(now - 60)
     .setExpirationTime(now + opts.expSecondsFromNow)
@@ -70,7 +77,11 @@ describe("accessTokenNeedsReauth", () => {
       inspectAccessToken(token, keyResolver(publicKey)),
     ).resolves.toEqual({
       needsReauth: false,
-      verifiedIdentity: { distinctId: "user-1", orgId: "org-1" },
+      verifiedIdentity: {
+        distinctId: "user-1",
+        orgId: "org-1",
+        scopes: ["papers:read"],
+      },
     });
   });
 
@@ -92,19 +103,86 @@ describe("accessTokenNeedsReauth", () => {
     );
   });
 
-  it("accepts a correctly-signed token regardless of iss (signature is the proof; API enforces iss)", async () => {
-    // We intentionally do NOT enforce `iss` at this gate (see verify.ts): a valid
-    // signature against the configured JWKS already proves provenance, and a
-    // separate iss match would risk false 401s on config drift. A token signed by
-    // our key but carrying a foreign iss still verifies here; the API rejects it.
+  it("rejects a correctly-signed token from the wrong issuer", async () => {
     const { publicKey, privateKey } = await makeKeys();
     const token = await sign(privateKey, {
       expSecondsFromNow: 3600,
       issuer: "https://evil.example.com",
     });
     expect(await accessTokenNeedsReauth(token, keyResolver(publicKey))).toBe(
-      false,
+      true,
     );
+  });
+
+  it("rejects a correctly-signed token for another resource", async () => {
+    const { publicKey, privateKey } = await makeKeys();
+    const token = await sign(privateKey, {
+      expSecondsFromNow: 3600,
+      audience: "https://api.luneresearch.com",
+    });
+    expect(await accessTokenNeedsReauth(token, keyResolver(publicKey))).toBe(
+      true,
+    );
+  });
+
+  it.each([
+    ["https://mcp.luneresearch.com", "https://mcp.luneresearch.com/mcp"],
+    ["https://mcp.luneresearch.com/mcp", "https://mcp.luneresearch.com/v1/mcp"],
+    ["https://mcp.luneresearch.com/v1/mcp", "https://mcp.luneresearch.com"],
+  ])(
+    "accepts the %s audience on the equivalent %s endpoint alias",
+    async (audience, expectedAudience) => {
+      const { publicKey, privateKey } = await makeKeys();
+      const token = await sign(privateKey, {
+        expSecondsFromNow: 3600,
+        audience,
+      });
+      expect(
+        await accessTokenNeedsReauth(
+          token,
+          keyResolver(publicKey),
+          expectedAudience,
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
+    "https://mcp.luneresearch.com/org/mcp",
+    "https://other.example.com/mcp",
+    "https://mcp.luneresearch.com/mcp?tenant=other",
+  ])("rejects the non-alias audience %s", async (audience) => {
+    const { publicKey, privateKey } = await makeKeys();
+    const token = await sign(privateKey, {
+      expSecondsFromNow: 3600,
+      audience,
+    });
+    expect(
+      await accessTokenNeedsReauth(
+        token,
+        keyResolver(publicKey),
+        "https://mcp.luneresearch.com/mcp",
+      ),
+    ).toBe(true);
+  });
+
+  it("accepts a client-id audience only on the explicit legacy bridge", async () => {
+    const { publicKey, privateKey } = await makeKeys();
+    const token = await sign(privateKey, {
+      expSecondsFromNow: 3600,
+      audience: "lune_oauth_legacy-client",
+    });
+    expect(await accessTokenNeedsReauth(token, keyResolver(publicKey))).toBe(
+      true,
+    );
+    expect(
+      await accessTokenNeedsReauth(
+        token,
+        keyResolver(publicKey),
+        AUDIENCE,
+        true,
+      ),
+    ).toBe(false);
   });
 
   it("flags a token whose signing key is absent from the JWKS (unknown kid)", async () => {
@@ -161,6 +239,15 @@ describe("accessTokenNeedsReauth", () => {
     expect(await accessTokenNeedsReauth("fake")).toBe(false);
   });
 
+  it("challenges an RS256-shaped token with an undecodable payload", async () => {
+    const header = Buffer.from(
+      JSON.stringify({ alg: "RS256", kid: "k1" }),
+    ).toString("base64url");
+    expect(await accessTokenNeedsReauth(`${header}.not-json.signature`)).toBe(
+      true,
+    );
+  });
+
   it("passes a non-RS256 JWT through (e.g. a Supabase ES256 session)", async () => {
     const { privateKey } = await generateKeyPair("ES256");
     const now = Math.floor(Date.now() / 1000);
@@ -177,16 +264,13 @@ describe("accessTokenNeedsReauth", () => {
     });
   });
 
-  it("FAILS OPEN when LUNE_AUTH_SERVER_URL is malformed (no 500 on misconfig)", async () => {
-    // The default JWKS resolver is built inside the verify try, so a bad env
-    // (the `new URL(...)` throwing) must fail open like any JWKS infra fault,
-    // never propagate a 500 to every POST /mcp. Exercises the no-resolver path.
+  it("fails closed when LUNE_AUTH_SERVER_URL does not match the token issuer", async () => {
     const { privateKey } = await makeKeys();
     const token = await sign(privateKey, { expSecondsFromNow: 3600 });
     const prev = process.env.LUNE_AUTH_SERVER_URL;
     process.env.LUNE_AUTH_SERVER_URL = "not-a-valid-url";
     try {
-      await expect(accessTokenNeedsReauth(token)).resolves.toBe(false);
+      await expect(accessTokenNeedsReauth(token)).resolves.toBe(true);
     } finally {
       if (prev === undefined) delete process.env.LUNE_AUTH_SERVER_URL;
       else process.env.LUNE_AUTH_SERVER_URL = prev;

@@ -87,6 +87,29 @@ describe("getAllToolDefinitions", () => {
       expect(d.annotations).toBeTypeOf("object");
     }
   });
+
+  it("declares the API authorization scope for every gated tool", () => {
+    const scopes = Object.fromEntries(
+      getAllToolDefinitions().map((definition) => [
+        definition.name,
+        definition.requiredScope,
+      ]),
+    );
+    expect(scopes).toEqual({
+      search_papers: "papers:read",
+      search_papers_many: "papers:read",
+      get_paper_fulltext: "papers:read",
+      get_paper_citations: "papers:read",
+      list_conferences: undefined,
+      get_conference_papers: undefined,
+      search_related_papers: "papers:read",
+      extract_from_papers: "papers:read",
+      verify_claims: "papers:read",
+      gather_evidence: "papers:read",
+      search_research_guidance: "guidance:read",
+      get_research_guidance_doc: "guidance:read",
+    });
+  });
 });
 
 describe("credential-aware tools/list (workspace source hiding)", () => {
@@ -273,6 +296,7 @@ describe("dispatchToolCall", () => {
           score: 1,
           rerank_score: null,
           matched_queries: [{ query: "a", rank: 1 }],
+          future_nested_field: "preserved",
         },
       ],
       next_queries: [],
@@ -282,6 +306,7 @@ describe("dispatchToolCall", () => {
       iterations_run: 1,
       queries_run: 1,
       units_charged: 1,
+      future_additive_field: "preserved",
     };
     expect(() => GatherEvidenceOutput.parse(response)).not.toThrow();
 
@@ -307,7 +332,68 @@ describe("dispatchToolCall", () => {
   it("throws for an unknown tool name", async () => {
     await expect(
       dispatchToolCall(fakeKy(), "definitely_not_a_tool", {}),
-    ).rejects.toThrow(/unknown tool/);
+    ).rejects.toMatchObject({
+      code: -32602,
+      message: "Unknown tool: definitely_not_a_tool",
+    });
+  });
+
+  it("returns model-readable errors for invalid tool arguments", async () => {
+    const result = await dispatchToolCall(fakeKy(), "search_papers", {
+      query: "",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("query");
+    expect(result.content[0]!.text).toContain("Correct the named arguments");
+  });
+
+  it.each([
+    ["search_papers", { query: "x".repeat(501) }, "query"],
+    ["search_papers_many", { queries: ["x".repeat(2001)] }, "queries"],
+    ["search_research_guidance", { query: "x".repeat(501) }, "query"],
+    [
+      "extract_from_papers",
+      {
+        paper_ids: ["paper-1"],
+        fields: [{ name: "dataset", type: "string" }],
+        instruction: "x".repeat(2001),
+      },
+      "instruction",
+    ],
+    ["verify_claims", { claims: ["x".repeat(2001)] }, "claims"],
+    ["gather_evidence", { task: "x".repeat(2001), queries: ["valid"] }, "task"],
+    [
+      "gather_evidence",
+      { task: "valid", queries: ["valid"], draft: "x".repeat(8001) },
+      "draft",
+    ],
+  ])("mirrors the API length bound for %s", async (name, args, field) => {
+    const result = await dispatchToolCall(fakeKy(), name, args);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain(field);
+  });
+
+  it("rejects arguments excluded by the advertised additionalProperties contract", async () => {
+    const result = await dispatchToolCall(fakeKy(), "search_papers", {
+      query: "valid",
+      invented: true,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("additional properties");
+  });
+
+  it("returns a model-readable error when successful output violates outputSchema", async () => {
+    const result = await dispatchToolCall(fakeKy({}), "extract_from_papers", {
+      paper_ids: ["paper-1"],
+      fields: [{ name: "dataset", type: "string" }],
+      instruction: "Extract the dataset.",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("structuredContent");
+    expect(result.content[0]!.text).toContain("Stop retrying");
+    expect(result.content[0]!.text).toContain(
+      "error_type=output_schema_violation",
+    );
   });
 });
 
@@ -385,6 +471,24 @@ describe("registerAllTools", () => {
     expect(res.content[0]!.type).toBe("text");
   });
 
+  it("validates calls against the non-workspace schema it advertised", async () => {
+    const { server, handlers } = captureServer();
+    registerAllTools(
+      server as unknown as Parameters<typeof registerAllTools>[0],
+      () => fakeKy({ results: [] }),
+      () => ({ workspaceCredential: false }),
+    );
+    const callHandler = [...handlers.values()][1]!;
+    const result = (await callHandler({
+      params: {
+        name: "search_papers",
+        arguments: { query: "valid", source: "corpus" },
+      },
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("additional properties");
+  });
+
   it("the tools/call handler returns an isError result on a 429 (does not crash the session)", async () => {
     // End-to-end through the registered tools/call handler: an upstream 429
     // must come back as a resolved { isError: true } tool result, never a
@@ -436,12 +540,18 @@ describe("registerAllTools", () => {
     expect(res.structuredContent).toEqual({ conferences: [] });
   });
 
-  it("registerResources wires a resources/list handler returning an empty array", async () => {
+  it("registerResources wires empty resource and template discovery handlers", async () => {
     const { server, handlers } = captureServer();
     registerResources(
       server as unknown as Parameters<typeof registerResources>[0],
     );
-    const resourcesHandler = [...handlers.values()][0]!;
-    expect(await resourcesHandler({})).toEqual({ resources: [] });
+    const [resourcesHandler, templatesHandler, readHandler] = [
+      ...handlers.values(),
+    ];
+    expect(await resourcesHandler!({})).toEqual({ resources: [] });
+    expect(await templatesHandler!({})).toEqual({ resourceTemplates: [] });
+    await expect(
+      readHandler!({ params: { uri: "lune://missing" } }),
+    ).rejects.toMatchObject({ code: -32602, data: { uri: "lune://missing" } });
   });
 });

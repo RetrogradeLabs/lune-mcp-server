@@ -174,10 +174,9 @@ describe("paper tools", () => {
     });
   });
 
-  it("rejects invalid input via zod (stays a thrown protocol error)", async () => {
-    // Malformed input is a Protocol Error per the MCP spec: the zod parse
-    // throws before any API call, so it propagates as a JSON-RPC error
-    // rather than an isError tool result.
+  it("keeps low-level handlers strict before the MCP boundary maps the error", async () => {
+    // The category handler remains strict. registerAllTools owns the MCP
+    // contract that converts this class of failure into an isError result.
     const { ky } = fakeKy();
     await expect(
       callPaperTool(ky, "search_papers", { query: "" }),

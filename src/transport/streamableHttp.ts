@@ -1,4 +1,9 @@
-import express, { type Request, type Response, type Express } from "express";
+import express, {
+  type ErrorRequestHandler,
+  type Express,
+  type Request,
+  type Response,
+} from "express";
 import type { Server as HttpServer } from "node:http";
 import { createHash } from "node:crypto";
 import {
@@ -23,6 +28,7 @@ import {
   type McpAnalyticsContext,
 } from "../analytics.js";
 import serverManifest from "../../server.json";
+import { requiredScopeForTool } from "../tools/index.js";
 
 const SESSION_HEADER = "mcp-session-id";
 
@@ -206,12 +212,7 @@ const RESOURCE_ORIGIN = new URL(
 const AUTH_SERVER_URL =
   process.env.LUNE_AUTH_SERVER_URL?.replace(/\/+$/, "") ??
   "https://api.luneresearch.com";
-const SUPPORTED_SCOPES = [
-  "papers:read",
-  "guidance:read",
-  "subs:rw",
-  "account:read",
-];
+const SUPPORTED_SCOPES = ["papers:read", "guidance:read", "account:read"];
 const PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource";
 // The canonical JSON-RPC endpoint is the bare origin; `/mcp` (previous default)
 // and `/v1/mcp` (early docs + marketing hero) stay as aliases so existing
@@ -276,13 +277,62 @@ function challenge(
   alias: EndpointAlias,
   error?: string,
   description?: string,
+  scopes: readonly string[] = SUPPORTED_SCOPES,
 ): string {
   const metadata = `resource_metadata="${metadataUrlFor(alias)}"`;
-  if (!error) return `Bearer ${metadata}`;
+  const scope = `scope="${scopes.join(" ")}"`;
+  if (!error) return `Bearer ${metadata}, ${scope}`;
   const params = [`error="${error}"`];
   if (description) params.push(`error_description="${description}"`);
-  params.push(metadata);
+  params.push(metadata, scope);
   return `Bearer ${params.join(", ")}`;
+}
+
+function requiredToolScopes(req: Request): string[] {
+  const body = req.body as
+    | { method?: unknown; params?: { name?: unknown } }
+    | Array<{ method?: unknown; params?: { name?: unknown } }>
+    | undefined;
+  const messages = Array.isArray(body) ? body : [body];
+  return [
+    ...new Set(
+      messages.flatMap((message) => {
+        if (
+          message?.method !== "tools/call" ||
+          typeof message.params?.name !== "string"
+        ) {
+          return [];
+        }
+        const scope = requiredScopeForTool(message.params.name);
+        return scope ? [scope] : [];
+      }),
+    ),
+  ];
+}
+
+function sendInsufficientScope(
+  req: Request,
+  res: Response,
+  id: unknown,
+  requiredScopes: readonly string[],
+): void {
+  const scopeLabel = requiredScopes.join(" ");
+  const authenticate = challenge(
+    aliasOfPath(req.path),
+    "insufficient_scope",
+    `The ${scopeLabel} scope is required for this request.`,
+    requiredScopes,
+  );
+  res.set("WWW-Authenticate", authenticate);
+  res.status(403).json({
+    jsonrpc: "2.0",
+    error: {
+      code: -32001,
+      message: `Forbidden: missing ${scopeLabel} scope`,
+      data: { _meta: { "mcp/www_authenticate": authenticate } },
+    },
+    id: id ?? null,
+  });
 }
 
 // Emit a transport-level 401 carrying the challenge in BOTH the `WWW-Authenticate`
@@ -379,7 +429,18 @@ export function originIsAllowed(
   // this header, so an array is treated as malformed and rejected.
   if (origin === undefined) return true;
   if (Array.isArray(origin)) return false;
-  return ALLOWED_ORIGINS.has(origin);
+  if (ALLOWED_ORIGINS.has(origin)) return true;
+  try {
+    const url = new URL(origin);
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      (url.hostname === "localhost" ||
+        url.hostname === "127.0.0.1" ||
+        url.hostname === "[::1]")
+    );
+  } catch {
+    return false;
+  }
 }
 
 // Longest JSON-RPC batch this endpoint will dispatch. Batching left the spec in
@@ -397,7 +458,7 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
   // before they touch routes that require a body.
   app.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (typeof origin === "string" && ALLOWED_ORIGINS.has(origin)) {
+    if (typeof origin === "string" && originIsAllowed(origin)) {
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Vary", "Origin");
       res.setHeader("Access-Control-Allow-Credentials", "true");
@@ -427,6 +488,29 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
     next();
   });
   app.use(express.json({ limit: "1mb" }));
+  const jsonBodyError: ErrorRequestHandler = (error, _req, res, next) => {
+    const bodyError = error as { status?: number; type?: string };
+    if (bodyError.status !== 400 && bodyError.status !== 413) {
+      next(error);
+      return;
+    }
+    const tooLarge = bodyError.status === 413;
+    res.set({
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
+    res.status(tooLarge ? 413 : 400).json({
+      jsonrpc: "2.0",
+      error: {
+        code: tooLarge ? -32600 : -32700,
+        message: tooLarge
+          ? "Invalid Request: JSON body exceeds 1 MB"
+          : "Parse error: request body is not valid JSON",
+      },
+      id: null,
+    });
+  };
+  app.use(jsonBodyError);
   app.disable("x-powered-by");
 
   app.get("/health", (_req: Request, res: Response) => {
@@ -587,7 +671,12 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
     // upstream with 401, and being mapped to a tool-execution error the model
     // surfaces as "please reconnect" (errors.ts). Opaque PATs and JWKS-infra
     // failures pass through; the API stays their authority. [[accessTokenNeedsReauth]]
-    const inspection = await inspectAccessToken(token);
+    const inspection = await inspectAccessToken(
+      token,
+      undefined,
+      resourceFor(aliasOfPath(req.path)),
+      protocolVersionOf(req) !== "2026-07-28",
+    );
     if (inspection.needsReauth) {
       sendUnauthorized(
         req,
@@ -601,8 +690,22 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
       );
       return;
     }
+    const requiredScopes = requiredToolScopes(req);
+    const missingScopes = inspection.verifiedIdentity
+      ? requiredScopes.filter(
+          (scope) => !inspection.verifiedIdentity!.scopes.includes(scope),
+        )
+      : [];
+    if (missingScopes.length > 0) {
+      sendInsufficientScope(req, res, req.body?.id, missingScopes);
+      return;
+    }
     let analyticsProbe: AnalyticsCredentialProbe | undefined;
-    if (analyticsEnabled()) {
+    const shouldProbeCredential =
+      options.credentialProbe !== undefined ||
+      analyticsEnabled() ||
+      process.env.NODE_ENV !== "test";
+    if (shouldProbeCredential) {
       // Probed on EVERY request, never cached: a revoked credential has to
       // stop passing on its next call, and a cache here would be exactly the
       // cross-request state the stateless transport removed.
@@ -622,7 +725,7 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
         );
         return;
       }
-      // An identity/analytics probe outage cannot become a product outage.
+      // An identity/capability probe outage cannot become a product outage.
       // Tool endpoints still authorize the bearer themselves; the context
       // assembled below fails closed only for analytics and workspace hints.
     }

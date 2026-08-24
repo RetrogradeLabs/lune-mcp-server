@@ -28,6 +28,7 @@ const METADATA_URL = `${RESOURCE_ORIGIN}/.well-known/oauth-protected-resource`;
 // The requests below hit the legacy `/mcp` alias; RFC 9728 §3.3 makes both the
 // challenge and the document it names path-aware, so they carry that suffix.
 const MCP_METADATA_URL = `${METADATA_URL}/mcp`;
+const SCOPE_CHALLENGE = 'scope="papers:read guidance:read account:read"';
 
 describe("oauth discovery", () => {
   let server: HttpServer;
@@ -123,7 +124,9 @@ describe("oauth discovery", () => {
     // The connector keys off this exact header to start OAuth discovery; the
     // resource_metadata value MUST be the absolute well-known URL.
     const wwwAuth = r.headers.get("www-authenticate");
-    expect(wwwAuth).toBe(`Bearer resource_metadata="${MCP_METADATA_URL}"`);
+    expect(wwwAuth).toBe(
+      `Bearer resource_metadata="${MCP_METADATA_URL}", ${SCOPE_CHALLENGE}`,
+    );
 
     // The JSON-RPC error body MUST echo that same header so a client that only
     // parses the body (not headers) can still discover the AS.
@@ -167,7 +170,7 @@ describe("oauth discovery", () => {
 
     expect(r.status).toBe(401);
     expect(r.headers.get("www-authenticate")).toBe(
-      `Bearer resource_metadata="${METADATA_URL}/v1/mcp"`,
+      `Bearer resource_metadata="${METADATA_URL}/v1/mcp", ${SCOPE_CHALLENGE}`,
     );
     const body = (await r.json()) as Json;
     expect(body.id).toBe(7);

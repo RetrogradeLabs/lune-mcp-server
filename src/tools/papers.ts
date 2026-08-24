@@ -83,6 +83,7 @@ const READ_ONLY_OPEN_NONIDEMPOTENT: ToolAnnotations = {
 export const PAPER_TOOLS: ToolDef[] = [
   {
     name: "search_papers",
+    requiredScope: "papers:read",
     title: "Search papers",
     description:
       "Use this WHENEVER the user's question is about academic papers, research topics, " +
@@ -127,6 +128,7 @@ export const PAPER_TOOLS: ToolDef[] = [
   },
   {
     name: "search_papers_many",
+    requiredScope: "papers:read",
     title: "Search papers (multi-query)",
     description:
       "Use this for a LITERATURE SWEEP or survey: a research question broad enough to need " +
@@ -161,6 +163,7 @@ export const PAPER_TOOLS: ToolDef[] = [
   },
   {
     name: "get_paper_fulltext",
+    requiredScope: "papers:read",
     title: "Get paper full text",
     description:
       "Use this when the user asks “what does the methods/results section say”, wants " +
@@ -178,6 +181,7 @@ export const PAPER_TOOLS: ToolDef[] = [
   },
   {
     name: "get_paper_citations",
+    requiredScope: "papers:read",
     title: "Get paper citations",
     description:
       "Use this when the user asks “what does this paper build on”, “what built on " +
@@ -216,6 +220,7 @@ export const PAPER_TOOLS: ToolDef[] = [
   },
   {
     name: "search_related_papers",
+    requiredScope: "papers:read",
     title: "Search related papers",
     description:
       "Given a paper_id, return the most semantically similar papers by embedding " +
@@ -231,6 +236,7 @@ export const PAPER_TOOLS: ToolDef[] = [
   },
   {
     name: "extract_from_papers",
+    requiredScope: "papers:read",
     title: "Extract structured fields from papers",
     description:
       "Pull a structured table out of up to 50 papers in ONE call: you define the " +
@@ -255,6 +261,7 @@ export const PAPER_TOOLS: ToolDef[] = [
   },
   {
     name: "verify_claims",
+    requiredScope: "papers:read",
     title: "Verify claims against the corpus",
     description:
       "Fact-check 1 to 25 natural-language claims against Lune's peer-reviewed " +
@@ -286,6 +293,7 @@ export const PAPER_TOOLS: ToolDef[] = [
   },
   {
     name: "gather_evidence",
+    requiredScope: "papers:read",
     title: "Gather evidence and judge sufficiency",
     description:
       "Use for a multi-part research task when you need to know whether your " +

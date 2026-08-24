@@ -164,7 +164,8 @@ describe("every endpoint spelling serves the JSON-RPC transport", () => {
     // shared document would make a conforming client on a legacy URL discard it
     // ("MUST NOT be used") and fail OAuth outright.
     expect(res.headers["www-authenticate"]).toBe(
-      `Bearer resource_metadata="${METADATA_URL}${aliasOf(path)}"`,
+      `Bearer resource_metadata="${METADATA_URL}${aliasOf(path)}", ` +
+        'scope="papers:read guidance:read account:read"',
     );
   });
 });

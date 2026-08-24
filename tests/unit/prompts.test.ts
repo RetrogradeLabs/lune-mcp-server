@@ -91,17 +91,21 @@ describe("getPromptResult rendering", () => {
 
 describe("getPromptResult validation", () => {
   it("throws on an unknown prompt", () => {
-    expect(() => getPromptResult("does_not_exist", {})).toThrow(
-      /unknown prompt/,
-    );
+    try {
+      getPromptResult("does_not_exist", {});
+      throw new Error("expected getPromptResult to throw");
+    } catch (error) {
+      expect(error).toMatchObject({ code: -32602 });
+      expect((error as Error).message).toMatch(/unknown prompt/i);
+    }
   });
 
   it("throws when a required argument is missing or blank", () => {
     expect(() => getPromptResult("verify_draft", {})).toThrow(
-      /missing required argument: draft/,
+      /missing required argument: draft/i,
     );
     expect(() => getPromptResult("verify_draft", { draft: "   " })).toThrow(
-      /missing required/,
+      /missing required/i,
     );
   });
 });
@@ -156,6 +160,9 @@ describe("registerPrompts", () => {
     // research_methodology's only arg is required, so omitting arguments must throw.
     await expect(
       getHandler({ params: { name: "research_methodology" } }),
-    ).rejects.toThrow(/missing required argument: question/);
+    ).rejects.toMatchObject({
+      code: -32602,
+      message: "Missing required argument: question",
+    });
   });
 });

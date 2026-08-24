@@ -1,6 +1,6 @@
 {
   "name": "@retrograde-labs/lune-mcp-server",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "mcpName": "com.luneresearch/lune",
   "description": "Lune Research MCP server (stdio + Streamable HTTP) proxying api.luneresearch.com",
   "license": "MIT",
@@ -40,6 +40,7 @@
     "@modelcontextprotocol/core": "2.0.0",
     "@modelcontextprotocol/node": "2.0.0",
     "@modelcontextprotocol/server": "2.0.0",
+    "ajv": "^8.20.0",
     "express": "^5.2.1",
     "jose": "^6.2.10",
     "ky": "^2.0.2",

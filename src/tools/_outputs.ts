@@ -2,12 +2,10 @@
  * Zod output schemas for every MCP tool. Mirrors the shapes returned by the
  * projectors in `_slim.ts`. Each tool's `outputSchema` is exported so the
  * MCP `tools/list` response advertises the contract, and so the call handler
- * can populate `structuredContent` matching that contract per the MCP
- * 2025-06-18 spec.
+ * can populate `structuredContent` matching that contract.
  *
- * Top-level output MUST be an object (MCP spec: `outputSchema.type` must be
- * `"object"`). Tools that conceptually return arrays wrap them in a single
- * named field (`conferences`, `citations`, etc.).
+ * Current tools use object envelopes, although MCP 2026-07-28 permits any JSON
+ * value in structured output.
  */
 import { z } from "zod";
 

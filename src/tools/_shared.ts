@@ -1,3 +1,4 @@
+import type { JSONValue } from "@modelcontextprotocol/server";
 import type { z } from "zod";
 
 import type { ToolCallResult } from "../tool-result.js";
@@ -35,15 +36,17 @@ export interface ToolAnnotations {
  */
 export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
   name: string;
+  /** OAuth scope enforced by the relay before dispatch; absent for public tools. */
+  requiredScope?: "papers:read" | "guidance:read";
   /** Human-readable display name shown in ChatGPT's tool drawer. */
   title: string;
   description: string;
   inputSchema: TInput;
   /**
-   * Optional output schema. MCP 2025-06-18 spec: when provided, MUST be a
-   * JSON Schema object (`type: "object"` at the root) and the server SHOULD
-   * return `structuredContent` matching the schema. ChatGPT's connector UI
-   * surfaces a recommendation banner when this is missing.
+   * Optional JSON Schema 2020-12 output contract. MCP 2026-07-28 permits any
+   * JSON value and requires successful `structuredContent` to match this
+   * schema. ChatGPT's connector UI also surfaces a recommendation banner when
+   * it is missing.
    */
   outputSchema?: z.ZodTypeAny;
   /** Required by the Apps SDK (see note above). */
@@ -76,13 +79,13 @@ export const ALWAYS_LOAD_META: Record<string, unknown> = {
  * legacy clients still parse the text. Use this for any tool with an
  * `outputSchema` declared.
  */
-export function structuredJson(value: Record<string, unknown>): ToolCallResult {
+export function structuredJson(value: unknown): ToolCallResult {
   return {
     // No pretty-print: the canonical channel is `structuredContent` (parsed by
     // schema-aware clients); the text mirror is a legacy fallback, so the
     // 2-space indent only inflated its token cost.
     content: [{ type: "text", text: JSON.stringify(value) }],
-    structuredContent: value,
+    structuredContent: value as JSONValue,
   };
 }
 

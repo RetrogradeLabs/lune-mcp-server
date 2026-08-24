@@ -15,6 +15,7 @@ export default defineConfig({
   target: "node20",
   clean: true,
   shims: true,
+  sourcemap: true,
   // Source-level shebang in src/cli.ts is preserved.
   banner: { js: "#!/usr/bin/env node" },
   // Make the bin executable.

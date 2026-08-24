@@ -24,7 +24,7 @@ const READ_GUIDANCE: ToolAnnotations = {
 const TTL_GUIDANCE_DOC = 600_000;
 
 const SearchIn = z.object({
-  query: z.string().min(1),
+  query: z.string().min(1).max(500),
   limit: z.number().int().min(1).max(20).default(5).optional(),
 });
 
@@ -38,6 +38,7 @@ const GetIn = z.object({
 export const GUIDANCE_TOOLS: ToolDef[] = [
   {
     name: "search_research_guidance",
+    requiredScope: "guidance:read",
     title: "Search research guidance",
     description:
       "Use this BEFORE recommending experimental design, ablation strategy, evaluation " +
@@ -61,6 +62,7 @@ export const GUIDANCE_TOOLS: ToolDef[] = [
   },
   {
     name: "get_research_guidance_doc",
+    requiredScope: "guidance:read",
     title: "Get research guidance document",
     description:
       "Use this AFTER `search_research_guidance` when you need the full text of a " +

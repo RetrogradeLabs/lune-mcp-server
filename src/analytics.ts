@@ -337,18 +337,18 @@ export function captureMcp(
   server: object,
   context: McpAnalyticsContext | undefined,
   properties: Record<string, unknown>,
-): void {
-  if (posthogKey === null) return;
+): boolean {
+  if (posthogKey === null) return false;
   try {
     const scopedContext = analyticsContextStorage.getStore();
     const effectiveContext =
       context || scopedContext ? { ...context, ...scopedContext } : undefined;
-    if (effectiveContext?.captureEnabled === false) return;
+    if (effectiveContext?.captureEnabled === false) return false;
     const identity = effectiveContext?.identity ?? {
       distinctId: "mcp-anonymous",
       personless: true,
     };
-    if (!claimMcpAnalyticsBudget(identity.distinctId)) return;
+    if (!claimMcpAnalyticsBudget(identity.distinctId)) return false;
     const info = clientInfoByServer.get(server);
     const serverInfo = serverInfoByServer.get(server);
     const delivery = Promise.resolve(
@@ -418,8 +418,10 @@ export function captureMcp(
       .catch(() => undefined);
     pendingDeliveries.add(delivery);
     void delivery.then(() => pendingDeliveries.delete(delivery));
+    return true;
   } catch {
     // Analytics must never break a tool call.
+    return false;
   }
 }
 

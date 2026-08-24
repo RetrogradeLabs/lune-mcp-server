@@ -121,6 +121,75 @@ afterAll(async () => {
 });
 
 describe("http transport: the stateless exchange", () => {
+  it("returns a JSON-RPC parse error for malformed JSON", async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        accept: ACCEPT,
+        authorization: AUTH,
+        "content-type": "application/json",
+      },
+      body: '{"jsonrpc":"2.0",',
+    });
+    expect(res.status).toBe(400);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toMatchObject({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32700 },
+    });
+  });
+
+  it("returns a bounded JSON-RPC error for an oversized body", async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: {
+        accept: ACCEPT,
+        authorization: AUTH,
+        "content-type": "application/json",
+      },
+      body: `{"padding":"${"x".repeat(1024 * 1024)}"}`,
+    });
+    expect(res.status).toBe(413);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toMatchObject({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32600 },
+    });
+  });
+
+  it.each([
+    ["an empty JSON body", "application/json", "", 400, -32600],
+    [
+      "a non-JSON content type",
+      "text/plain",
+      JSON.stringify(toolsListBody(1)),
+      415,
+      -32000,
+    ],
+  ])(
+    "returns JSON-RPC for %s",
+    async (_case, contentType, body, status, code) => {
+      const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+        method: "POST",
+        headers: {
+          accept: ACCEPT,
+          authorization: AUTH,
+          "content-type": contentType,
+        },
+        body,
+      });
+      expect(res.status).toBe(status);
+      expect(res.headers.get("content-type")).toContain("application/json");
+      expect(await res.json()).toMatchObject({
+        jsonrpc: "2.0",
+        id: null,
+        error: { code },
+      });
+    },
+  );
+
   it("acknowledges a notification with (202) and without a session id", async () => {
     const cases: Record<string, string>[] = [
       { accept: ACCEPT, authorization: AUTH },
@@ -275,6 +344,24 @@ describe("http transport: origin guard (both directions)", () => {
       toolsListBody(5),
     );
     expect(res.status).toBe(200);
+  });
+
+  it("admits a loopback Origin on the bound development port", async () => {
+    const res = await rawRequest(
+      port,
+      "POST",
+      "/mcp",
+      {
+        accept: ACCEPT,
+        authorization: AUTH,
+        origin: `http://127.0.0.1:${port}`,
+      },
+      toolsListBody(6),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers["access-control-allow-origin"]).toBe(
+      `http://127.0.0.1:${port}`,
+    );
   });
 
   it("admits a request with no Origin header (the handshake still answers)", async () => {

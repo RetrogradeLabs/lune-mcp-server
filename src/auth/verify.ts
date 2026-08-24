@@ -52,6 +52,44 @@ function authServerOrigin(): string {
   ).replace(/\/+$/, "");
 }
 
+function resourceServerOrigin(): string {
+  return new URL(process.env.MCP_PUBLIC_URL || "https://mcp.luneresearch.com")
+    .origin;
+}
+
+const MCP_RESOURCE_PATHS = new Set(["/", "/mcp", "/v1/mcp"]);
+
+function isMcpResourceAlias(value: string): boolean {
+  try {
+    const resource = new URL(value);
+    const path = resource.pathname.replace(/\/+$/, "") || "/";
+    return (
+      resource.origin === resourceServerOrigin() &&
+      !resource.search &&
+      !resource.hash &&
+      MCP_RESOURCE_PATHS.has(path)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function acceptedAudiences(expected: string): string[] {
+  if (!isMcpResourceAlias(expected)) return [expected];
+  const origin = resourceServerOrigin();
+  return [origin, `${origin}/mcp`, `${origin}/v1/mcp`];
+}
+
+function audienceMatches(
+  audience: string | string[] | undefined,
+  expected: string,
+): boolean {
+  const accepted = new Set(acceptedAudiences(expected));
+  return typeof audience === "string"
+    ? accepted.has(audience)
+    : Array.isArray(audience) && audience.some((value) => accepted.has(value));
+}
+
 // Lazily build and memoise the remote JWKS resolver. `createRemoteJWKSet` caches
 // keys in-process, re-fetches on an unknown `kid` (bounded by a cooldown), and
 // tracks key rotation, so a network fetch happens about once per rotation, not
@@ -106,6 +144,7 @@ function remoteJwks(): ReturnType<typeof createRemoteJWKSet> {
 export interface VerifiedOAuthIdentity {
   distinctId: string;
   orgId?: string;
+  scopes: string[];
 }
 
 export interface AccessTokenInspection {
@@ -121,6 +160,8 @@ export interface AccessTokenInspection {
 export async function inspectAccessToken(
   token: string,
   keyResolver?: JWTVerifyGetKey,
+  expectedAudience = resourceServerOrigin(),
+  allowLegacyClientAudience = false,
 ): Promise<AccessTokenInspection> {
   let alg: string | undefined;
   try {
@@ -129,32 +170,54 @@ export async function inspectAccessToken(
     return { needsReauth: false }; // PAT / opaque bearer -> API authority.
   }
   if (alg !== "RS256") return { needsReauth: false };
+  let unverified: ReturnType<typeof decodeJwt>;
   try {
+    unverified = decodeJwt(token);
+  } catch {
+    return { needsReauth: true };
+  }
+  try {
+    const legacyAudience =
+      allowLegacyClientAudience &&
+      typeof unverified.aud === "string" &&
+      /^lune_oauth_[A-Za-z0-9_-]+$/.test(unverified.aud)
+        ? unverified.aud
+        : undefined;
+    if (
+      unverified.iss !== authServerOrigin() ||
+      (!audienceMatches(unverified.aud, expectedAudience) && !legacyAudience)
+    ) {
+      return { needsReauth: true };
+    }
     // Resolve the JWKS INSIDE the try so a malformed `LUNE_AUTH_SERVER_URL` (the
     // `new URL(...)` in `remoteJwks()` throwing) fails open like any other JWKS
     // infra fault, rather than 500-ing every request. Makes the fail-open
     // invariant total.
     const resolve = keyResolver ?? remoteJwks();
-    // Verify signature + exp against the AS JWKS, pinned to RS256. We deliberately
-    // do NOT also assert `iss`: a signature that verifies against the configured
-    // JWKS is itself the provenance proof (only the AS holds the private key), so
-    // a separate iss string/origin match adds no security while risking a FALSE
-    // 401 on benign config drift (e.g. a trailing slash or CNAME on
-    // LUNE_AUTH_SERVER_URL vs the API's `oauth_issuer`). A false 401 here would be
-    // worse than the original bug: the refreshed token carries the same iss, so it
-    // would 401 too and trip the client's "401 after successful auth" circuit
-    // breaker, hard-breaking OAuth for everyone. The API stays the iss authority.
+    // Verify signature, issuer, audience, and expiry against the AS JWKS. The
+    // unverified check above makes audience rejection fail closed even during a
+    // JWKS outage; it never grants access, and the API still verifies the token
+    // cryptographically on the fail-open infrastructure path.
     const { payload } = await jwtVerify(token, resolve, {
       algorithms: ["RS256"],
+      issuer: authServerOrigin(),
+      audience: legacyAudience
+        ? [...acceptedAudiences(expectedAudience), legacyAudience]
+        : acceptedAudiences(expectedAudience),
       clockTolerance: CLOCK_TOLERANCE_S,
     });
     if (typeof payload.sub !== "string" || !payload.sub) {
-      return { needsReauth: false };
+      return { needsReauth: true };
     }
     return {
       needsReauth: false,
       verifiedIdentity: {
         distinctId: payload.sub,
+        scopes: Array.isArray(payload.scopes)
+          ? payload.scopes.filter(
+              (scope): scope is string => typeof scope === "string",
+            )
+          : [],
         ...(typeof payload.org_id === "string" && payload.org_id
           ? { orgId: payload.org_id }
           : {}),
@@ -190,6 +253,15 @@ export async function inspectAccessToken(
 export async function accessTokenNeedsReauth(
   token: string,
   keyResolver?: JWTVerifyGetKey,
+  expectedAudience?: string,
+  allowLegacyClientAudience?: boolean,
 ): Promise<boolean> {
-  return (await inspectAccessToken(token, keyResolver)).needsReauth;
+  return (
+    await inspectAccessToken(
+      token,
+      keyResolver,
+      expectedAudience,
+      allowLegacyClientAudience,
+    )
+  ).needsReauth;
 }

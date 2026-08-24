@@ -45,8 +45,9 @@ async function post(
   port: number,
   headers: Record<string, string>,
   body: unknown,
+  path = "/mcp",
 ) {
-  return fetch(`http://127.0.0.1:${port}/mcp`, {
+  return fetch(`http://127.0.0.1:${port}${path}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -105,11 +106,15 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
     await new Promise<void>((resolve) => jwks.close(() => resolve()));
   });
 
-  function mint(expSecondsFromNow: number) {
+  function mint(
+    expSecondsFromNow: number,
+    audience = "https://mcp.luneresearch.com/mcp",
+  ) {
     const now = Math.floor(Date.now() / 1000);
     return new SignJWT({ org_id: "org-1", scopes: ["papers:read"] })
       .setProtectedHeader({ alg: "RS256", kid: KID })
       .setIssuer(issuer)
+      .setAudience(audience)
       .setSubject("user-1")
       .setIssuedAt(now - 120)
       .setExpirationTime(now + expSecondsFromNow)
@@ -161,6 +166,70 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
     expect(await r.text()).toContain("lune-research");
   });
 
+  it("accepts every equivalent MCP audience on every mounted endpoint alias", async () => {
+    const aliases = ["", "/mcp", "/v1/mcp"];
+    let id = 20;
+    for (const audienceAlias of aliases) {
+      const token = await mint(
+        3600,
+        `https://mcp.luneresearch.com${audienceAlias}`,
+      );
+      for (const endpointAlias of aliases) {
+        const r = await post(
+          port,
+          { authorization: `Bearer ${token}` },
+          initBody(id++),
+          endpointAlias || "/",
+        );
+        expect(
+          r.status,
+          `${audienceAlias || "/"} -> ${endpointAlias || "/"}`,
+        ).toBe(200);
+      }
+    }
+  });
+
+  it("returns a transport 403 naming the one missing tool scope", async () => {
+    const papersOnly = await mint(3600);
+    const r = await post(
+      port,
+      { authorization: `Bearer ${papersOnly}` },
+      {
+        jsonrpc: "2.0",
+        id: 5,
+        method: "tools/call",
+        params: {
+          name: "search_research_guidance",
+          arguments: { query: "ablation design" },
+        },
+      },
+    );
+    expect(r.status).toBe(403);
+    const challenge = r.headers.get("www-authenticate")!;
+    expect(challenge).toContain('error="insufficient_scope"');
+    expect(challenge).toContain('scope="guidance:read"');
+    expect(challenge).not.toContain("papers:read");
+  });
+
+  it("applies scope step-up to tools/call inside a JSON-RPC batch", async () => {
+    const papersOnly = await mint(3600);
+    const r = await post(port, { authorization: `Bearer ${papersOnly}` }, [
+      {
+        jsonrpc: "2.0",
+        id: 6,
+        method: "tools/call",
+        params: {
+          name: "search_research_guidance",
+          arguments: { query: "ablation design" },
+        },
+      },
+    ]);
+    expect(r.status).toBe(403);
+    expect(r.headers.get("www-authenticate")).toContain(
+      'scope="guidance:read"',
+    );
+  });
+
   it("lets an opaque PAT through the gate (validated downstream, not here)", async () => {
     const r = await post(
       port,
@@ -177,7 +246,10 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
     expect(r.status).toBe(401);
     const wa = r.headers.get("www-authenticate")!;
     // Anonymous discovery: bare challenge, NO error code (RFC 6750 §3).
-    expect(wa).toBe(`Bearer resource_metadata="${METADATA_URL}"`);
+    expect(wa).toBe(
+      `Bearer resource_metadata="${METADATA_URL}", ` +
+        'scope="papers:read guidance:read account:read"',
+    );
     expect(wa).not.toContain("error=");
   });
 });
@@ -216,9 +288,10 @@ describe("JWKS cooldown after a signing-key rotation", () => {
 
   function mintWith(privateKey: CryptoKey, kid: string, subject: string) {
     const now = Math.floor(Date.now() / 1000);
-    return new SignJWT({ org_id: "org-1" })
+    return new SignJWT({ org_id: "org-1", scopes: ["papers:read"] })
       .setProtectedHeader({ alg: "RS256", kid })
       .setIssuer(issuer)
+      .setAudience("https://mcp.luneresearch.com")
       .setSubject(subject)
       .setIssuedAt(now - 120)
       .setExpirationTime(now + 3600)

@@ -38,6 +38,7 @@ export const SearchInput = z.object({
   query: z
     .string()
     .min(1)
+    .max(500)
     .describe(
       "Full natural-language research query; phrase it the way you would ask " +
         "a human research assistant. Long, descriptive questions outperform " +
@@ -109,7 +110,7 @@ export const SearchInput = z.object({
 
 export const SearchManyInput = z.object({
   queries: z
-    .array(z.string().min(1))
+    .array(z.string().min(1).max(2000))
     .min(1)
     .max(25)
     .describe(
@@ -273,6 +274,7 @@ export const ExtractInput = z.object({
           .describe("Wire type the extracted value is coerced to."),
         description: z
           .string()
+          .max(2000)
           .optional()
           .describe("What to pull for this field; sharpens the extraction."),
       }),
@@ -286,6 +288,7 @@ export const ExtractInput = z.object({
   instruction: z
     .string()
     .min(1)
+    .max(2000)
     .describe(
       'Natural-language guidance for the extraction (e.g. "Pull the primary ' +
         'evaluation dataset and the headline accuracy"). The model is told to use ' +
@@ -302,7 +305,7 @@ export const ExtractInput = z.object({
 
 export const VerifyInput = z.object({
   claims: z
-    .array(z.string().min(1))
+    .array(z.string().min(1).max(2000))
     .min(1)
     .max(25)
     .describe(
@@ -366,12 +369,13 @@ export const GatherEvidenceInput = z.object({
   task: z
     .string()
     .min(1)
+    .max(2000)
     .describe(
       "The research goal in prose: what you are trying to establish. Drives " +
         "requirement decomposition and the sufficiency judgment.",
     ),
   queries: z
-    .array(z.string().min(1))
+    .array(z.string().min(1).max(2000))
     .min(1)
     .max(25)
     .describe(
@@ -389,6 +393,7 @@ export const GatherEvidenceInput = z.object({
         description: z
           .string()
           .min(1)
+          .max(2000)
           .describe("What evidence this slot needs."),
       }),
     )
@@ -400,6 +405,7 @@ export const GatherEvidenceInput = z.object({
     ),
   draft: z
     .string()
+    .max(8000)
     .optional()
     .describe(
       "Optional current draft. Each sentence is checked for support against the " +

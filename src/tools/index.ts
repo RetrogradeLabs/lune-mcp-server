@@ -1,4 +1,10 @@
-import type { Server, ServerContext } from "@modelcontextprotocol/server";
+import {
+  ProtocolError,
+  ProtocolErrorCode,
+  type Server,
+  type ServerContext,
+} from "@modelcontextprotocol/server";
+import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import type { KyInstance } from "ky";
 import { z } from "zod";
 
@@ -20,12 +26,109 @@ import type { ToolCallResult, ToolDef } from "./_shared.js";
 // here, and external (non-workspace) credentials simply get a 400 if they ask
 // for source="workspace".
 const ALL_TOOLS: readonly ToolDef[] = [...PAPER_TOOLS, ...GUIDANCE_TOOLS];
+const TOOLS_BY_NAME = new Map(ALL_TOOLS.map((tool) => [tool.name, tool]));
+
+function projectedInputSchema(
+  tool: ToolDef,
+  includeWorkspace: boolean,
+): z.ZodTypeAny {
+  if (includeWorkspace) return tool.inputSchema;
+  const shape = (tool.inputSchema as { shape?: Record<string, unknown> }).shape;
+  return shape && "source" in shape
+    ? (tool.inputSchema as z.ZodObject<z.ZodRawShape>).omit({ source: true })
+    : tool.inputSchema;
+}
+
+function jsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
+  return z.toJSONSchema(schema, {
+    target: "draft-2020-12",
+  }) as Record<string, unknown>;
+}
+
+function allowAdditiveOutputFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(allowAdditiveOutputFields);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([key, child]) =>
+      key === "additionalProperties" && child === false
+        ? []
+        : [[key, allowAdditiveOutputFields(child)]],
+    ),
+  );
+}
+
+function outputJsonSchema(schema: z.ZodTypeAny): Record<string, unknown> {
+  return allowAdditiveOutputFields(jsonSchema(schema)) as Record<
+    string,
+    unknown
+  >;
+}
+
+const inputSchemaValidator = new Ajv2020({
+  allErrors: true,
+  strict: true,
+  useDefaults: true,
+  validateFormats: false,
+});
+const outputSchemaValidator = new Ajv2020({
+  allErrors: true,
+  strict: true,
+  useDefaults: false,
+  validateFormats: false,
+});
+const INPUT_VALIDATORS = new Map<string, ValidateFunction>();
+const EXTERNAL_INPUT_VALIDATORS = new Map<string, ValidateFunction>();
+const OUTPUT_VALIDATORS = new Map<string, ValidateFunction>();
+for (const tool of ALL_TOOLS) {
+  INPUT_VALIDATORS.set(
+    tool.name,
+    inputSchemaValidator.compile(jsonSchema(tool.inputSchema)),
+  );
+  EXTERNAL_INPUT_VALIDATORS.set(
+    tool.name,
+    inputSchemaValidator.compile(jsonSchema(projectedInputSchema(tool, false))),
+  );
+  if (tool.outputSchema) {
+    OUTPUT_VALIDATORS.set(
+      tool.name,
+      outputSchemaValidator.compile(outputJsonSchema(tool.outputSchema)),
+    );
+  }
+}
+
+function traceContextHeaders(ctx?: ServerContext): Record<string, string> {
+  const metadata = (
+    ctx?.mcpReq as { _meta?: Record<string, unknown> } | undefined
+  )?._meta;
+  const limits: Record<string, number> = {
+    traceparent: 256,
+    tracestate: 512,
+    baggage: 4096,
+  };
+  return Object.fromEntries(
+    Object.entries(limits).flatMap(([name, maxLength]) => {
+      const value = metadata?.[name];
+      const valid =
+        typeof value === "string" &&
+        value.length <= maxLength &&
+        value.split("").every((character) => {
+          const code = character.charCodeAt(0);
+          return code === 9 || (code >= 32 && code <= 126);
+        });
+      return valid ? [[name, value]] : [];
+    }),
+  );
+}
 
 const PAPER_NAMES = new Set(PAPER_TOOLS.map((t) => t.name));
 const GUIDANCE_NAMES = new Set(GUIDANCE_TOOLS.map((t) => t.name));
 
 export function getAllToolDefinitions(): readonly ToolDef[] {
   return ALL_TOOLS;
+}
+
+export function requiredScopeForTool(name: string): ToolDef["requiredScope"] {
+  return TOOLS_BY_NAME.get(name)?.requiredScope;
 }
 
 /**
@@ -43,27 +146,15 @@ export function getAllToolDefinitions(): readonly ToolDef[] {
 export function listToolsResponse(includeWorkspace = true) {
   return {
     tools: ALL_TOOLS.map((t) => {
-      let schema = t.inputSchema;
-      if (!includeWorkspace) {
-        const shape = (schema as { shape?: Record<string, unknown> }).shape;
-        if (shape && "source" in shape) {
-          schema = (schema as z.ZodObject<z.ZodRawShape>).omit({
-            source: true,
-          });
-        }
-      }
+      const schema = projectedInputSchema(t, includeWorkspace);
       // MCP spec mandates JSON Schema 2020-12 for `inputSchema` /
       // `outputSchema`. Older `draft-7` output triggers stricter clients
       // (Claude Desktop) to reject the tool list with no actionable error,
       // leading to "no tools available" in the connector UI. zod 4 ships
       // native JSON-Schema export.
-      const inputSchema = z.toJSONSchema(schema, {
-        target: "draft-2020-12",
-      }) as Record<string, unknown>;
+      const inputSchema = jsonSchema(schema);
       const outputSchema = t.outputSchema
-        ? (z.toJSONSchema(t.outputSchema, {
-            target: "draft-2020-12",
-          }) as Record<string, unknown>)
+        ? outputJsonSchema(t.outputSchema)
         : undefined;
       return {
         name: t.name,
@@ -85,10 +176,80 @@ async function dispatchToolCall(
   api: KyInstance,
   name: string,
   args: unknown,
+  includeWorkspace = true,
 ): Promise<ToolCallResult> {
-  if (PAPER_NAMES.has(name)) return callPaperTool(api, name, args);
-  if (GUIDANCE_NAMES.has(name)) return callGuidanceTool(api, name, args);
-  throw new Error(`unknown tool: ${name}`);
+  const definition = TOOLS_BY_NAME.get(name);
+  if (!definition) {
+    throw new ProtocolError(
+      ProtocolErrorCode.InvalidParams,
+      `Unknown tool: ${name}`,
+    );
+  }
+
+  const inputValidator = (
+    includeWorkspace ? INPUT_VALIDATORS : EXTERNAL_INPUT_VALIDATORS
+  ).get(name)!;
+  const validatedArgs = structuredClone(args);
+  const jsonInputValid = inputValidator(validatedArgs);
+  const input = definition.inputSchema.safeParse(validatedArgs);
+  if (!jsonInputValid || !input.success) {
+    const issues = !jsonInputValid
+      ? (inputValidator.errors ?? []).slice(0, 5).map((issue) => {
+          const path = issue.instancePath
+            .replace(/^\//, "")
+            .replaceAll("/", ".");
+          return `${path || "arguments"}: ${issue.message ?? "is invalid"}`;
+        })
+      : (input.success ? [] : input.error.issues).slice(0, 5).map((issue) => {
+          const path = issue.path.map(String).join(".") || "arguments";
+          return `${path}: ${issue.message}`;
+        });
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: [
+            `Invalid arguments for ${name}:`,
+            ...issues,
+            "Correct the named arguments before retrying.",
+          ].join("\n"),
+        },
+      ],
+    };
+  }
+
+  let result: ToolCallResult;
+  if (PAPER_NAMES.has(name)) {
+    result = await callPaperTool(api, name, input.data);
+  } else if (GUIDANCE_NAMES.has(name)) {
+    result = await callGuidanceTool(api, name, input.data);
+  } else {
+    throw new Error(`Tool ${name} has no registered handler`);
+  }
+
+  const outputValidator = OUTPUT_VALIDATORS.get(name);
+  if (outputValidator && result.isError !== true) {
+    if (!outputValidator(result.structuredContent)) {
+      const issue = outputValidator.errors?.[0];
+      const path =
+        issue?.instancePath.replace(/^\//, "").replaceAll("/", ".") ||
+        "structuredContent";
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text:
+              `Lune returned an invalid response for ${name} at ${path}. ` +
+              "Stop retrying this tool and report the problem. " +
+              "error_type=output_schema_violation",
+          },
+        ],
+      };
+    }
+  }
+  return result;
 }
 
 export { dispatchToolCall };
@@ -121,7 +282,12 @@ export const GET_MORE_TOOLS_DEF = {
   inputSchema: z.toJSONSchema(GET_MORE_TOOLS_SCHEMA, {
     target: "draft-2020-12",
   }) as Record<string, unknown>,
-  annotations: { readOnlyHint: true },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  },
 };
 
 /**
@@ -136,8 +302,9 @@ export const GET_MORE_TOOLS_DEF = {
 function errorFacts(result: ToolCallResult): Record<string, unknown> {
   const text = result.content.map((c) => c.text).join("\n");
   const status = /(?:^|\s)http_status=(\d{3})(?:\s|$)/.exec(text)?.[1];
+  const errorType = /(?:^|\s)error_type=([a-z0-9_]+)(?:\s|$)/.exec(text)?.[1];
   return {
-    $mcp_error_type: "tool_error",
+    $mcp_error_type: errorType ?? "tool_error",
     $mcp_error_message: text,
     ...(status ? { $mcp_error_status: status } : {}),
   };
@@ -185,9 +352,13 @@ export function registerAllTools(
   // CLI usage without any client-side telemetry. Unconditional because its
   // absence is what makes the API read the call as `api_direct`, so an
   // unidentified client still has to say which transport it came in on.
-  const taggedClient = (): KyInstance =>
+  const taggedClient = (ctx?: ServerContext): KyInstance =>
     makeClient().extend({
-      headers: { "X-Lune-Client": clientHeaderFor(server) },
+      headers: {
+        "X-Lune-Client": clientHeaderFor(server),
+        ...traceContextHeaders(ctx),
+      },
+      ...(ctx?.mcpReq.signal ? { signal: ctx.mcpReq.signal } : {}),
     });
   // The SDK's setRequestHandler infers a wide union for the response type
   // (ServerResult | InputRequiredResult); cast to satisfy the overload while
@@ -201,7 +372,8 @@ export function registerAllTools(
       attributeFromEnvelope(server, ctx);
       const contextWorkspace = analyticsContext?.()?.workspaceCredential;
       const response = listToolsResponse(
-        contextWorkspace ?? (await isWorkspaceCredential(taggedClient)),
+        contextWorkspace ??
+          (await isWorkspaceCredential(() => taggedClient(ctx))),
       );
       // Gated on the principal's OPT-OUT, never on `captureEnabled`: that also
       // goes false when the shared daily event budget is spent, and a telemetry
@@ -249,12 +421,17 @@ export function registerAllTools(
         // error): this meta tool exists to LISTEN, so a malformed request is
         // itself signal and must never read as a server fault to the agent.
         const parsed = GET_MORE_TOOLS_SCHEMA.safeParse(args);
-        captureMcp("$mcp_missing_capability", server, analyticsContext?.(), {
-          $mcp_intent: parsed.success
-            ? parsed.data.capability
-            : capabilityIntent(args),
-          $mcp_is_error: !parsed.success,
-        });
+        const captured = captureMcp(
+          "$mcp_missing_capability",
+          server,
+          analyticsContext?.(),
+          {
+            $mcp_intent: parsed.success
+              ? parsed.data.capability
+              : capabilityIntent(args),
+            $mcp_is_error: !parsed.success,
+          },
+        );
         if (!parsed.success) {
           return {
             isError: true,
@@ -274,17 +451,33 @@ export function registerAllTools(
             {
               type: "text",
               text:
-                "Noted. Lune cannot do this yet; the request has been " +
-                "recorded for the roadmap. Continue with the existing tools.",
+                "Lune cannot do this yet. " +
+                (captured
+                  ? "The request was submitted for roadmap review. "
+                  : "No roadmap event was stored. ") +
+                "Continue with the existing tools.",
             },
           ],
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } as any;
       }
-      const api = taggedClient();
+      const api = taggedClient(ctx);
       const started = Date.now();
       try {
-        const result = await dispatchToolCall(api, name, args);
+        const sourceWasSupplied =
+          typeof args === "object" &&
+          args !== null &&
+          Object.hasOwn(args, "source");
+        const includeWorkspace = sourceWasSupplied
+          ? (analyticsContext?.()?.workspaceCredential ??
+            (await isWorkspaceCredential(() => taggedClient(ctx))))
+          : true;
+        const result = await dispatchToolCall(
+          api,
+          name,
+          args,
+          includeWorkspace,
+        );
         if (analyticsEnabled()) {
           captureMcp("$mcp_tool_call", server, analyticsContext?.(), {
             $mcp_tool_name: name,
