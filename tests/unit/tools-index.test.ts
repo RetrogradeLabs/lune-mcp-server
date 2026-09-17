@@ -6,6 +6,18 @@
  * the handler bodies themselves: tools/list, tools/call, and the empty
  * resources/prompts probes).
  */
+import {
+  createRecordingServer,
+  createServerContext,
+} from "../support/mcp-server.js";
+import { createFakeKy, httpErrorReply, jsonReply } from "../support/fake-ky.js";
+import { callResult, toolText } from "../support/tool-result.js";
+import {
+  isJsonObject,
+  type JsonObject,
+  type JsonValue,
+} from "../../src/json.js";
+import type { MetaObject } from "@modelcontextprotocol/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { KyInstance } from "ky";
 import {
@@ -22,47 +34,20 @@ beforeEach(async () => {
   await TOOL_RESPONSE_CACHE.clear();
 });
 
-/** Records every verb call and returns a thenable `{ json }` matcher. */
-function fakeKy(response: unknown = {}): KyInstance {
-  const make = () => () =>
-    ({ json: async () => response }) as unknown as Promise<unknown>;
-  return {
-    get: make(),
-    post: make(),
-    delete: make(),
-    put: make(),
-    // `registerAllTools` extends every client with `X-Lune-Client`.
-    extend: () => fakeKy(response),
-  } as unknown as KyInstance;
+/** Records every verb call and answers each one with `response`. */
+function fakeKy(response: JsonValue = {}): KyInstance {
+  return createFakeKy(() => jsonReply(response)).ky;
 }
 
 /** ky double whose verbs throw a ky-shaped HTTPError with the given status. */
-function erroringKy(status: number, body: unknown): KyInstance {
-  const make = () => () =>
-    ({
-      json: async () => {
-        throw {
-          response: {
-            status,
-            headers: new Headers(),
-            json: async () => body,
-          },
-        };
-      },
-    }) as unknown as Promise<unknown>;
-  return {
-    get: make(),
-    post: make(),
-    delete: make(),
-    put: make(),
-    extend: () => erroringKy(status, body),
-  } as unknown as KyInstance;
+function erroringKy(status: number, body: JsonValue): KyInstance {
+  return createFakeKy(() => httpErrorReply(status, body)).ky;
 }
 
 describe("getAllToolDefinitions", () => {
-  it("returns the union of paper and guidance tools", () => {
+  it("returns the union of paper, figure and guidance tools", () => {
     const defs = getAllToolDefinitions();
-    expect(defs.length).toBe(12);
+    expect(defs.length).toBe(14);
     const names = defs.map((d) => d.name);
     expect(names).toContain("search_papers");
     // Workspace retrieval is folded into the corpus tools' source="workspace"
@@ -75,6 +60,8 @@ describe("getAllToolDefinitions", () => {
     expect(names).toContain("gather_evidence");
     expect(names).toContain("search_related_papers");
     expect(names).toContain("search_research_guidance");
+    expect(names).toContain("search_figure_references");
+    expect(names).toContain("get_paper_figures");
     // Paper metadata is included in search results; these are no longer tools.
     expect(names).not.toContain("get_paper");
     expect(names).not.toContain("get_papers");
@@ -95,6 +82,7 @@ describe("getAllToolDefinitions", () => {
         definition.requiredScope,
       ]),
     );
+
     expect(scopes).toEqual({
       search_papers: "papers:read",
       search_papers_many: "papers:read",
@@ -108,6 +96,8 @@ describe("getAllToolDefinitions", () => {
       gather_evidence: "papers:read",
       search_research_guidance: "guidance:read",
       get_research_guidance_doc: "guidance:read",
+      search_figure_references: "papers:read",
+      get_paper_figures: "papers:read",
     });
   });
 });
@@ -121,15 +111,19 @@ describe("credential-aware tools/list (workspace source hiding)", () => {
     "gather_evidence",
   ];
 
-  function props(tool: { inputSchema: unknown }): Record<string, unknown> {
-    return (
-      (tool.inputSchema as { properties?: Record<string, unknown> })
-        .properties ?? {}
-    );
+  /** The advertised JSON Schema's `properties` map, or {} when it declares none. */
+  function props(tool: { inputSchema: JsonValue }): JsonObject {
+    const schema = tool.inputSchema;
+
+    if (!isJsonObject(schema)) return {};
+    const properties = schema["properties"];
+
+    return isJsonObject(properties) ? properties : {};
   }
 
   it("exposes the source selector to a workspace credential", () => {
     const tools = listToolsResponse(true).tools;
+
     for (const name of SOURCE_TOOLS) {
       const t = tools.find((x) => x.name === name)!;
       expect("source" in props(t), `${name} should expose source`).toBe(true);
@@ -138,6 +132,7 @@ describe("credential-aware tools/list (workspace source hiding)", () => {
 
   it("strips the source selector entirely for a non-workspace credential", () => {
     const tools = listToolsResponse(false).tools;
+
     for (const name of SOURCE_TOOLS) {
       const t = tools.find((x) => x.name === name)!;
       expect(
@@ -145,7 +140,8 @@ describe("credential-aware tools/list (workspace source hiding)", () => {
         `${name} must NOT expose source externally`,
       ).toBe(false);
     }
-    // Same 12 tools either way; only the source property differs.
+
+    // Same tool set either way; only the source property differs.
     expect(tools.length).toBe(listToolsResponse(true).tools.length);
   });
 
@@ -153,16 +149,17 @@ describe("credential-aware tools/list (workspace source hiding)", () => {
     const a = listToolsResponse(true).tools.find(
       (t) => t.name === "get_paper_citations",
     )!;
+
     const b = listToolsResponse(false).tools.find(
       (t) => t.name === "get_paper_citations",
     )!;
+
     expect(JSON.stringify(a.inputSchema)).toBe(JSON.stringify(b.inputSchema));
   });
 
   it("the non-workspace catalog mentions 'workspace' NOWHERE; the workspace one does", () => {
     // The whole point of the gate: an external client sees zero trace of the
-    // workspace surface (no tool, no param, no describe). A workspace credential
-    // sees it (the source selector's enum + describe).
+    // workspace surface (no tool, no param, no describe); a workspace one does.
     expect(
       JSON.stringify(listToolsResponse(false)).toLowerCase(),
     ).not.toContain("workspace");
@@ -173,37 +170,28 @@ describe("credential-aware tools/list (workspace source hiding)", () => {
 });
 
 describe("alwaysLoad entry tools (tool-selection: get picked over web_search)", () => {
-  // The cold-start entry tools carry `_meta["anthropic/alwaysLoad"]` so clients
-  // that run MCP tool search (Claude Code) keep them un-deferred; their full
-  // descriptions (which carry the "use this for research, not web_search"
-  // trigger) are then in context from session start, not behind a ToolSearch
-  // hop. Every OTHER tool stays deferrable so context isn't burned. One entry
-  // per cold-start research intent: single-question, literature sweep,
-  // methodology. See .claude/rules/mcp.md (tool selection).
+  // Entry tools carry `_meta["anthropic/alwaysLoad"]` so a client running MCP
+  // tool search keeps them un-deferred. Why three: the MCP server design notes.
   const ENTRY_TOOLS = [
     "search_papers",
     "search_papers_many",
     "search_research_guidance",
   ];
 
-  function alwaysLoad(t: { _meta?: unknown }): boolean {
-    return (
-      (t._meta as Record<string, unknown> | undefined)?.[
-        "anthropic/alwaysLoad"
-      ] === true
-    );
+  function alwaysLoad(tool: { _meta?: MetaObject | undefined }): boolean {
+    return tool._meta?.["anthropic/alwaysLoad"] === true;
   }
 
   it("marks exactly the three entry tools as always-loaded, and no others", () => {
-    const tools = listToolsResponse().tools as Array<{
-      name: string;
-      _meta?: unknown;
-    }>;
+    const { tools } = listToolsResponse();
+
     const flagged = tools
       .filter(alwaysLoad)
       .map((t) => t.name)
       .sort();
+
     expect(flagged).toEqual([...ENTRY_TOOLS].sort());
+
     // Non-entry tools must not emit `_meta` at all (no accidental spread).
     for (const t of tools) {
       if (!ENTRY_TOOLS.includes(t.name)) expect(t._meta).toBeUndefined();
@@ -214,6 +202,7 @@ describe("alwaysLoad entry tools (tool-selection: get picked over web_search)", 
     const t = getAllToolDefinitions().find(
       (d) => d.name === "search_papers_many",
     )!;
+
     // Front-loaded intent + the prefer-over-web_search trigger survive Claude
     // Code's 2KB description truncation only if they are near the start.
     expect(t.description.slice(0, 400)).toMatch(/literature sweep/i);
@@ -225,11 +214,8 @@ describe("alwaysLoad entry tools (tool-selection: get picked over web_search)", 
 
 describe("deterministic tools/list ordering", () => {
   it("returns tools in a deterministic order across calls", () => {
-    // 2026-07-28 SHOULD: a stable order lets clients cache the catalogue and
-    // raises their LLM prompt-cache hit rate. It is also the precondition for
-    // the `tools/list` cache hint being worth anything. Comparing two calls to
-    // each other cannot fail (the source is one module-level array), so pin
-    // the order itself: entry tools first, then the heavier ones.
+    // 2026-07-28 SHOULD: a stable order lets clients cache the catalogue and is
+    // the precondition for the `tools/list` hint, so pin the order itself.
     expect(listToolsResponse(true).tools.map((t) => t.name)).toEqual([
       "search_papers",
       "search_papers_many",
@@ -241,6 +227,8 @@ describe("deterministic tools/list ordering", () => {
       "extract_from_papers",
       "verify_claims",
       "gather_evidence",
+      "search_figure_references",
+      "get_paper_figures",
       "search_research_guidance",
       "get_research_guidance_doc",
     ]);
@@ -252,6 +240,7 @@ describe("dispatchToolCall", () => {
     const r = await dispatchToolCall(fakeKy({ results: [] }), "search_papers", {
       query: "x",
     });
+
     expect(r.content[0]!.type).toBe("text");
   });
 
@@ -261,13 +250,13 @@ describe("dispatchToolCall", () => {
       "search_research_guidance",
       { query: "ablation" },
     );
+
     expect(r.structuredContent).toEqual({ results: [] });
   });
 
   it("gather_evidence posts to evidence/gather and passes through a schema-valid response", async () => {
-    // Includes the null-valued fields (chunk_id, year, conference, rerank_score,
-    // draft_support) so this pins that the advertised output schema accepts the
-    // pass-through structuredContent rather than rejecting JSON nulls.
+    // Includes the null-valued fields, so this pins that the advertised output
+    // schema accepts the pass-through structuredContent rather than rejecting.
     const response = {
       requirements: [
         {
@@ -308,24 +297,19 @@ describe("dispatchToolCall", () => {
       units_charged: 1,
       future_additive_field: "preserved",
     };
+
     expect(() => GatherEvidenceOutput.parse(response)).not.toThrow();
 
-    let postedPath: string | undefined;
-    const recordingKy = {
-      get: () => ({ json: async () => response }),
-      post: (path: string) => {
-        postedPath = path;
-        return { json: async () => response };
-      },
-      delete: () => ({ json: async () => response }),
-      put: () => ({ json: async () => response }),
-    } as unknown as KyInstance;
+    const recording = createFakeKy(() => jsonReply(response));
 
-    const r = await dispatchToolCall(recordingKy, "gather_evidence", {
+    const r = await dispatchToolCall(recording.ky, "gather_evidence", {
       task: "t",
       queries: ["a"],
     });
-    expect(postedPath).toBe("evidence/gather");
+
+    expect(recording.calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      "post evidence/gather",
+    ]);
     expect(r.structuredContent).toEqual(response);
   });
 
@@ -342,9 +326,10 @@ describe("dispatchToolCall", () => {
     const result = await dispatchToolCall(fakeKy(), "search_papers", {
       query: "",
     });
+
     expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toContain("query");
-    expect(result.content[0]!.text).toContain("Correct the named arguments");
+    expect(toolText(result)).toContain("query");
+    expect(toolText(result)).toContain("Correct the named arguments");
   });
 
   it.each([
@@ -370,7 +355,7 @@ describe("dispatchToolCall", () => {
   ])("mirrors the API length bound for %s", async (name, args, field) => {
     const result = await dispatchToolCall(fakeKy(), name, args);
     expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toContain(field);
+    expect(toolText(result)).toContain(field);
   });
 
   it("rejects arguments excluded by the advertised additionalProperties contract", async () => {
@@ -378,8 +363,9 @@ describe("dispatchToolCall", () => {
       query: "valid",
       invented: true,
     });
+
     expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toContain("additional properties");
+    expect(toolText(result)).toContain("additional properties");
   });
 
   it("returns a model-readable error when successful output violates outputSchema", async () => {
@@ -388,56 +374,40 @@ describe("dispatchToolCall", () => {
       fields: [{ name: "dataset", type: "string" }],
       instruction: "Extract the dataset.",
     });
+
     expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toContain("structuredContent");
-    expect(result.content[0]!.text).toContain("Stop retrying");
-    expect(result.content[0]!.text).toContain(
-      "error_type=output_schema_violation",
-    );
+    expect(toolText(result)).toContain("structuredContent");
+    expect(toolText(result)).toContain("Stop retrying");
+    expect(toolText(result)).toContain("error_type=output_schema_violation");
   });
 });
 
 describe("registerAllTools", () => {
-  /** Captures handlers keyed by the schema object passed to setRequestHandler. */
-  function captureServer(): {
-    server: { setRequestHandler: (schema: unknown, handler: unknown) => void };
-    handlers: Map<unknown, (req: unknown) => Promise<unknown>>;
-  } {
-    const handlers = new Map<unknown, (req: unknown) => Promise<unknown>>();
-    return {
-      server: {
-        setRequestHandler: (schema, handler) => {
-          handlers.set(schema, handler as (req: unknown) => Promise<unknown>);
-        },
-      },
-      handlers,
-    };
-  }
-
   it("wires two request handlers onto the server", () => {
-    // tools/list, tools/call. The resources/list handler is wired by
-    // registerResources, and prompts/list + prompts/get by registerPrompts
-    // (see prompts.test.ts), so each MCP capability is registered by one
-    // function.
-    const { server, handlers } = captureServer();
-    registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
-      () => fakeKy(),
-    );
-    expect(handlers.size).toBe(2);
+    // registerAllTools owns tools/list + tools/call only; resources/list comes
+    // from registerResources and the prompts pair from registerPrompts.
+    const server = createRecordingServer();
+    // Diffed against the SDK's own constructor-time registrations, so the
+    // assertion states what registerAllTools adds rather than what Server has.
+    const before = new Set(server.registeredMethods());
+    registerAllTools(server, () => fakeKy());
+
+    const added = server
+      .registeredMethods()
+      .filter((method) => !before.has(method));
+
+    expect(added.sort()).toEqual(["tools/call", "tools/list"]);
   });
 
   it("the tools/list handler returns the full tool catalog", async () => {
-    const { server, handlers } = captureServer();
-    registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
-      () => fakeKy(),
+    const server = createRecordingServer();
+    registerAllTools(server, () => fakeKy());
+
+    const res = await server.handler("tools/list")(
+      { method: "tools/list" },
+      createServerContext({ method: "tools/list" }),
     );
-    // The first registered handler is tools/list.
-    const [listToolsHandler] = [...handlers.values()];
-    const res = (await listToolsHandler!({})) as ReturnType<
-      typeof listToolsResponse
-    >;
+
     expect(res.tools.map((t) => t.name).sort()).toEqual(
       [
         "get_conference_papers",
@@ -452,106 +422,143 @@ describe("registerAllTools", () => {
         "gather_evidence",
         "search_related_papers",
         "search_research_guidance",
+        "search_figure_references",
+        "get_paper_figures",
       ].sort(),
     );
   });
 
   it("the tools/call handler builds a client per request and dispatches", async () => {
-    const { server, handlers } = captureServer();
+    const server = createRecordingServer();
     const makeClient = vi.fn(() => fakeKy({ results: [] }));
-    registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
-      makeClient,
+    registerAllTools(server, makeClient);
+    const callHandler = server.handler("tools/call");
+
+    const res = callResult(
+      await callHandler(
+        {
+          method: "tools/call",
+          params: { name: "search_papers", arguments: { query: "x" } },
+        },
+        createServerContext(),
+      ),
     );
-    const callHandler = [...handlers.values()][1]!;
-    const res = (await callHandler({
-      params: { name: "search_papers", arguments: { query: "x" } },
-    })) as { content: Array<{ type: string }> };
+
     expect(makeClient).toHaveBeenCalledTimes(1);
     expect(res.content[0]!.type).toBe("text");
   });
 
   it("validates calls against the non-workspace schema it advertised", async () => {
-    const { server, handlers } = captureServer();
+    const server = createRecordingServer();
     registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
+      server,
       () => fakeKy({ results: [] }),
       () => ({ workspaceCredential: false }),
     );
-    const callHandler = [...handlers.values()][1]!;
-    const result = (await callHandler({
-      params: {
-        name: "search_papers",
-        arguments: { query: "valid", source: "corpus" },
-      },
-    })) as { isError?: boolean; content: Array<{ text: string }> };
+    const callHandler = server.handler("tools/call");
+
+    const result = callResult(
+      await callHandler(
+        {
+          method: "tools/call",
+          params: {
+            name: "search_papers",
+            arguments: { query: "valid", source: "corpus" },
+          },
+        },
+        createServerContext(),
+      ),
+    );
+
     expect(result.isError).toBe(true);
-    expect(result.content[0]!.text).toContain("additional properties");
+    expect(toolText(result)).toContain("additional properties");
   });
 
   it("the tools/call handler returns an isError result on a 429 (does not crash the session)", async () => {
-    // End-to-end through the registered tools/call handler: an upstream 429
-    // must come back as a resolved { isError: true } tool result, never a
-    // thrown JSON-RPC error. A throw here would surface to the client as a
-    // protocol error the model never sees (and could abort the turn).
-    const { server, handlers } = captureServer();
-    registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
-      () => erroringKy(429, { error: "rate_limited", retry_after_seconds: 1 }),
+    // End-to-end through the registered handler: an upstream 429 must resolve
+    // to `{ isError: true }`, never a thrown protocol error the model misses.
+    const server = createRecordingServer();
+    registerAllTools(server, () =>
+      erroringKy(429, { error: "rate_limited", retry_after_seconds: 1 }),
     );
-    const callHandler = [...handlers.values()][1]!;
-    const res = (await callHandler({
-      params: { name: "search_papers", arguments: { query: "x" } },
-    })) as { isError?: boolean; content: Array<{ text: string }> };
+    const callHandler = server.handler("tools/call");
+
+    const res = callResult(
+      await callHandler(
+        {
+          method: "tools/call",
+          params: { name: "search_papers", arguments: { query: "x" } },
+        },
+        createServerContext(),
+      ),
+    );
+
     expect(res.isError).toBe(true);
-    expect(res.content[0]!.text).toMatch(/rate limited/i);
-    expect(res.content[0]!.text).toContain("retry_after_seconds=1");
+    expect(toolText(res)).toMatch(/rate limited/i);
+    expect(toolText(res)).toContain("retry_after_seconds=1");
   });
 
   it("the tools/call handler returns an isError result on a 402 with buy-credits guidance", async () => {
-    const { server, handlers } = captureServer();
-    registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
-      () =>
-        erroringKy(402, {
-          error: "out_of_credits",
-          buy_credits_url: "https://lune/dashboard/settings/billing",
-        }),
+    const server = createRecordingServer();
+    registerAllTools(server, () =>
+      erroringKy(402, {
+        error: "out_of_credits",
+        buy_credits_url: "https://lune/dashboard/settings/billing",
+      }),
     );
-    const callHandler = [...handlers.values()][1]!;
-    const res = (await callHandler({
-      params: { name: "search_papers", arguments: { query: "x" } },
-    })) as { isError?: boolean; content: Array<{ text: string }> };
+    const callHandler = server.handler("tools/call");
+
+    const res = callResult(
+      await callHandler(
+        {
+          method: "tools/call",
+          params: { name: "search_papers", arguments: { query: "x" } },
+        },
+        createServerContext(),
+      ),
+    );
+
     expect(res.isError).toBe(true);
-    expect(res.content[0]!.text).toContain("Lune quota exhausted");
-    expect(res.content[0]!.text).toContain("buy_credits_url=");
+    expect(toolText(res)).toContain("Lune quota exhausted");
+    expect(toolText(res)).toContain("buy_credits_url=");
   });
 
   it("the tools/call handler defaults missing arguments to an empty object", async () => {
-    const { server, handlers } = captureServer();
-    registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
-      () => fakeKy([]),
+    const server = createRecordingServer();
+    registerAllTools(server, () => fakeKy([]));
+    const callHandler = server.handler("tools/call");
+
+    const res = callResult(
+      await callHandler(
+        {
+          method: "tools/call",
+          params: { name: "list_conferences" },
+        },
+        createServerContext(),
+      ),
     );
-    const callHandler = [...handlers.values()][1]!;
-    const res = (await callHandler({
-      params: { name: "list_conferences" },
-    })) as { structuredContent: unknown };
+
     expect(res.structuredContent).toEqual({ conferences: [] });
   });
 
   it("registerResources wires empty resource and template discovery handlers", async () => {
-    const { server, handlers } = captureServer();
-    registerResources(
-      server as unknown as Parameters<typeof registerResources>[0],
-    );
-    const [resourcesHandler, templatesHandler, readHandler] = [
-      ...handlers.values(),
-    ];
-    expect(await resourcesHandler!({})).toEqual({ resources: [] });
-    expect(await templatesHandler!({})).toEqual({ resourceTemplates: [] });
+    const server = createRecordingServer();
+    registerResources(server);
+    const ctx = createServerContext();
+    expect(
+      await server.handler("resources/list")({ method: "resources/list" }, ctx),
+    ).toEqual({ resources: [] });
+    expect(
+      await server.handler("resources/templates/list")(
+        { method: "resources/templates/list" },
+        ctx,
+      ),
+    ).toEqual({ resourceTemplates: [] });
     await expect(
-      readHandler!({ params: { uri: "lune://missing" } }),
+      server.handler("resources/read")(
+        { method: "resources/read", params: { uri: "lune://missing" } },
+        ctx,
+      ),
     ).rejects.toMatchObject({ code: -32602, data: { uri: "lune://missing" } });
   });
 });

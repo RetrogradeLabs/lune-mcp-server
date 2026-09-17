@@ -8,7 +8,9 @@
  * and the single-flight racy-recheck path.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { KyInstance } from "ky";
+import { createFakeKy, jsonReply } from "../support/fake-ky.js";
+import type { FakeReply } from "../support/fake-ky.js";
+import type { JsonValue } from "../../src/json.js";
 import { cachedJson } from "../../src/api/cached-fetch.js";
 import { TOOL_RESPONSE_CACHE } from "../../src/cache.js";
 
@@ -16,46 +18,47 @@ beforeEach(async () => {
   await TOOL_RESPONSE_CACHE.clear();
 });
 
+/** The body of the poisoned-entry test's `/search` response. */
+type SearchBody = { results: string[] };
+
+/** The reply modifiers `jsonReply` accepts, read off the seam so it cannot drift. */
+type ReplyExtras = NonNullable<Parameters<typeof jsonReply>[1]>;
+
+/** What a test reads back off a one-body ky double. */
+interface FakeApi {
+  ky: ReturnType<typeof createFakeKy>["ky"];
+  readonly getCalls: number;
+  readonly postCalls: number;
+}
+
 /**
- * Build a ky double whose responses optionally carry a `headers.get`
- * accessor (real ky responses do; verb-level mocks may not).
+ * A ky double answering every call with one body. `withHeaders: false` drops
+ * the reply's `headers` member entirely, which is the "verb-level mock with no
+ * headers" case `cached-fetch.ts`'s `hasHeaders` guard exists for; a `null`
+ * `cacheControl` keeps the headers but leaves the directive absent.
  */
 function fakeKy(opts: {
-  body: unknown;
+  body: JsonValue;
   cacheControl?: string | null;
   withHeaders?: boolean;
-}): { ky: KyInstance; getCalls: number; postCalls: number } {
-  let getCalls = 0;
-  let postCalls = 0;
-  const buildResp = () => {
-    const resp: Record<string, unknown> = { json: async () => opts.body };
-    if (opts.withHeaders !== false) {
-      resp.headers = {
-        get: (name: string) =>
-          name.toLowerCase() === "cache-control"
-            ? (opts.cacheControl ?? null)
-            : null,
-      };
-    }
-    return resp;
-  };
-  const ky = {
-    get: () => {
-      getCalls++;
-      return buildResp() as unknown as Promise<unknown>;
-    },
-    post: () => {
-      postCalls++;
-      return buildResp() as unknown as Promise<unknown>;
-    },
-  } as unknown as KyInstance;
+}): FakeApi {
+  const extras: ReplyExtras = {};
+
+  if (opts.cacheControl !== undefined && opts.cacheControl !== null) {
+    extras.cacheControl = opts.cacheControl;
+  }
+
+  if (opts.withHeaders === false) extras.withoutHeaders = true;
+  const reply: FakeReply = jsonReply(opts.body, extras);
+  const { ky, calls } = createFakeKy(() => reply);
+
   return {
     ky,
     get getCalls() {
-      return getCalls;
+      return calls.filter((call) => call.method === "get").length;
     },
     get postCalls() {
-      return postCalls;
+      return calls.filter((call) => call.method === "post").length;
     },
   };
 }
@@ -70,9 +73,11 @@ describe("cachedJson: HTTP dispatch", () => {
 
   it("issues a POST and returns the parsed body", async () => {
     const f = fakeKy({ body: { results: [] } });
+
     const r = await cachedJson(f.ky, "post", "search", {
       json: { query: "x" },
     });
+
     expect(r).toEqual({ results: [] });
     expect(f.postCalls).toBe(1);
   });
@@ -84,6 +89,7 @@ describe("cachedJson: Cache-Control policy", () => {
       body: { v: 1 },
       cacheControl: "public, max-age=300",
     });
+
     await cachedJson(f.ky, "get", "conferences");
     // Second call must be served from cache: no second HTTP request.
     const second = await cachedJson(f.ky, "get", "conferences");
@@ -96,6 +102,7 @@ describe("cachedJson: Cache-Control policy", () => {
       body: { v: 1 },
       cacheControl: "private, max-age=300",
     });
+
     await cachedJson(f.ky, "get", "account/me");
     await cachedJson(f.ky, "get", "account/me");
     expect(f.getCalls).toBe(2);
@@ -125,9 +132,11 @@ describe("cachedJson: Cache-Control policy", () => {
   it("caches an unmarked ALLOWLISTED path under defaultTtlMs when there is no Cache-Control header", async () => {
     const f = fakeKy({ body: { v: 1 }, cacheControl: null });
     await cachedJson(f.ky, "get", "conferences", { defaultTtlMs: 60_000 });
+
     const second = await cachedJson(f.ky, "get", "conferences", {
       defaultTtlMs: 60_000,
     });
+
     expect(second).toEqual({ v: 1 });
     expect(f.getCalls).toBe(1);
   });
@@ -135,9 +144,11 @@ describe("cachedJson: Cache-Control policy", () => {
   it("caches an unmarked ALLOWLISTED path under defaultTtlMs when the response has no headers accessor", async () => {
     const f = fakeKy({ body: { v: 9 }, withHeaders: false });
     await cachedJson(f.ky, "get", "conferences", { defaultTtlMs: 60_000 });
+
     const second = await cachedJson(f.ky, "get", "conferences", {
       defaultTtlMs: 60_000,
     });
+
     expect(second).toEqual({ v: 9 });
     expect(f.getCalls).toBe(1);
   });
@@ -197,53 +208,41 @@ describe("cachedJson: cache-key stability across searchParam shapes", () => {
 
 describe("cachedJson: single-flight racy recheck", () => {
   it("serves a sibling-populated entry found only on the in-flight recheck", async () => {
-    // First `get` (the pre-single-flight probe) misses; the second `get`
-    // (the racy recheck inside the single-flight leader) hits, simulating
-    // a sibling MCP process having populated the shared cache in between.
-    // The upstream verbs must never be touched.
+    // First `get` (the pre-single-flight probe) misses; the second (the racy
+    // recheck inside the leader) hits, as if a sibling process had filled it.
     const getSpy = vi
       .spyOn(TOOL_RESPONSE_CACHE, "get")
       .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce({ fromSibling: true });
-    let calls = 0;
-    const ky = {
-      get: () => {
-        calls++;
-        throw new Error("network should not be hit");
-      },
-      post: () => {
-        throw new Error("unused");
-      },
-    } as unknown as KyInstance;
+
+    const { ky, calls } = createFakeKy(() => {
+      throw new Error("network should not be hit");
+    });
+
     const r = await cachedJson(ky, "get", "papers");
     expect(r).toEqual({ fromSibling: true });
-    expect(calls).toBe(0);
+    expect(calls).toHaveLength(0);
     expect(getSpy).toHaveBeenCalledTimes(2);
     getSpy.mockRestore();
   });
 
   it("collapses concurrent identical lookups onto a single upstream call", async () => {
     let calls = 0;
-    const ky = {
-      get: () => {
-        calls++;
-        return {
-          json: async () => {
-            await new Promise((r) => setTimeout(r, 10));
-            return { v: calls };
-          },
-          headers: { get: () => "public, max-age=300" },
-        } as unknown as Promise<unknown>;
-      },
-      post: () => {
-        throw new Error("unused");
-      },
-    } as unknown as KyInstance;
+
+    // Every call is issued before any reply is read (the verb records
+    // synchronously), so the three lookups genuinely overlap.
+    const { ky } = createFakeKy(() => {
+      calls++;
+
+      return jsonReply({ v: calls }, { cacheControl: "public, max-age=300" });
+    });
+
     const results = await Promise.all([
       cachedJson(ky, "get", "hot"),
       cachedJson(ky, "get", "hot"),
       cachedJson(ky, "get", "hot"),
     ]);
+
     expect(results).toEqual([{ v: 1 }, { v: 1 }, { v: 1 }]);
     expect(calls).toBe(1);
   });
@@ -257,6 +256,7 @@ describe("cachedJson: per-principal safety", () => {
       body: { results: [] },
       cacheControl: "public, max-age=300",
     });
+
     await cachedJson(f.ky, "post", "search", {
       json: { query: "q" },
       defaultTtlMs: 60_000,
@@ -269,10 +269,8 @@ describe("cachedJson: per-principal safety", () => {
   });
 
   it("never stores a per-principal POST /search/batch response, even if marked public", async () => {
-    // search/batch applies the same caller `excluded_conference_ids` as
-    // /search, so it is per-principal too: a (wrong) public header must never
-    // populate the tokenless shared key. Two identical calls => two upstream
-    // POSTs (no cross-principal serve from cache).
+    // search/batch applies the caller's `excluded_conference_ids` like /search,
+    // so a (wrong) public header must never populate the tokenless shared key.
     const f = fakeKy({
       body: {
         results: [],
@@ -282,6 +280,7 @@ describe("cachedJson: per-principal safety", () => {
       },
       cacheControl: "public, max-age=300",
     });
+
     await cachedJson(f.ky, "post", "search/batch", {
       json: { queries: ["q"] },
       defaultTtlMs: 60_000,
@@ -294,14 +293,13 @@ describe("cachedJson: per-principal safety", () => {
   });
 
   it("never stores a per-principal POST /claims/verify response, even if marked public", async () => {
-    // claims/verify applies the same caller `excluded_conference_ids` to its
-    // per-claim evidence search, so it is per-principal too: a (wrong) public
-    // header must never populate the tokenless shared key. Two identical calls
-    // => two upstream POSTs (no cross-principal serve from cache).
+    // claims/verify applies the caller's `excluded_conference_ids` to its
+    // per-claim evidence search, so it is per-principal: two calls, two POSTs.
     const f = fakeKy({
       body: { verdicts: [], claims_processed: 1 },
       cacheControl: "public, max-age=300",
     });
+
     await cachedJson(f.ky, "post", "claims/verify", {
       json: { claims: ["q"] },
       defaultTtlMs: 60_000,
@@ -314,10 +312,8 @@ describe("cachedJson: per-principal safety", () => {
   });
 
   it("never stores a per-principal POST /evidence/gather response, even if marked public", async () => {
-    // evidence/gather applies the same caller `excluded_conference_ids` to its
-    // per-query retrieval, so it is per-principal: a (wrong) public header must
-    // never populate the tokenless shared key. Two identical calls => two upstream
-    // POSTs (no cross-principal serve from cache).
+    // evidence/gather applies the caller's `excluded_conference_ids` to its
+    // per-query retrieval, so it is per-principal: two calls, two POSTs.
     const f = fakeKy({
       body: {
         requirements: [],
@@ -332,6 +328,7 @@ describe("cachedJson: per-principal safety", () => {
       },
       cacheControl: "public, max-age=300",
     });
+
     await cachedJson(f.ky, "post", "evidence/gather", {
       json: { task: "t", queries: ["q"] },
       defaultTtlMs: 60_000,
@@ -345,12 +342,12 @@ describe("cachedJson: per-principal safety", () => {
 
   it("never stores a per-principal POST /papers/extract response, even if marked public", async () => {
     // extract_from_papers with source="workspace" resolves the caller's active
-    // workspace, so it is per-active-workspace: a (wrong) public header must
-    // never populate the tokenless shared key. Two identical calls => two POSTs.
+    // workspace, so it is per-active-workspace: two calls, two POSTs.
     const f = fakeKy({
       body: { rows: [], failures: [] },
       cacheControl: "public, max-age=300",
     });
+
     await cachedJson(f.ky, "post", "papers/extract", {
       json: {
         paper_ids: ["x"],
@@ -373,27 +370,19 @@ describe("cachedJson: per-principal safety", () => {
   });
 
   it("does NOT single-flight-collapse concurrent /papers/extract calls", async () => {
-    // The real cross-tenant leak: two principals issuing an identical workspace
-    // extract body concurrently must each hit upstream with their own bearer,
-    // not collapse onto one leader's private-workspace extraction (and meter
-    // only the leader). Regression for the missing PER_PRINCIPAL_PATHS entry.
+    // The real cross-tenant leak: two principals sending an identical workspace
+    // extract body must each hit upstream, not share one leader's extraction.
     let calls = 0;
-    const ky = {
-      get: () => {
-        throw new Error("unused");
-      },
-      post: () => {
-        calls++;
-        const n = calls;
-        return {
-          json: async () => {
-            await new Promise((r) => setTimeout(r, 10));
-            return { rows: [{ caller: n }] };
-          },
-          headers: { get: () => "public, max-age=300" },
-        } as unknown as Promise<unknown>;
-      },
-    } as unknown as KyInstance;
+
+    const { ky } = createFakeKy(() => {
+      calls++;
+
+      return jsonReply(
+        { rows: [{ caller: calls }] },
+        { cacheControl: "public, max-age=300" },
+      );
+    });
+
     const results = await Promise.all([
       cachedJson(ky, "post", "papers/extract", {
         json: {
@@ -412,6 +401,7 @@ describe("cachedJson: per-principal safety", () => {
         },
       }),
     ]);
+
     expect(calls).toBe(2);
     expect(results).toEqual([
       { rows: [{ caller: 1 }] },
@@ -421,26 +411,18 @@ describe("cachedJson: per-principal safety", () => {
 
   it("does NOT single-flight-collapse concurrent /evidence/gather calls", async () => {
     // The per-principal bypass must skip the in-flight single-flight too: two
-    // principals issuing an identical body concurrently must each hit upstream,
-    // not share one leader's response (whose conference exclusions are the
-    // leader's). Contrast the GLOBAL-path collapse test above.
+    // principals would share one leader's exclusions. Contrast the GLOBAL test.
     let calls = 0;
-    const ky = {
-      get: () => {
-        throw new Error("unused");
-      },
-      post: () => {
-        calls++;
-        const n = calls;
-        return {
-          json: async () => {
-            await new Promise((r) => setTimeout(r, 10));
-            return { units_charged: n };
-          },
-          headers: { get: () => "public, max-age=300" },
-        } as unknown as Promise<unknown>;
-      },
-    } as unknown as KyInstance;
+
+    const { ky } = createFakeKy(() => {
+      calls++;
+
+      return jsonReply(
+        { units_charged: calls },
+        { cacheControl: "public, max-age=300" },
+      );
+    });
+
     const results = await Promise.all([
       cachedJson(ky, "post", "evidence/gather", {
         json: { task: "t", queries: ["q"] },
@@ -449,16 +431,14 @@ describe("cachedJson: per-principal safety", () => {
         json: { task: "t", queries: ["q"] },
       }),
     ]);
+
     expect(calls).toBe(2);
     expect(results).toEqual([{ units_charged: 1 }, { units_charged: 2 }]);
   });
 
   it("never stores a research-guidance/search response (scope-gated + billable)", async () => {
-    // research-guidance/search is principal-INVARIANT content, but the API route is
-    // scope-gated (guidance:read) + billable. If the shared tokenless cache stored
-    // it, a later caller LACKING guidance:read (or over quota) would be served from
-    // cache BEFORE the API runs - a scope + metering bypass. Two identical calls
-    // must each POST (no store).
+    // research-guidance/search is principal-INVARIANT content on a scope-gated
+    // (guidance:read) + billable route: storing it would bypass scope + meter.
     const f = fakeKy({ body: { results: [] }, cacheControl: null });
     await cachedJson(f.ky, "post", "research-guidance/search", {
       json: { query: "ablation design", limit: 5 },
@@ -475,22 +455,13 @@ describe("cachedJson: per-principal safety", () => {
     // Even concurrently, two callers issuing the same query must each reach the API
     // so each is scope-checked + metered (the leader-collapse would meter only one).
     let calls = 0;
-    const ky = {
-      get: () => {
-        throw new Error("unused");
-      },
-      post: () => {
-        calls++;
-        const n = calls;
-        return {
-          json: async () => {
-            await new Promise((r) => setTimeout(r, 10));
-            return { results: [{ caller: n }] };
-          },
-          headers: { get: () => null },
-        } as unknown as Promise<unknown>;
-      },
-    } as unknown as KyInstance;
+
+    const { ky } = createFakeKy(() => {
+      calls++;
+
+      return jsonReply({ results: [{ caller: calls }] });
+    });
+
     const results = await Promise.all([
       cachedJson(ky, "post", "research-guidance/search", {
         json: { query: "q", limit: 5 },
@@ -499,6 +470,7 @@ describe("cachedJson: per-principal safety", () => {
         json: { query: "q", limit: 5 },
       }),
     ]);
+
     expect(calls).toBe(2);
     expect(results).toEqual([
       { results: [{ caller: 1 }] },
@@ -513,31 +485,24 @@ describe("cachedJson: per-principal safety", () => {
   ])(
     "does NOT single-flight-collapse concurrent scope-gated GET %s",
     async (path) => {
-      // These GETs are stamped `private` (never STORED), but were still on the
-      // tokenless single-flight path. Two concurrent callers (one possibly lacking
-      // the scope / over quota) must each reach the API to be scope-checked +
-      // metered, NOT attach to one leader's in-flight response.
+      // Stamped `private` (never STORED) but still single-flighted, so two
+      // callers must each reach the API to be scope-checked and metered.
       let calls = 0;
-      const ky = {
-        post: () => {
-          throw new Error("unused");
-        },
-        get: () => {
-          calls++;
-          const n = calls;
-          return {
-            json: async () => {
-              await new Promise((r) => setTimeout(r, 10));
-              return { caller: n };
-            },
-            headers: { get: () => "private, max-age=600" },
-          } as unknown as Promise<unknown>;
-        },
-      } as unknown as KyInstance;
+
+      const { ky } = createFakeKy(() => {
+        calls++;
+
+        return jsonReply(
+          { caller: calls },
+          { cacheControl: "private, max-age=600" },
+        );
+      });
+
       const results = await Promise.all([
         cachedJson(ky, "get", path, { defaultTtlMs: 60_000 }),
         cachedJson(ky, "get", path, { defaultTtlMs: 60_000 }),
       ]);
+
       expect(calls).toBe(2);
       expect(results).toEqual([{ caller: 1 }, { caller: 2 }]);
     },
@@ -548,6 +513,7 @@ describe("cachedJson: per-principal safety", () => {
       body: { papers: [] },
       cacheControl: "private, max-age=120",
     });
+
     await cachedJson(cit.ky, "get", "papers/abc/citations", {
       defaultTtlMs: 60_000,
     });
@@ -567,18 +533,20 @@ describe("cachedJson: per-principal safety", () => {
   });
 
   it("never SERVES a pre-existing (poisoned) entry for a per-principal path", async () => {
-    // Seed the cache for the exact key cachedJson would compute, then confirm
-    // the per-principal bypass skips the read and hits upstream instead.
-    // Key format: `${METHOD} ${path} ${bodyHash} ${spHash}`.
+    // Seed the exact key cachedJson would compute, then confirm the
+    // per-principal bypass skips it. Key: `METHOD path bodyHash spHash`.
     const cacheKey = `POST search ${JSON.stringify({ query: "q" })} `;
     await TOOL_RESPONSE_CACHE.set(cacheKey, { results: ["POISON"] }, 60_000);
+
     const f = fakeKy({
       body: { results: ["FRESH"] },
       cacheControl: "public, max-age=300",
     });
-    const out = (await cachedJson(f.ky, "post", "search", {
+
+    const out = await cachedJson<SearchBody>(f.ky, "post", "search", {
       json: { query: "q" },
-    })) as { results: string[] };
+    });
+
     expect(out.results).toEqual(["FRESH"]);
     expect(f.postCalls).toBe(1);
   });

@@ -14,6 +14,7 @@
  */
 
 const PUNCT = /[^a-z0-9 ]/g;
+
 const WS = /\s+/g;
 
 export function normalize(s: string): string {
@@ -22,13 +23,17 @@ export function normalize(s: string): string {
 
 export function tokens(s: string): string[] {
   const n = normalize(s);
+
   return n ? n.split(" ") : [];
 }
 
-export interface ConferenceCandidate {
+/** A conference row as the catalog returns it. Declared as a type alias rather
+ *  than an interface so it carries the implicit index signature that makes it a
+ *  valid JSON body contract. */
+export type ConferenceCandidate = {
   short_name: string;
   full_name?: string | null;
-}
+};
 
 export type FuzzyMatchResult =
   | { kind: "match"; short_name: string }
@@ -46,25 +51,32 @@ function tryStage(
   selector: (c: ConferenceCandidate) => string,
 ): FuzzyMatchResult {
   const matches: Match[] = [];
+
   for (const c of candidates) {
     const targetTokens = tokens(selector(c));
+
     if (targetTokens.length === 0) continue;
+
     const allMatch = inputTokens.every((it) =>
       targetTokens.some((tt) => tt.startsWith(it)),
     );
+
     if (!allMatch) continue;
     matches.push({ short_name: c.short_name, targetSize: targetTokens.length });
   }
+
   if (matches.length === 0) return { kind: "none" };
 
-  // Smallest target tokens = most specific candidate. Ties at the minimum
-  // size mean genuine ambiguity (e.g. "usenix" → USENIX Security + USENIX
-  // Privacy both at size 2).
+  // Smallest target = most specific candidate; a tie at the minimum size is
+  // genuine ambiguity ("usenix" -> USENIX Security and USENIX Privacy).
   let minSize = matches[0]!.targetSize;
+
   for (const m of matches) if (m.targetSize < minSize) minSize = m.targetSize;
   const tied = matches.filter((m) => m.targetSize === minSize);
+
   if (tied.length === 1)
     return { kind: "match", short_name: tied[0]!.short_name };
+
   return {
     kind: "ambiguous",
     candidates: tied.map((m) => m.short_name),
@@ -83,6 +95,7 @@ export function resolveConferenceShortName(
   candidates: readonly ConferenceCandidate[],
 ): FuzzyMatchResult {
   const inputN = normalize(input);
+
   if (!inputN) return { kind: "none" };
 
   // 1. Exact case-insensitive on short_name. Short_names are unique by
@@ -92,14 +105,17 @@ export function resolveConferenceShortName(
       return { kind: "match", short_name: c.short_name };
     }
   }
+
   // 2. Exact case-insensitive on full_name. Full_names should also be
   //    unique; defensively only return on a single hit.
   const fullExact = candidates.filter(
     (c) => c.full_name && normalize(c.full_name) === inputN,
   );
+
   if (fullExact.length === 1) {
     return { kind: "match", short_name: fullExact[0]!.short_name };
   }
+
   if (fullExact.length > 1) {
     return {
       kind: "ambiguous",
@@ -110,6 +126,7 @@ export function resolveConferenceShortName(
   // 3a. Token-prefix match against short_name only.
   const inputTokens = tokens(input);
   const shortStage = tryStage(inputTokens, candidates, (c) => c.short_name);
+
   if (shortStage.kind !== "none") return shortStage;
 
   // 3b. Widen to short_name ∪ full_name only when stage 3a found nothing.

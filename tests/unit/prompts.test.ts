@@ -5,6 +5,11 @@
  * (a non-vacuous guard so a prompt can't silently drift into empty guidance).
  */
 import { describe, expect, it } from "vitest";
+import { messageOf } from "../../src/cause.js";
+import {
+  createRecordingServer,
+  createServerContext,
+} from "../support/mcp-server.js";
 import {
   PROMPTS,
   getPromptResult,
@@ -19,6 +24,7 @@ describe("listPrompts", () => {
   it("projects every prompt with name, title, description, and arguments", () => {
     const { prompts } = listPrompts();
     expect(prompts).toHaveLength(PROMPTS.length);
+
     for (const p of prompts) {
       expect(p.name).toMatch(/^[a-z_]+$/);
       expect(p.title.length).toBeGreaterThan(0);
@@ -27,7 +33,7 @@ describe("listPrompts", () => {
     }
   });
 
-  it("exposes exactly the six research workflows", () => {
+  it("exposes exactly the seven research workflows", () => {
     expect(
       listPrompts()
         .prompts.map((p) => p.name)
@@ -35,6 +41,7 @@ describe("listPrompts", () => {
     ).toEqual(
       [
         "compare_papers",
+        "design_figure",
         "find_related_work",
         "literature_review",
         "research_methodology",
@@ -50,6 +57,7 @@ describe("getPromptResult rendering", () => {
     const res = getPromptResult("verify_draft", {
       draft: "Transformers were introduced in 2017.",
     });
+
     expect(res.messages).toHaveLength(1);
     expect(res.messages[0]!.role).toBe("user");
     expect(res.messages[0]!.content.type).toBe("text");
@@ -61,6 +69,7 @@ describe("getPromptResult rendering", () => {
       venues: "NeurIPS, ICLR",
       since_year: "2022",
     });
+
     expect(t).toContain("mixture-of-experts routing");
     expect(t).toContain("NeurIPS, ICLR");
     expect(t).toContain("2022");
@@ -70,6 +79,7 @@ describe("getPromptResult rendering", () => {
     const t = text("literature_review", {
       topic: "graph neural networks for molecules",
     });
+
     expect(t).toContain("graph neural networks for molecules");
     expect(t).not.toMatch(/\bundefined\b/);
     expect(t).not.toMatch(/\[(venues|scope|since)/i);
@@ -83,6 +93,7 @@ describe("getPromptResult rendering", () => {
       topic: "x",
       columns: "dataset, accuracy",
     });
+
     const without = text("compare_papers", { topic: "x" });
     expect(withCols).toContain("dataset, accuracy");
     expect(without).toContain("most informative columns");
@@ -96,7 +107,7 @@ describe("getPromptResult validation", () => {
       throw new Error("expected getPromptResult to throw");
     } catch (error) {
       expect(error).toMatchObject({ code: -32602 });
-      expect((error as Error).message).toMatch(/unknown prompt/i);
+      expect(messageOf(error)).toMatch(/unknown prompt/i);
     }
   });
 
@@ -113,7 +124,7 @@ describe("getPromptResult validation", () => {
 describe("each workflow orchestrates the tools it needs", () => {
   // The whole value of a prompt is steering the agent to the right multi-tool
   // workflow; assert the load-bearing tool names are present in each.
-  const EXPECT: Record<string, string[]> = {
+  const EXPECT = {
     literature_review: ["search_papers_many", "get_paper_fulltext"],
     find_related_work: [
       "search_papers",
@@ -124,15 +135,18 @@ describe("each workflow orchestrates the tools it needs", () => {
     verify_draft: ["verify_claims"],
     trace_citations: ["get_paper_citations", "search_related_papers"],
     research_methodology: ["search_research_guidance"],
-  };
+  } satisfies Record<string, string[]>;
+
   for (const [name, tools] of Object.entries(EXPECT)) {
     it(`${name} references ${tools.join(", ")}`, () => {
       // Fill every required arg with a placeholder so rendering succeeds.
       const def = PROMPTS.find((p) => p.name === name)!;
       const args: Record<string, string> = {};
+
       for (const a of def.arguments)
         if (a.required) args[a.name] = "placeholder";
       const t = text(name, args);
+
       for (const tool of tools) expect(t).toContain(tool);
     });
   }
@@ -140,26 +154,21 @@ describe("each workflow orchestrates the tools it needs", () => {
 
 describe("registerPrompts", () => {
   it("wires the prompts/list and prompts/get handlers", () => {
-    const handlers: unknown[] = [];
-    const server = {
-      setRequestHandler: (_schema: unknown, handler: unknown) =>
-        handlers.push(handler),
-    };
-    registerPrompts(server as unknown as Parameters<typeof registerPrompts>[0]);
-    expect(handlers).toHaveLength(2);
+    const server = createRecordingServer();
+    registerPrompts(server);
+    expect(() => server.handler("prompts/list")).not.toThrow();
+    expect(() => server.handler("prompts/get")).not.toThrow();
   });
 
   it("the registered prompts/get handler defaults missing arguments to {}", async () => {
-    const captured: ((req: unknown) => Promise<unknown>)[] = [];
-    const server = {
-      setRequestHandler: (_s: unknown, h: unknown) =>
-        captured.push(h as (req: unknown) => Promise<unknown>),
-    };
-    registerPrompts(server as unknown as Parameters<typeof registerPrompts>[0]);
-    const getHandler = captured[1]!;
+    const server = createRecordingServer();
+    registerPrompts(server);
     // research_methodology's only arg is required, so omitting arguments must throw.
     await expect(
-      getHandler({ params: { name: "research_methodology" } }),
+      server.handler("prompts/get")(
+        { method: "prompts/get", params: { name: "research_methodology" } },
+        createServerContext({ method: "prompts/get" }),
+      ),
     ).rejects.toMatchObject({
       code: -32602,
       message: "Missing required argument: question",

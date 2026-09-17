@@ -28,7 +28,6 @@ import {
 } from "vitest";
 import { createMcpHandler } from "@modelcontextprotocol/server";
 import http from "node:http";
-import type { AddressInfo } from "node:net";
 import type { Server as HttpServer } from "node:http";
 import { makeServer } from "../../src/server.js";
 import { makeClient } from "../../src/api/client.js";
@@ -38,6 +37,17 @@ import {
   initAnalytics,
   resetAnalyticsForTests,
 } from "../../src/analytics.js";
+import { isJsonString, type JsonObject } from "../../src/json.js";
+import { jsonRpcObject } from "../support/http.js";
+import {
+  jsonNumber,
+  jsonObject,
+  jsonObjects,
+  jsonString,
+  jsonStrings,
+  parseJsonObject,
+} from "../support/json.js";
+import { portOf } from "../support/net.js";
 
 const MODERN_ENVELOPE = {
   "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -55,7 +65,7 @@ function handler() {
 }
 
 async function post(
-  body: Record<string, unknown>,
+  body: JsonObject,
   extraHeaders: Record<string, string> = {},
 ) {
   const res = await handler().fetch(
@@ -70,6 +80,7 @@ async function post(
       body: JSON.stringify(body),
     }),
   );
+
   return { status: res.status, text: await res.text() };
 }
 
@@ -80,11 +91,28 @@ async function post(
  * conforming header-less shape.
  */
 function modernHeaders(method: string, name?: string, versionHeader = true) {
-  return {
-    ...(versionHeader ? { "MCP-Protocol-Version": "2026-07-28" } : {}),
-    "Mcp-Method": method,
-    ...(name ? { "Mcp-Name": name } : {}),
-  };
+  if (versionHeader && name !== undefined) {
+    return {
+      "Mcp-Method": method,
+      "MCP-Protocol-Version": "2026-07-28",
+      "Mcp-Name": name,
+    };
+  }
+
+  if (versionHeader) {
+    return {
+      "Mcp-Method": method,
+      "MCP-Protocol-Version": "2026-07-28",
+    };
+  }
+
+  if (name !== undefined) return { "Mcp-Method": method, "Mcp-Name": name };
+
+  return { "Mcp-Method": method };
+}
+
+function resultOf(raw: string) {
+  return jsonObject(jsonRpcObject(raw).result, "JSON-RPC result");
 }
 
 describe("protocol era serving", () => {
@@ -98,9 +126,12 @@ describe("protocol era serving", () => {
       },
       modernHeaders("server/discover"),
     );
+
     expect(r.status).toBe(200);
-    const body = JSON.parse(r.text);
-    expect(body.result.supportedVersions).toContain("2026-07-28");
+    const result = resultOf(r.text);
+    expect(
+      jsonStrings(result.supportedVersions, "supportedVersions"),
+    ).toContain("2026-07-28");
   });
 
   it("serves a modern tools/list with resultType complete", async () => {
@@ -113,10 +144,11 @@ describe("protocol era serving", () => {
       },
       modernHeaders("tools/list"),
     );
+
     expect(r.status).toBe(200);
-    const body = JSON.parse(r.text);
-    expect(body.result.resultType).toBe("complete");
-    expect(body.result.tools.length).toBeGreaterThan(10);
+    const result = resultOf(r.text);
+    expect(result.resultType).toBe("complete");
+    expect(jsonObjects(result.tools, "tools").length).toBeGreaterThan(10);
   });
 
   it("rejects a modern request that omits the Mcp-Method header", async () => {
@@ -129,6 +161,7 @@ describe("protocol era serving", () => {
       },
       { "MCP-Protocol-Version": "2026-07-28" },
     );
+
     expect(r.status).toBe(400);
     expect(r.text).toContain("-32020");
   });
@@ -144,6 +177,7 @@ describe("protocol era serving", () => {
         clientInfo: { name: "old", version: "1" },
       },
     });
+
     expect(r.status).toBe(200);
     expect(r.text).toContain("2025-06-18");
   });
@@ -158,16 +192,15 @@ describe("protocol era serving", () => {
       },
       modernHeaders("tools/list"),
     );
-    const tools = JSON.parse(r.text).result.tools as Array<{
-      name: string;
-      _meta?: Record<string, unknown>;
-    }>;
+
+    const tools = jsonObjects(resultOf(r.text).tools, "tools");
+
     for (const name of [
       "search_papers",
       "search_papers_many",
       "search_research_guidance",
     ]) {
-      expect(tools.find((t) => t.name === name)?._meta).toMatchObject({
+      expect(tools.find((tool) => tool.name === name)?._meta).toMatchObject({
         "anthropic/alwaysLoad": true,
       });
     }
@@ -186,27 +219,25 @@ describe("2026-07-28 cache hints", () => {
       { jsonrpc: "2.0", id, method, params: { _meta: MODERN_ENVELOPE } },
       modernHeaders(method),
     );
-    // Assert the status first, like every other test here: an error response has
-    // no `result`, and destructuring one throws a TypeError out of the helper
-    // instead of showing which method answered what.
+
+    // Assert the status first: an error response has no `result`, and
+    // destructuring one throws a TypeError out of the helper instead.
     expect(r.status, r.text).toBe(200);
-    const { ttlMs, cacheScope } = JSON.parse(r.text).result as {
-      ttlMs: number;
-      cacheScope: string;
+    const result = resultOf(r.text);
+
+    return {
+      ttlMs: jsonNumber(result.ttlMs, "ttlMs"),
+      cacheScope: jsonString(result.cacheScope, "cacheScope"),
     };
-    return { ttlMs, cacheScope };
   }
 
   it("marks tools/list private, because it varies by credential", async () => {
     const { ttlMs, cacheScope } = await cacheHintOf("tools/list", 20);
     // tools/list branches on isWorkspaceCredential, so no MCP-aware cache may
-    // hold it across principals. The hint rides the JSON-RPC body rather than
-    // a `Cache-Control` header, so nothing generic acts on it today; this
-    // pins the forward-compatible answer, not a live CDN boundary.
+    // hold it across principals. Nothing generic acts on the hint today.
     expect(cacheScope).toBe("private");
-    // A non-zero TTL is the other half: it is what lets a client stop
-    // re-listing, and re-paying the workspace probe, on every session start.
-    // Bounded, because both axes can flip for the same principal mid-session.
+    // The non-zero TTL is the other half: it stops a client re-paying the
+    // workspace probe every session, and is bounded because both axes can flip.
     expect(ttlMs).toBeGreaterThan(0);
     expect(ttlMs).toBeLessThanOrEqual(60_000);
   });
@@ -225,12 +256,8 @@ describe("2026-07-28 cache hints", () => {
   );
 
   it("advertises no resource for as long as resources/list is cached public", async () => {
-    // `public` on this method is sound ONLY because the handler is the empty
-    // `{resources: []}` stub, and the obvious first real resource (a workspace
-    // document) is per-principal. resources.ts warns a future editor; this is
-    // the guard, because a comment cannot fail a build. Scope and list are read
-    // off the SAME response, so the assertion cannot drift from the
-    // configuration: flipping the hint to `private` retires it on its own.
+    // `public` is sound ONLY while the handler is the empty `{resources: []}`
+    // stub; scope and list are read off ONE response, so this cannot drift.
     const r = await post(
       {
         jsonrpc: "2.0",
@@ -240,14 +267,14 @@ describe("2026-07-28 cache hints", () => {
       },
       modernHeaders("resources/list"),
     );
-    const result = JSON.parse(r.text).result as {
-      cacheScope: string;
-      resources: unknown[];
-    };
+
+    const result = resultOf(r.text);
+    const cacheScope = jsonString(result.cacheScope, "cacheScope");
+    const resources = jsonObjects(result.resources, "resources");
     expect(
-      result.cacheScope !== "public" || result.resources.length === 0,
-      `resources/list advertises ${result.resources.length} resource(s) while ` +
-        `cached "${result.cacheScope}": a caller-varying list needs ` +
+      cacheScope !== "public" || resources.length === 0,
+      `resources/list advertises ${resources.length} resource(s) while ` +
+        `cached "${cacheScope}": a caller-varying list needs ` +
         `cacheScope "private" in server.ts, set in the same diff as the handler`,
     ).toBe(true);
   });
@@ -260,22 +287,25 @@ describe("2026-07-28 cache hints", () => {
  */
 async function startEventRecorder(): Promise<{
   url: string;
-  events: Record<string, unknown>[];
+  events: JsonObject[];
   close: () => Promise<void>;
 }> {
-  const events: Record<string, unknown>[] = [];
+  const events: JsonObject[] = [];
+
   const server = http.createServer((req, res) => {
     let raw = "";
     req.on("data", (c) => (raw += c));
     req.on("end", () => {
-      events.push(JSON.parse(raw) as Record<string, unknown>);
+      events.push(parseJsonObject(raw, "analytics event"));
       res.writeHead(200, { "content-type": "application/json" }).end("{}");
     });
   });
+
   server.listen(0);
   await new Promise<void>((resolve) => server.once("listening", resolve));
+
   return {
-    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    url: `http://127.0.0.1:${portOf(server)}`,
     events,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
@@ -288,9 +318,12 @@ describe("per-request attribution and the analytics context", () => {
 
   const IDENTITY = { distinctId: "user-analytics-probe", personless: false };
 
-  function properties(event: string): Record<string, unknown> | undefined {
+  function properties(event: string): JsonObject | undefined {
     const match = recorder.events.filter((e) => e.event === event).at(-1);
-    return match?.properties as Record<string, unknown> | undefined;
+
+    if (!match) return undefined;
+
+    return jsonObject(match.properties, `${event}.properties`);
   }
 
   const CLAUDE_CODE = { name: "claude-code", version: "2.1.121" };
@@ -304,7 +337,7 @@ describe("per-request attribution and the analytics context", () => {
     id: number,
     method: string,
     opts: {
-      params?: Record<string, unknown>;
+      params?: JsonObject;
       clientInfo?: { name: string; version: string } | null;
       era?: "modern" | "legacy";
       versionHeader?: boolean;
@@ -316,28 +349,39 @@ describe("per-request attribution and the analytics context", () => {
       era = "modern",
       versionHeader = true,
     } = opts;
-    const envelope = {
-      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-      "io.modelcontextprotocol/clientCapabilities": {},
-      ...(clientInfo
-        ? { "io.modelcontextprotocol/clientInfo": clientInfo }
-        : {}),
-    };
+
+    const envelope =
+      clientInfo === null
+        ? {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+          }
+        : {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": clientInfo,
+          };
+
+    const headers = new Headers({
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      authorization: "Bearer lune_analytics_probe_token",
+      "mcp-session-id": "client-supplied-session",
+    });
+
+    if (era === "modern") {
+      const name = isJsonString(params.name) ? params.name : undefined;
+
+      for (const [header, value] of Object.entries(
+        modernHeaders(method, name, versionHeader),
+      )) {
+        headers.set(header, value);
+      }
+    }
+
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-        authorization: "Bearer lune_analytics_probe_token",
-        "mcp-session-id": "client-supplied-session",
-        ...(era === "modern"
-          ? modernHeaders(
-              method,
-              params.name as string | undefined,
-              versionHeader,
-            )
-          : {}),
-      },
+      headers,
       body: JSON.stringify({
         jsonrpc: "2.0",
         id,
@@ -345,8 +389,10 @@ describe("per-request attribution and the analytics context", () => {
         params: era === "modern" ? { ...params, _meta: envelope } : params,
       }),
     });
+
     await res.text();
     await flushAnalytics(2000);
+
     return res.status;
   }
 
@@ -362,6 +408,7 @@ describe("per-request attribution and the analytics context", () => {
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_protocol_era_test");
     vi.stubEnv("LUNE_POSTHOG_HOST", recorder.url);
     initAnalytics();
+
     const app = buildHttpApp({
       credentialProbe: async () => ({
         status: "valid",
@@ -370,9 +417,10 @@ describe("per-request attribution and the analytics context", () => {
         workspaceCredential: false,
       }),
     });
+
     appServer = app.listen(0);
     await new Promise<void>((resolve) => appServer.once("listening", resolve));
-    port = (appServer.address() as AddressInfo).port;
+    port = portOf(appServer);
   });
 
   afterEach(() => {
@@ -387,10 +435,8 @@ describe("per-request attribution and the analytics context", () => {
   });
 
   it("carries the request's analytics context all the way to a tool call event", async () => {
-    // The context is entered at the Express layer and must survive the node
-    // adapter, the handler's per-request instance, and the tool's await chain.
-    // Dropping it is silent: the tool still answers, the event still fires, and
-    // only the identity, session and client fields go blank.
+    // The context is entered at the Express layer and must survive the adapter,
+    // the per-request instance and the await chain. Dropping it is silent.
     const status = await call(1, "tools/call", searchCall("analytics context"));
     expect(status).toBe(200);
 
@@ -402,23 +448,23 @@ describe("per-request attribution and the analytics context", () => {
       $mcp_client_version: "2.1.121",
       $mcp_protocol_version: "2026-07-28",
     });
-    // The session header reaches PostHog only through the per-principal digest
-    // (see the "$session_id is bound to the principal" group below), so what
-    // this one owns is that the property survives the whole adapter chain.
-    const props = event?.properties as Record<string, unknown>;
+    // The session header reaches PostHog only through the per-principal digest,
+    // so what this one owns is that the property survives the adapter chain.
+    const props = properties("$mcp_tool_call");
+
+    if (!props) throw new Error("analytics recorder saw no tool call event");
     expect(props.$session_id).toEqual(expect.any(String));
     expect(props.$session_id).not.toBe("client-supplied-session");
   });
 
   it("reads the protocol revision off a header-less modern request", async () => {
-    // `MCP-Protocol-Version` is optional once the `_meta` envelope carries the
-    // claim, and the claim is what the SDK classifies on. Reading the header
-    // first reports no revision at all for a conforming client that sends only
-    // the envelope, and it is silent: the call still answers 200.
+    // `MCP-Protocol-Version` is optional once `_meta` carries the claim, and
+    // that claim is what the SDK classifies on. Header-first reports nothing.
     const status = await call(6, "tools/call", {
       ...searchCall("header-less modern"),
       versionHeader: false,
     });
+
     expect(status).toBe(200);
     expect(properties("$mcp_tool_call")).toMatchObject({
       $mcp_protocol_version: "2026-07-28",
@@ -428,9 +474,7 @@ describe("per-request attribution and the analytics context", () => {
 
   it("does not leak one client's identity into the next request", async () => {
     // `setServerClientInfo` keys off the server object, so "one stamp per
-    // request" only holds because every request builds its own instance. A
-    // hoisted factory would attribute each of the three follow-ups below to the
-    // `cursor` call that preceded them.
+    // request" holds only because every request builds its own instance.
     await call(2, "tools/call", {
       ...searchCall("first client"),
       clientInfo: { name: "cursor", version: "3" },
@@ -450,10 +494,8 @@ describe("per-request attribution and the analytics context", () => {
       $mcp_client_version: "9",
     });
 
-    // And a request that names NO client must report none rather than inherit
-    // the last one: a modern envelope may omit `clientInfo`, and a 2025-era
-    // request carries no envelope at all. Inheriting here is cross-principal
-    // attribution leakage, and it is the case a shared instance actually hits.
+    // A request naming NO client must report none, not inherit the last one:
+    // inheriting is cross-principal attribution leakage.
     for (const [id, era] of [
       [4, "modern"],
       [5, "legacy"],
@@ -478,9 +520,8 @@ describe("per-request attribution and the analytics context", () => {
   ])(
     "attributes %s from the request envelope",
     async (event, method, params) => {
-      // These four have no upstream API call, so they never carried
-      // `X-Lune-Client`: the envelope reader is their ONLY source of client
-      // identity now that the initialize handshake is gone.
+      // These four make no upstream API call, so they never carried
+      // `X-Lune-Client`: the envelope is their only source of client identity.
       await call(6, method, { params });
       expect(properties(event)).toMatchObject({
         $mcp_client_name: "claude-code",
@@ -501,8 +542,7 @@ describe("per-request attribution and the analytics context", () => {
 describe("the analytics context handed to each per-request server", () => {
   beforeAll(() => {
     // Reached only if the getter is missing (`contextWorkspace` then falls back
-    // to the upstream probe), so keep that fallback off the network. The
-    // PostHog host is dead for the same reason on the opted-IN case.
+    // to the upstream probe), so keep that fallback off the network.
     vi.stubEnv("LUNE_API_BASE_URL", "http://127.0.0.1:1");
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_capture_gate_test");
     vi.stubEnv("LUNE_POSTHOG_HOST", "http://127.0.0.1:1");
@@ -526,9 +566,11 @@ describe("the analytics context handed to each per-request server", () => {
         ...analytics,
       }),
     });
+
     const server = app.listen(0);
     await new Promise<void>((resolve) => server.once("listening", resolve));
-    const listenPort = (server.address() as AddressInfo).port;
+    const listenPort = portOf(server);
+
     try {
       const res = await fetch(`http://127.0.0.1:${listenPort}/mcp`, {
         method: "POST",
@@ -545,10 +587,11 @@ describe("the analytics context handed to each per-request server", () => {
           params: { _meta: MODERN_ENVELOPE },
         }),
       });
-      const body = (await res.json()) as {
-        result: { tools: { name: string }[] };
-      };
-      return body.result.tools.map((tool) => tool.name);
+
+      const body = await res.text();
+      const tools = jsonObjects(resultOf(body).tools, "tools");
+
+      return tools.map((tool) => jsonString(tool.name, "tool.name"));
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -567,11 +610,8 @@ describe("the analytics context handed to each per-request server", () => {
   });
 
   it("keeps offering it once the shared daily analytics budget is spent", async () => {
-    // `analytics_capture_allowed` goes false for TWO reasons and the API reports
-    // them separately: the principal opting out (above) and the shared daily
-    // PostHog budget running out (here). Gating the tool on the second lets a
-    // telemetry quota decide what an agent may ask for, which is a product
-    // decision nobody made. Capture still stops; only the surface must not move.
+    // `analytics_capture_allowed` also goes false when the shared daily PostHog
+    // budget runs out, and a telemetry quota must not move the tool surface.
     expect(
       await listedTools({ suppressAnalytics: false, captureAllowed: false }),
     ).toContain("get_more_tools");
@@ -599,9 +639,9 @@ describe("$session_id is bound to the principal that asserted it", () => {
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_session_binding_test");
     vi.stubEnv("LUNE_POSTHOG_HOST", recorder.url);
     initAnalytics();
-    // One identity per bearer, which is what the API's `/account/mcp-context`
-    // does; `workspaceCredential` is answered here so `tools/list` needs no
-    // upstream call at all.
+
+    // One identity per bearer, like the API's `/account/mcp-context`;
+    // `workspaceCredential` is answered here so `tools/list` needs no upstream.
     const app = buildHttpApp({
       credentialProbe: async (token) => ({
         status: "valid",
@@ -610,9 +650,10 @@ describe("$session_id is bound to the principal that asserted it", () => {
         workspaceCredential: false,
       }),
     });
+
     appServer = app.listen(0);
     await new Promise<void>((resolve) => appServer.once("listening", resolve));
-    port = (appServer.address() as AddressInfo).port;
+    port = portOf(appServer);
   });
 
   afterAll(async () => {
@@ -623,7 +664,7 @@ describe("$session_id is bound to the principal that asserted it", () => {
   });
 
   /** One `tools/list` as `token`, asserting the same session header every time. */
-  async function sessionIdOf(token: string): Promise<unknown> {
+  async function sessionIdOf(token: string): Promise<string> {
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       headers: {
@@ -640,14 +681,19 @@ describe("$session_id is bound to the principal that asserted it", () => {
         params: { _meta: MODERN_ENVELOPE },
       }),
     });
+
     expect(res.status).toBe(200);
     await res.text();
     await flushAnalytics(2000);
+
     const event = recorder.events
-      .filter((e) => e.event === "$mcp_tools_list")
+      .filter((entry) => entry.event === "$mcp_tools_list")
       .at(-1);
-    return (event?.properties as Record<string, unknown> | undefined)
-      ?.$session_id;
+
+    if (!event) throw new Error("analytics recorder saw no tools/list event");
+    const props = jsonObject(event.properties, "$mcp_tools_list.properties");
+
+    return jsonString(props.$session_id, "$session_id");
   }
 
   afterEach(() => {

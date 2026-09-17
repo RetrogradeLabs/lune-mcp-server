@@ -4,10 +4,7 @@
  * duplicated `mcp-session-id` header branch.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { AddressInfo } from "node:net";
 import type { Server as HttpServer } from "node:http";
-import http from "node:http";
-import type { McpHttpHandler } from "@modelcontextprotocol/server";
 import { initAnalytics, resetAnalyticsForTests } from "../../src/analytics.js";
 import {
   buildHttpApp,
@@ -15,40 +12,9 @@ import {
   hostIsAllowed,
   originIsAllowed,
 } from "../../src/transport/streamableHttp.js";
-
-// Raw HTTP POST so the test can set Host/Origin, which the WHATWG `fetch`
-// implementation forbids as request headers.
-function rawPost(
-  port: number,
-  path: string,
-  headers: Record<string, string>,
-  body: unknown,
-): Promise<{ status: number | undefined; body: string }> {
-  return new Promise((resolve, reject) => {
-    const data = JSON.stringify(body);
-    const req = http.request(
-      {
-        host: "127.0.0.1",
-        port,
-        path,
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "content-length": Buffer.byteLength(data),
-          ...headers,
-        },
-      },
-      (res) => {
-        let chunks = "";
-        res.on("data", (c) => (chunks += c));
-        res.on("end", () => resolve({ status: res.statusCode, body: chunks }));
-      },
-    );
-    req.on("error", reject);
-    req.write(data);
-    req.end();
-  });
-}
+import { rawRequest } from "../support/http.js";
+import { fetchJsonObject, parseJsonObject } from "../support/json.js";
+import { portOf } from "../support/net.js";
 
 describe("buildHttpApp standalone", () => {
   let server: HttpServer;
@@ -59,7 +25,7 @@ describe("buildHttpApp standalone", () => {
     const app = buildHttpApp();
     server = app.listen(0);
     await new Promise<void>((resolve) => server.once("listening", resolve));
-    port = (server.address() as AddressInfo).port;
+    port = portOf(server);
   });
 
   afterAll(async () => {
@@ -68,13 +34,11 @@ describe("buildHttpApp standalone", () => {
 
   it("serves /health from an app built without a port binding", async () => {
     vi.stubEnv("LUNE_BUILD_ID", "");
+
     try {
       const r = await fetch(`http://localhost:${port}/health`);
       expect(r.status).toBe(200);
-      const body = (await r.json()) as {
-        status: string;
-        build_id?: string;
-      };
+      const body = await fetchJsonObject(r);
       expect(body.status).toBe("ok");
       expect(body.build_id).toBeUndefined();
     } finally {
@@ -84,9 +48,10 @@ describe("buildHttpApp standalone", () => {
 
   it("exposes the deployed build id when the task definition provides one", async () => {
     vi.stubEnv("LUNE_BUILD_ID", "abc123");
+
     try {
       const r = await fetch(`http://localhost:${port}/health`);
-      const body = (await r.json()) as { build_id?: string };
+      const body = await fetchJsonObject(r);
       expect(body.build_id).toBe("abc123");
     } finally {
       vi.unstubAllEnvs();
@@ -96,18 +61,21 @@ describe("buildHttpApp standalone", () => {
   it("keeps MCP available when the optional analytics probe is unavailable", async () => {
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
     initAnalytics();
+
     const isolatedApp = buildHttpApp({
       credentialProbe: async () => ({ status: "indeterminate" }),
     });
+
     const isolatedServer = isolatedApp.listen(0);
     await new Promise<void>((resolve) =>
       isolatedServer.once("listening", resolve),
     );
-    const isolatedPort = (isolatedServer.address() as AddressInfo).port;
+    const isolatedPort = portOf(isolatedServer);
 
     try {
-      const response = await rawPost(
+      const response = await rawRequest(
         isolatedPort,
+        "POST",
         "/mcp",
         {
           accept: "application/json, text/event-stream",
@@ -124,6 +92,7 @@ describe("buildHttpApp standalone", () => {
           },
         },
       );
+
       expect(response.status).toBe(200);
     } finally {
       await new Promise<void>((resolve) =>
@@ -135,21 +104,20 @@ describe("buildHttpApp standalone", () => {
   });
 
   it("rejects a credential the analytics probe reports invalid, with a refresh challenge", async () => {
-    // The probe is the identity authority, so an API 401 on
-    // `/account/mcp-context` means the bearer is dead. The client has to see
-    // `invalid_token` here to refresh-and-retry; letting the request through
-    // would surface the API's own 401 as a tool error the model reads as
-    // "please reconnect", which is the failure auto-reauth exists to prevent.
+    // The probe is the identity authority, so an API 401 there means the bearer
+    // is dead and the client must see `invalid_token` to refresh-and-retry.
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
     initAnalytics();
+
     const isolatedApp = buildHttpApp({
       credentialProbe: async () => ({ status: "invalid" }),
     });
+
     const isolatedServer = isolatedApp.listen(0);
     await new Promise<void>((resolve) =>
       isolatedServer.once("listening", resolve),
     );
-    const isolatedPort = (isolatedServer.address() as AddressInfo).port;
+    const isolatedPort = portOf(isolatedServer);
 
     try {
       const response = await fetch(`http://localhost:${isolatedPort}/mcp`, {
@@ -166,6 +134,7 @@ describe("buildHttpApp standalone", () => {
           params: {},
         }),
       });
+
       expect(response.status).toBe(401);
       expect(response.headers.get("www-authenticate")).toContain(
         'error="invalid_token"',
@@ -184,27 +153,30 @@ describe("buildHttpApp standalone", () => {
   });
 
   it("re-probes every request instead of caching a credential verdict", async () => {
-    // A revoked credential has to stop passing on its NEXT request, and a
-    // cache here would be exactly the cross-request state the stateless
-    // transport removed. Counted at the route because that is where the
-    // decision is now made.
+    // A revoked credential has to stop passing on its NEXT request, so no cache
+    // here; counted at the route because that is where the decision is made.
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
     initAnalytics();
     let probes = 0;
+
     const isolatedApp = buildHttpApp({
       credentialProbe: async (token) => {
         probes += 1;
+
         return { status: token === "live-token" ? "valid" : "invalid" };
       },
     });
+
     const isolatedServer = isolatedApp.listen(0);
     await new Promise<void>((resolve) =>
       isolatedServer.once("listening", resolve),
     );
-    const isolatedPort = (isolatedServer.address() as AddressInfo).port;
+    const isolatedPort = portOf(isolatedServer);
+
     const call = (token: string) =>
-      rawPost(
+      rawRequest(
         isolatedPort,
+        "POST",
         "/mcp",
         {
           accept: "application/json, text/event-stream",
@@ -228,27 +200,26 @@ describe("buildHttpApp standalone", () => {
   });
 
   it("refuses a JSON-RPC batch longer than the cap, before any upstream call", async () => {
-    // Batching left the spec at 2025-06-18 and is refused outright on the
-    // modern path, so an array can only come from a 2025-03-26-era client. One
-    // POST buys one credential probe and one API-side analytics claim while
-    // every element dispatches its own handler and emits its own event, which
-    // is what makes an uncapped array a 40x amplifier and the one path where
-    // per-request accounting under-counts. `prompts/list` needs no upstream
-    // call, so nothing else in the stack would see the flood.
+    // Arrays are 2025-era only, and one POST buys one probe plus one analytics
+    // claim while every element emits its own event: uncapped, a 40x amplifier.
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
     initAnalytics();
     let probes = 0;
+
     const isolatedApp = buildHttpApp({
       credentialProbe: async () => {
         probes += 1;
+
         return { status: "valid" };
       },
     });
+
     const isolatedServer = isolatedApp.listen(0);
     await new Promise<void>((resolve) =>
       isolatedServer.once("listening", resolve),
     );
-    const isolatedPort = (isolatedServer.address() as AddressInfo).port;
+    const isolatedPort = portOf(isolatedServer);
+
     const batch = (n: number) =>
       Array.from({ length: n }, (_, i) => ({
         jsonrpc: "2.0",
@@ -256,9 +227,11 @@ describe("buildHttpApp standalone", () => {
         method: "prompts/list",
         params: {},
       }));
+
     const call = (n: number) =>
-      rawPost(
+      rawRequest(
         isolatedPort,
+        "POST",
         "/mcp",
         {
           accept: "application/json, text/event-stream",
@@ -270,7 +243,7 @@ describe("buildHttpApp standalone", () => {
     try {
       const over = await call(51);
       expect(over.status).toBe(400);
-      expect(JSON.parse(over.body)).toMatchObject({
+      expect(parseJsonObject(over.body)).toMatchObject({
         jsonrpc: "2.0",
         id: null,
         error: { code: -32600 },
@@ -279,9 +252,8 @@ describe("buildHttpApp standalone", () => {
       // `account/mcp-context` call that every accepted POST pays for.
       expect(probes).toBe(0);
 
-      // The cap is a ceiling on abuse, not a ban: a batch at the limit is still
-      // served in full, which is also what proves the probe counter above is
-      // wired to a probe that really runs.
+      // The cap is a ceiling on abuse, not a ban: a batch AT the limit is still
+      // served in full, which also proves the probe counter counts real probes.
       const atCap = await call(50);
       expect(atCap.status).toBe(200);
       expect(probes).toBe(1);
@@ -299,7 +271,7 @@ describe("buildHttpApp standalone", () => {
     // The handler owns the modern leg's in-flight exchanges, so one that
     // outlives its server is a leak per app, and the suite builds one per file.
     const app = buildHttpApp();
-    const closeSpy = vi.spyOn(app.locals.mcpHandler as McpHttpHandler, "close");
+    const closeSpy = vi.spyOn(app.locals.mcpHandler, "close");
     const bound = app.listen(0);
     await new Promise<void>((resolve) => bound.once("listening", resolve));
     await new Promise<void>((resolve) => bound.close(() => resolve()));
@@ -310,8 +282,9 @@ describe("buildHttpApp standalone", () => {
     const r = await fetch(
       `http://localhost:${port}/.well-known/oauth-protected-resource/v1/mcp`,
     );
+
     expect(r.status).toBe(200);
-    const body = (await r.json()) as { resource: string };
+    const body = await fetchJsonObject(r);
     expect(body.resource).toBe("https://mcp.luneresearch.com/v1/mcp");
   });
 
@@ -329,6 +302,7 @@ describe("buildHttpApp standalone", () => {
         params: {},
       }),
     });
+
     expect(r.status).toBe(401);
     expect(r.headers.get("www-authenticate")).toMatch(/^Bearer\s/);
   });
@@ -347,6 +321,7 @@ describe("buildHttpApp standalone", () => {
         params: {},
       }),
     });
+
     expect(r.status).toBe(401);
     expect(r.headers.get("www-authenticate")).toMatch(/^Bearer\s/);
   });
@@ -356,14 +331,13 @@ describe("buildHttpApp standalone", () => {
       method: "GET",
       headers: { accept: "text/event-stream" },
     });
+
     expect(r.status).toBe(405);
   });
 
   it("tolerates a repeated mcp-session-id header", async () => {
-    // Node collapses duplicated inbound headers into a single comma-joined
-    // string (only `set-cookie` is ever arrayed), so the request carries
-    // "first-id, second-id" as one value. Nothing resolves it any more, so it
-    // is served like any other stale id (and reported as the `$session_id`).
+    // Node comma-joins duplicate inbound headers (only set-cookie is arrayed),
+    // so the pair arrives as one stale id and is served like any other.
     const r = await fetch(`http://localhost:${port}/mcp`, {
       method: "POST",
       headers: [
@@ -380,17 +354,16 @@ describe("buildHttpApp standalone", () => {
         params: {},
       }),
     });
+
     expect(r.status).toBe(200);
   });
 
   it("serves a stale session id on POST and declines its GET stream with 405", async () => {
-    // POSTs are served with the id ignored (a 404 would tell the Anthropic
-    // managed-agents client its session died, and it never re-initializes; see
-    // orphaned-session.test.ts); the optional standalone GET stream is declined
-    // with 405, which is spec-legal at any time and does NOT signal session
-    // termination.
-    const post = await rawPost(
+    // POSTs are served with the id ignored (a 404 tells the managed-agents
+    // client its session died); the optional GET stream is declined with 405.
+    const post = await rawRequest(
       port,
+      "POST",
       "/mcp",
       {
         accept: "application/json, text/event-stream",
@@ -399,43 +372,49 @@ describe("buildHttpApp standalone", () => {
       },
       { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
     );
+
     expect(post.status).toBe(200);
 
     const get = await fetch(`http://localhost:${port}/mcp`, {
       method: "GET",
       headers: { accept: "text/event-stream", "mcp-session-id": "gone-123" },
     });
+
     expect(get.status).toBe(405);
   });
 
   it("rejects POST /mcp from a disallowed Origin with 403 (before any tool runs)", async () => {
-    const r = await rawPost(
+    const r = await rawRequest(
       port,
+      "POST",
       "/mcp",
       { authorization: "Bearer fake", origin: "https://evil.example.com" },
       { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
     );
+
     expect(r.status).toBe(403);
     expect(r.body).toMatch(/origin not allowed/);
   });
 
   it("rejects POST /mcp with a spoofed/rebound Host with 403", async () => {
-    const r = await rawPost(
+    const r = await rawRequest(
       port,
+      "POST",
       "/mcp",
       { host: "attacker.example.com", authorization: "Bearer fake" },
       { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
     );
+
     expect(r.status).toBe(403);
     expect(r.body).toMatch(/host not allowed/);
   });
 
   it("admits an allowlisted Origin through the guard (then 401 on auth)", async () => {
-    // claude.ai is allowlisted, so the guard passes and the request reaches the
-    // handler, which rejects the fake token. Proves the guard does not block
-    // legitimate browser clients.
-    const r = await rawPost(
+    // claude.ai is allowlisted, so the request reaches the handler and dies on
+    // the fake token: the origin guard does not block legitimate browsers.
+    const r = await rawRequest(
       port,
+      "POST",
       "/mcp",
       {
         origin: "https://claude.ai",
@@ -443,6 +422,7 @@ describe("buildHttpApp standalone", () => {
       },
       { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
     );
+
     expect(r.status).toBe(401);
   });
 });

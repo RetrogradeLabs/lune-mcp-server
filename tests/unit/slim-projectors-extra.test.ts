@@ -24,6 +24,7 @@ describe("slimConference", () => {
       description: "ML venue",
       category: "ml",
     });
+
     expect(out).toEqual({
       id: "c1",
       short_name: "NeurIPS",
@@ -45,6 +46,7 @@ describe("slimConference", () => {
       paper_count: 12,
       years: [2024, 2025],
     });
+
     expect(out.description).toBeUndefined();
     expect(out.category).toBeUndefined();
     expect(out.paper_count).toBe(12);
@@ -60,6 +62,7 @@ describe("slimConferenceList", () => {
       undefined,
       { id: "b", short_name: "B", full_name: "Beta", paper_count: 3 },
     ]);
+
     expect(out.conferences).toHaveLength(2);
     expect(out.conferences.map((c) => c.id)).toEqual(["a", "b"]);
     expect(out.conferences[1]!.paper_count).toBe(3);
@@ -77,6 +80,7 @@ describe("slimRelated", () => {
       { id: "p1", title: "One" },
       { paper_id: "p2", title: "Two" },
     ]);
+
     expect(out.papers.map((p) => p.paper_id)).toEqual(["p1", "p2"]);
   });
 
@@ -92,6 +96,7 @@ describe("slimRelated", () => {
         ],
       },
     ]);
+
     expect(out.papers[0]!.abstract).toBe("The abstract");
     expect(out.papers[0]!.contexts).toEqual([
       {
@@ -120,6 +125,7 @@ describe("slimConferencePapers", () => {
       },
       0,
     );
+
     expect(out.papers).toHaveLength(1);
     expect(out.papers[0]!.paper_id).toBe("p1");
     // Browse pages stay light: the abstract is not surfaced.
@@ -134,13 +140,12 @@ describe("slimConferencePapers", () => {
       { papers: [{ id: "p1", title: "One" }], total: 40 },
       39,
     );
+
     expect(out.has_more).toBe(false);
   });
 
-  // Regression: a non-multiple-of-limit offset must not over-report has_more.
-  // The API floors offset into page (5 // 10 + 1 = 1), so the old page*limit
-  // predicate (1*10 < 12 => true) wrongly claimed more results when offset 5 +
-  // 7 returned already reaches total 12.
+  // Regression: the old page*limit predicate over-reported has_more on a
+  // non-multiple-of-limit offset (offset 5 + 7 returned already reaches 12).
   it("reports has_more=false for a non-multiple-of-limit offset on the last slice", () => {
     const out = slimConferencePapers(
       {
@@ -154,6 +159,7 @@ describe("slimConferencePapers", () => {
       },
       5,
     );
+
     expect(out.has_more).toBe(false);
   });
 
@@ -170,6 +176,7 @@ describe("slimConferencePapers", () => {
       },
       5,
     );
+
     // offset 5 + 10 returned = 15 < 30.
     expect(out.has_more).toBe(true);
   });

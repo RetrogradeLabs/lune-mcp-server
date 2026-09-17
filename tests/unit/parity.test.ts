@@ -47,6 +47,7 @@ describe("projector output matches the advertised outputSchema", () => {
         },
       ],
     };
+
     expect(() =>
       SearchPapersOutput.parse(slimSearchResponse(fixture)),
     ).not.toThrow();
@@ -63,6 +64,7 @@ describe("projector output matches the advertised outputSchema", () => {
         { id: null, title: "Ref only", authors: [], venue: "WS" },
       ],
     });
+
     expect(() => GetCitationsOutput.parse(out)).not.toThrow();
   });
 
@@ -76,6 +78,7 @@ describe("projector output matches the advertised outputSchema", () => {
         years: [2024],
       },
     ]);
+
     expect(() => ListConferencesOutput.parse(out)).not.toThrow();
   });
 
@@ -86,6 +89,7 @@ describe("projector output matches the advertised outputSchema", () => {
       page: 1,
       limit: 20,
     });
+
     expect(() => GetConferencePapersOutput.parse(out)).not.toThrow();
   });
 
@@ -99,6 +103,7 @@ describe("projector output matches the advertised outputSchema", () => {
         ],
       },
     ]);
+
     expect(() => SearchRelatedOutput.parse(out)).not.toThrow();
   });
 });
@@ -111,6 +116,7 @@ describe("tool descriptions do not promise dropped fields (guards H3)", () => {
       /\bmethodology\b/i,
       /citation count descending/i,
     ];
+
     for (const tool of PAPER_TOOLS) {
       for (const re of banned) {
         expect(

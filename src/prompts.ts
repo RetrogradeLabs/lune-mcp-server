@@ -1,7 +1,6 @@
 import {
   ProtocolError,
   ProtocolErrorCode,
-  type Server,
   type ServerContext,
 } from "@modelcontextprotocol/server";
 import {
@@ -9,6 +8,7 @@ import {
   attributeFromEnvelope,
   captureMcp,
   type McpAnalyticsContext,
+  type McpServerLike,
 } from "./analytics.js";
 
 /**
@@ -48,6 +48,75 @@ const CITE_RULE =
 
 export const PROMPTS: PromptDef[] = [
   {
+    name: "design_figure",
+    title: "Design a paper figure",
+    description:
+      "Design a figure for a paper (teaser, system overview, method pipeline, " +
+      "results grid) by studying how published papers at the target venue drew " +
+      "the same kind of figure, then produce a concrete plan and draft.",
+    arguments: [
+      {
+        name: "figure",
+        description:
+          'What the figure has to convey, e.g. "our three-stage pipeline, with ' +
+          'the only trained component highlighted".',
+        required: true,
+      },
+      {
+        name: "venue",
+        description:
+          'Optional target venue, so conventions match (e.g. "CVPR"). Figure ' +
+          "style is venue-specific.",
+      },
+      {
+        name: "role",
+        description:
+          "Optional kind of figure: teaser, architecture, pipeline, " +
+          "qualitative_grid, results_plot, data_schema, algorithm, concept.",
+      },
+    ],
+    build: (a) => {
+      const scope = [
+        present(a.venue) ? `Target venue: ${a.venue}.` : "",
+        present(a.role) ? `It is a ${a.role} figure.` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+
+      return [
+        `I need to draw a figure for a paper. It has to convey: ${a.figure}.`,
+        scope,
+        "",
+        "Ground the design in what actually gets published:",
+        "1. Call search_figure_references describing the FIGURE (composition, flow " +
+          "direction, what is compared), not the research topic. Pass any venue or " +
+          "role above as the `venues` / `roles` filters on that call, not only in " +
+          "prose. Run two or three differently-worded searches: one on the layout, " +
+          "one on what the figure has to make obvious.",
+        "2. Read the `composition`, `visual_devices`, `color_strategy` and " +
+          "`reuse_notes` of the strongest matches and tell me what the convention " +
+          "IS: how many panels, which way the flow runs, what colour is used for, " +
+          "how much text sits inside the figure. Name the papers you learned each " +
+          "convention from.",
+        "3. Only if you need to see one to judge it, re-call with " +
+          "`include_images: true` on a narrowed query. It is expensive; do not do " +
+          "it by default.",
+        "4. Propose ONE concrete layout for my figure: the panels, the reading " +
+          "order, what each colour encodes, where the labels go, and what to leave " +
+          "out. Say which reference each decision comes from.",
+        "5. Draft it as TikZ I can paste into the paper (vector, matches the " +
+          "document's fonts). Keep it compilable with standard `tikz` libraries, " +
+          "and put the figure's real content in it, not placeholders.",
+        "",
+        "Borrow composition, never copy a figure: the drafted figure must be mine, " +
+          "and any reference you show me needs its citation. " +
+          CITE_RULE,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    },
+  },
+  {
     name: "literature_review",
     title: "Literature review",
     description:
@@ -78,6 +147,7 @@ export const PROMPTS: PromptDef[] = [
       ]
         .filter(Boolean)
         .join(" ");
+
       return [
         `I'm conducting a literature review on: ${a.topic}.`,
         scope,
@@ -121,6 +191,7 @@ export const PROMPTS: PromptDef[] = [
     ],
     build: (a) => {
       const scope = present(a.venues) ? ` (restrict to ${a.venues})` : "";
+
       return [
         "Here is my paper's abstract / research idea:",
         a.abstract,
@@ -168,6 +239,7 @@ export const PROMPTS: PromptDef[] = [
         ? `Extract these columns for each paper: ${a.columns}.`
         : "Choose the most informative columns for this topic (e.g. dataset, task, method, " +
           "key metric, headline result, compute).";
+
       return [
         `Build a structured comparison table for: ${a.topic}.`,
         cols,
@@ -281,15 +353,27 @@ export const PROMPTS: PromptDef[] = [
   },
 ];
 
+/** One entry of a `prompts/list` result: a `PromptDef` minus its closure. */
+type PromptListing = {
+  name: string;
+  title: string;
+  description: string;
+  arguments: PromptArg[];
+};
+
+/** `prompts/list` result body. */
+type PromptListResult = {
+  prompts: PromptListing[];
+};
+
+/** `prompts/get` result body: always exactly one rendered user message. */
+type PromptGetResult = {
+  description: string;
+  messages: { role: "user"; content: { type: "text"; text: string } }[];
+};
+
 /** Project the prompt set for `prompts/list` (drops the `build` closure). */
-export function listPrompts(): {
-  prompts: {
-    name: string;
-    title: string;
-    description: string;
-    arguments: PromptArg[];
-  }[];
-} {
+export function listPrompts(): PromptListResult {
   return {
     prompts: PROMPTS.map(({ name, title, description, arguments: args }) => ({
       name,
@@ -308,17 +392,16 @@ export function listPrompts(): {
 export function getPromptResult(
   name: string,
   args: Record<string, string>,
-): {
-  description: string;
-  messages: { role: "user"; content: { type: "text"; text: string } }[];
-} {
+): PromptGetResult {
   const def = PROMPTS.find((p) => p.name === name);
+
   if (!def) {
     throw new ProtocolError(
       ProtocolErrorCode.InvalidParams,
       `Unknown prompt: ${name}`,
     );
   }
+
   for (const arg of def.arguments) {
     if (arg.required && !present(args[arg.name])) {
       throw new ProtocolError(
@@ -327,6 +410,7 @@ export function getPromptResult(
       );
     }
   }
+
   return {
     description: def.description,
     messages: [
@@ -340,30 +424,39 @@ export function getPromptResult(
  * capability is already declared in `makeServer`.
  */
 export function registerPrompts(
-  server: Server,
+  server: McpServerLike,
   analyticsContext?: () => McpAnalyticsContext,
 ): void {
   // These two make no upstream API call, so the request envelope is their ONLY
   // source of client identity now that the initialize handshake is gone.
   server.setRequestHandler("prompts/list", async (_req, ctx) => {
     attributeFromEnvelope(server, ctx);
+
     if (analyticsEnabled()) {
       captureMcp("$mcp_prompts_list", server, analyticsContext?.(), {});
     }
+
     return listPrompts();
   });
   server.setRequestHandler(
     "prompts/get",
     async (
-      req: { params: { name: string; arguments?: Record<string, string> } },
+      req: {
+        params: {
+          name: string;
+          arguments?: Record<string, string> | undefined;
+        };
+      },
       ctx: ServerContext,
     ) => {
       attributeFromEnvelope(server, ctx);
+
       if (analyticsEnabled()) {
         captureMcp("$mcp_prompt_get", server, analyticsContext?.(), {
           $mcp_resource_name: req.params.name,
         });
       }
+
       return getPromptResult(req.params.name, req.params.arguments ?? {});
     },
   );

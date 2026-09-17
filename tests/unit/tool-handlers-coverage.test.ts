@@ -17,6 +17,60 @@ import type { KyInstance } from "ky";
 import { callPaperTool } from "../../src/tools/papers.js";
 import { callGuidanceTool } from "../../src/tools/guidance.js";
 import { TOOL_RESPONSE_CACHE } from "../../src/cache.js";
+import {
+  createFakeKy,
+  jsonReply,
+  queryRecordOf,
+  type KyVerb,
+} from "../support/fake-ky.js";
+import { wireJson } from "../support/tool-result.js";
+import type { JsonObject, JsonValue } from "../../src/json.js";
+
+/**
+ * The payload shapes these tests read back off the wire. Each is annotated at
+ * the `JSON.parse` rather than asserted onto `structuredContent`, so the shape
+ * is the test's own stated contract and `wireJson` has already proved the text
+ * mirror and `structuredContent` agree.
+ */
+interface SearchPayload {
+  results: Array<JsonObject & { authors: string[] }>;
+  best_score: number;
+  low_confidence: boolean;
+  has_more: boolean;
+}
+
+interface ScorePayload {
+  best_score: number;
+  low_confidence: boolean;
+}
+
+interface FulltextPayload {
+  sections: Array<{ heading: string }>;
+}
+
+interface CitationsPayload {
+  direction: string;
+  total: number;
+  citations: JsonObject[];
+}
+
+interface ConferencesPayload {
+  conferences: JsonObject[];
+}
+
+interface ConferencePapersPayload {
+  papers: JsonObject[];
+  total: number;
+  has_more: boolean;
+}
+
+interface RelatedPayload {
+  papers: JsonObject[];
+}
+
+interface GuidanceSearchPayload {
+  results: JsonObject[];
+}
 
 beforeEach(async () => {
   await TOOL_RESPONSE_CACHE.clear();
@@ -24,65 +78,65 @@ beforeEach(async () => {
 
 // ─── ky doubles ────────────────────────────────────────────────────────────
 
-/**
- * Route-aware ky double. Each verb+url resolves to its registered body via a
- * `.json()` thenable, matching how `cachedJson` and the bare `api.get(...)`
- * calls consume responses in the handlers.
- */
-function routedKy(routes: {
-  get?: Record<string, unknown>;
-  post?: Record<string, unknown>;
-  delete?: Record<string, unknown>;
-}): {
-  ky: KyInstance;
-  calls: Array<{ method: string; url: string; opts?: unknown }>;
-} {
-  const calls: Array<{ method: string; url: string; opts?: unknown }> = [];
-  const make =
-    (method: "get" | "post" | "delete") => (url: string, opts?: unknown) => {
-      calls.push({ method, url, opts });
-      const table =
-        method === "get"
-          ? routes.get
-          : method === "post"
-            ? routes.post
-            : routes.delete;
-      return {
-        json: async () => table?.[url] ?? {},
-      } as unknown as Promise<unknown>;
-    };
-  return {
-    ky: {
-      get: make("get"),
-      post: make("post"),
-      delete: make("delete"),
-      put: make("get"),
-    } as unknown as KyInstance,
-    calls,
-  };
+interface RouteTable {
+  get?: Record<string, JsonValue>;
+  post?: Record<string, JsonValue>;
+  delete?: Record<string, JsonValue>;
+}
+
+/** `put` shares the GET table: no handler under test distinguishes the two. */
+function tableFor(routes: RouteTable, method: KyVerb) {
+  if (method === "post") return routes.post;
+
+  if (method === "delete") return routes.delete;
+
+  return routes.get;
 }
 
 /**
- * A ky `HTTPError`-shaped object: the value `errors.ts:asKyHttpError` narrows
- * on (anything with a `.response` exposing `status`, `headers`, and an async
- * `json()`). `cachedJson` / the handler bodies reject with this; the handler's
- * catch funnels it through `httpErrorToToolResult`.
+ * Route-aware ky double: each verb+url resolves to its registered body, which
+ * is how `cachedJson` and the bare `api.get(...)` calls consume responses.
  */
+function routedKy(routes: RouteTable) {
+  const { ky, calls } = createFakeKy((call) =>
+    jsonReply(tableFor(routes, call.method)?.[call.url] ?? {}),
+  );
+
+  return { ky, calls };
+}
+
+interface HttpErrorResponse {
+  status: number;
+  headers: Headers;
+  json: () => Promise<JsonValue>;
+}
+
+/**
+ * A ky `HTTPError` by duck type: `errors.ts:asKyHttpError` narrows on any
+ * throwable carrying a `.response` with a status, headers, and an async
+ * `json()`. An Error subclass rather than a bare object, so it is a legal
+ * rejection value for the fake ky without being laundered through a cast.
+ */
+class FakeHttpError extends Error {
+  constructor(readonly response: HttpErrorResponse) {
+    super(`HTTP ${String(response.status)}`);
+  }
+}
+
+/** `body: null` models a response whose own body fails to parse. */
 function httpError(
   status: number,
-  body: Record<string, unknown> | null,
+  body: JsonValue | null,
   headers: Record<string, string> = {},
-): unknown {
-  return {
-    response: {
-      status,
-      headers: new Headers(headers),
-      json: async () => {
-        if (body === null) throw new Error("no json body");
-        return body;
-      },
-    },
-  };
+): FakeHttpError {
+  return new FakeHttpError({
+    status,
+    headers: new Headers(headers),
+    json: () =>
+      body === null
+        ? Promise.reject(new Error("no json body"))
+        : Promise.resolve(body),
+  });
 }
 
 /**
@@ -90,18 +144,8 @@ function httpError(
  * error-path test exercise the handler's catch arm regardless of which verb
  * the tool happens to call.
  */
-function throwingKy(err: unknown): KyInstance {
-  const make = () => () => ({
-    json: async () => {
-      throw err;
-    },
-  });
-  return {
-    get: make(),
-    post: make(),
-    delete: make(),
-    put: make(),
-  } as unknown as KyInstance;
+function throwingKy(err: Error): KyInstance {
+  return createFakeKy(() => ({ kind: "thrown", cause: err })).ky;
 }
 
 /** Assert a result is an actionable Tool Execution Error carrying `text`. */
@@ -111,6 +155,7 @@ function expectToolError(
 ) {
   expect(res.isError).toBe(true);
   const text = res.content?.[0]?.text ?? "";
+
   for (const needle of expected.contains) expect(text).toContain(needle);
 }
 
@@ -144,15 +189,12 @@ describe("search_papers", () => {
         },
       },
     });
+
     const res = await callPaperTool(ky, "search_papers", {
       query: "transformers",
     });
-    const sc = res.structuredContent as {
-      results: Array<Record<string, unknown>>;
-      best_score: number;
-      low_confidence: boolean;
-      has_more: boolean;
-    };
+
+    const sc: SearchPayload = JSON.parse(wireJson(res));
     const hit = sc.results[0]!;
     expect(hit.paper_id).toBe("p1");
     expect(hit.title).toBe("Attention Is All You Need");
@@ -162,7 +204,7 @@ describe("search_papers", () => {
     expect(hit.score).toBe(1.05);
     expect(hit.rerank_score).toBe(0.91);
     // Default mode keeps full metadata and filters abstract chunks out of contexts.
-    expect((hit.authors as string[]).length).toBe(8);
+    expect(hit.authors.length).toBe(8);
     expect("et_al_count" in hit).toBe(false);
     expect("snippet" in hit).toBe(false);
     expect(hit.contexts).toEqual([]);
@@ -180,11 +222,9 @@ describe("search_papers", () => {
         },
       },
     });
+
     const res = await callPaperTool(ky, "search_papers", { query: "x" });
-    const sc = res.structuredContent as {
-      best_score: number;
-      low_confidence: boolean;
-    };
+    const sc: ScorePayload = JSON.parse(wireJson(res));
     expect(sc.best_score).toBe(0.1);
     expect(sc.low_confidence).toBe(true);
   });
@@ -195,6 +235,7 @@ describe("search_papers", () => {
       "search_papers",
       { query: "x" },
     );
+
     expectToolError(res, {
       contains: [
         "Lune quota exhausted",
@@ -213,9 +254,11 @@ describe("get_paper_fulltext", () => {
     const { ky } = routedKy({
       get: { "papers/p1/fulltext": { body: "# Methods\nWe trained a model." } },
     });
+
     const res = await callPaperTool(ky, "get_paper_fulltext", {
       paper_id: "p1",
     });
+
     expect(res.content?.[0]?.type).toBe("text");
     expect(res.content?.[0]?.text).toBe("# Methods\nWe trained a model.");
   });
@@ -228,13 +271,13 @@ describe("get_paper_fulltext", () => {
         },
       },
     });
+
     const res = await callPaperTool(ky, "get_paper_fulltext", {
       paper_id: "p1",
       format: "json",
     });
-    const sc = res.structuredContent as {
-      sections: Array<{ heading: string }>;
-    };
+
+    const sc: FulltextPayload = JSON.parse(wireJson(res));
     expect(sc.sections[0]!.heading).toBe("Methods");
   });
 
@@ -244,6 +287,7 @@ describe("get_paper_fulltext", () => {
       "get_paper_fulltext",
       { paper_id: "p1" },
     );
+
     expectToolError(res, { contains: ["No full text", "http_status=404"] });
   });
 });
@@ -271,14 +315,12 @@ describe("get_paper_citations", () => {
         },
       },
     });
+
     const res = await callPaperTool(ky, "get_paper_citations", {
       paper_id: "p1",
     });
-    const sc = res.structuredContent as {
-      direction: string;
-      total: number;
-      citations: Array<Record<string, unknown>>;
-    };
+
+    const sc: CitationsPayload = JSON.parse(wireJson(res));
     expect(sc.direction).toBe("cited_by");
     expect(sc.total).toBe(2);
     expect(sc.citations[0]!.paper_id).toBe("c1");
@@ -301,6 +343,7 @@ describe("get_paper_citations", () => {
       "get_paper_citations",
       { paper_id: "p1" },
     );
+
     expectToolError(res, {
       contains: [
         "Rate limited",
@@ -331,17 +374,15 @@ describe("list_conferences", () => {
         ],
       },
     });
+
     const res = await callPaperTool(ky, "list_conferences", {
       category: "security",
     });
-    expect(
-      (calls[0]!.opts as { searchParams: Record<string, string> }).searchParams,
-    ).toEqual({
+
+    expect(queryRecordOf(calls[0]!)).toEqual({
       category: "security",
     });
-    const sc = res.structuredContent as {
-      conferences: Array<Record<string, unknown>>;
-    };
+    const sc: ConferencesPayload = JSON.parse(wireJson(res));
     expect(sc.conferences[0]!.id).toBe("conf-1");
     expect(sc.conferences[0]!.short_name).toBe("CCS");
     expect(sc.conferences[0]!.paper_count).toBe(1200);
@@ -354,6 +395,7 @@ describe("list_conferences", () => {
       "list_conferences",
       {},
     );
+
     expectToolError(res, {
       contains: ["Rate limited", "Retry after 12s", "http_status=429"],
     });
@@ -383,14 +425,12 @@ describe("get_conference_papers", () => {
         },
       },
     });
+
     const res = await callPaperTool(ky, "get_conference_papers", {
       conference: "NeurIPS",
     });
-    const sc = res.structuredContent as {
-      papers: Array<Record<string, unknown>>;
-      total: number;
-      has_more: boolean;
-    };
+
+    const sc: ConferencePapersPayload = JSON.parse(wireJson(res));
     expect(sc.papers[0]!.paper_id).toBe("p1");
     expect(sc.papers[0]!.title).toBe("A NeurIPS Paper");
     // Browse pages omit the abstract to keep venue pages light.
@@ -406,6 +446,7 @@ describe("get_conference_papers", () => {
       "get_conference_papers",
       { conference: "NotARealVenue" },
     );
+
     expectToolError(res, {
       contains: ["Conference not found", "http_status=404"],
     });
@@ -432,14 +473,14 @@ describe("search_related_papers", () => {
         ],
       },
     });
+
     const res = await callPaperTool(ky, "search_related_papers", {
       paper_id: "seed",
       limit: 2,
     });
+
     expect(calls[0]!.url).toBe("papers/seed/related");
-    const sc = res.structuredContent as {
-      papers: Array<Record<string, unknown>>;
-    };
+    const sc: RelatedPayload = JSON.parse(wireJson(res));
     expect(sc.papers).toHaveLength(2);
     expect(sc.papers.map((p) => p.paper_id)).toEqual(["n1", "n2"]);
     expect(sc.papers[0]!.title).toBe("Neighbor One");
@@ -456,6 +497,7 @@ describe("search_related_papers", () => {
       "search_related_papers",
       { paper_id: "missing" },
     );
+
     expectToolError(res, {
       contains: [
         "Paper not found",
@@ -485,13 +527,13 @@ describe("search_research_guidance", () => {
         },
       },
     });
+
     const res = await callGuidanceTool(ky, "search_research_guidance", {
       query: "ablation",
     });
+
     expect(calls[0]!.url).toBe("research-guidance/search");
-    const sc = res.structuredContent as {
-      results: Array<Record<string, unknown>>;
-    };
+    const sc: GuidanceSearchPayload = JSON.parse(wireJson(res));
     const hit = sc.results[0]!;
     expect(hit.doc_id).toBe("g1");
     expect(hit.doc_title).toBe("How to Design an Ablation");
@@ -506,6 +548,7 @@ describe("search_research_guidance", () => {
       "search_research_guidance",
       { query: "x" },
     );
+
     expectToolError(res, {
       contains: ["Rate limited", "Retry after 5s", "http_status=429"],
     });
@@ -528,11 +571,13 @@ describe("get_research_guidance_doc", () => {
         },
       },
     });
+
     const res = await callGuidanceTool(ky, "get_research_guidance_doc", {
       doc_id: "g1",
     });
+
     expect(calls[0]!.url).toBe("research-guidance/g1");
-    const sc = res.structuredContent as Record<string, unknown>;
+    const sc: JsonObject = JSON.parse(wireJson(res));
     expect(sc.doc_id).toBe("g1");
     expect(sc.title).toBe("Reproducibility Checklist");
     expect(sc.author).toBe("Jane Researcher");
@@ -547,6 +592,7 @@ describe("get_research_guidance_doc", () => {
       "get_research_guidance_doc",
       { doc_id: "missing" },
     );
+
     expectToolError(res, { contains: ["Doc not found", "http_status=404"] });
   });
 });
@@ -562,6 +608,7 @@ describe("upstream error projection edge cases", () => {
         paper_id: "x",
       },
     );
+
     expectToolError(res, {
       contains: ["Not found", "call search_papers first", "http_status=404"],
     });
@@ -575,6 +622,7 @@ describe("upstream error projection edge cases", () => {
         query: "x",
       },
     );
+
     expectToolError(res, {
       contains: ["Rate limited", "Retry after 60s", "retry_after_seconds=60"],
     });
@@ -586,6 +634,7 @@ describe("upstream error projection edge cases", () => {
       "search_papers",
       { query: "x" },
     );
+
     expectToolError(res, {
       contains: ["Retry after 45s", "retry_after_seconds=45"],
     });

@@ -19,6 +19,31 @@ import {
   slimSearchResponse,
 } from "../../src/tools/_slim.js";
 
+/**
+ * A projected search hit, and the two shapes `detail` picks between. The union
+ * is discriminated structurally (a detail hit carries `contexts`, a concise one
+ * carries `snippet` + `et_al_count`), so narrowing it is what lets a test read
+ * the projector's real field types instead of casting the hit to a dictionary
+ * and losing every one of them.
+ */
+type SearchHit = ReturnType<typeof slimSearchResponse>["results"][number];
+
+function detailed(hit: SearchHit) {
+  if (!("contexts" in hit)) {
+    throw new Error("expected a detail-mode hit, got the concise projection");
+  }
+
+  return hit;
+}
+
+function concise(hit: SearchHit) {
+  if (!("snippet" in hit)) {
+    throw new Error("expected a concise hit, got the detail projection");
+  }
+
+  return hit;
+}
+
 describe("slimConference", () => {
   it("passes through populated fields", () => {
     expect(
@@ -64,6 +89,7 @@ describe("slimConference", () => {
       description: "",
       category: null,
     });
+
     expect(r.description).toBeUndefined();
     expect(r.category).toBeUndefined();
   });
@@ -76,6 +102,7 @@ describe("slimConferenceList", () => {
       null,
       undefined,
     ]);
+
     expect(r.conferences).toHaveLength(1);
     expect(r.conferences[0]!.short_name).toBe("A");
   });
@@ -138,6 +165,7 @@ describe("slimPaper", () => {
       url: "https://lune/p",
       citation_count: 9,
     });
+
     expect(r).toMatchObject({
       authors: ["A", "B"],
       year: 2024,
@@ -172,7 +200,8 @@ describe("slimSearchResponse", () => {
         },
       ],
     });
-    const hit = r.results[0]! as { contexts: Array<Record<string, unknown>> };
+
+    const hit = detailed(r.results[0]!);
     expect(hit.contexts).toEqual([{ section: "Methods", text: "x", score: 1 }]);
   });
 
@@ -189,10 +218,8 @@ describe("slimSearchResponse", () => {
         },
       ],
     });
-    const hit = r.results[0]! as {
-      abstract: string;
-      contexts: Array<Record<string, unknown>>;
-    };
+
+    const hit = detailed(r.results[0]!);
     expect(hit.abstract).toBe("the abstract text");
     expect(hit.contexts).toEqual([
       { section: "Results", text: "we observe", score: 0.8 },
@@ -215,7 +242,8 @@ describe("slimSearchResponse", () => {
       },
       true,
     );
-    const hit = r.results[0]! as { contexts: Array<Record<string, unknown>> };
+
+    const hit = detailed(r.results[0]!);
     expect(hit.contexts).toEqual([
       { section: "Results", text: "we observe", score: 0.8 },
       { section: undefined, text: "no section, no score", score: undefined },
@@ -224,7 +252,7 @@ describe("slimSearchResponse", () => {
 
   it("emits an empty contexts array when a hit has no matched_chunks", () => {
     const r = slimSearchResponse({ results: [{ id: "p1" }] });
-    const hit = r.results[0]! as { contexts: unknown[] };
+    const hit = detailed(r.results[0]!);
     expect(hit.contexts).toEqual([]);
   });
 
@@ -235,6 +263,7 @@ describe("slimSearchResponse", () => {
         { id: "p2", score: 0.5, rerank_score: 0.41 },
       ],
     });
+
     // The boosted ranking score and the calibrated rerank score are both surfaced.
     expect(r.results[0]!.score).toBe(1.1);
     expect(r.results[0]!.rerank_score).toBe(0.82);
@@ -248,6 +277,7 @@ describe("slimSearchResponse", () => {
     const r = slimSearchResponse({
       results: [{ id: "p1", score: 0.4, rerank_score: 0.18 }],
     });
+
     expect(r.best_score).toBe(0.18);
     expect(r.low_confidence).toBe(true);
   });
@@ -301,10 +331,10 @@ describe("slimSearchResponse concise vs detail", () => {
 
   it("default detail returns the abstract, ids, and contexts with chunk_id", () => {
     const r = slimSearchResponse({ results: [hit] });
-    const h = r.results[0]! as Record<string, unknown>;
+    const h = detailed(r.results[0]!);
     expect(h.abstract).toHaveLength(600);
     expect(h.doi).toBe("10.1/x");
-    const ctx = (h.contexts as Array<Record<string, unknown>>)[0]!;
+    const ctx = h.contexts[0]!;
     expect(ctx).toMatchObject({
       section: "Results",
       text: "we observe a 3 point gain",
@@ -314,7 +344,7 @@ describe("slimSearchResponse concise vs detail", () => {
 
   it("detail false returns a snippet, trims authors, and omits heavy fields", () => {
     const r = slimSearchResponse({ results: [hit] }, false);
-    const h = r.results[0]! as Record<string, unknown>;
+    const h = concise(r.results[0]!);
     expect(h.snippet).toBe("we observe a 3 point gain");
     expect(h.authors).toHaveLength(6);
     expect(h.et_al_count).toBe(1);
@@ -335,8 +365,9 @@ describe("slimSearchResponse concise vs detail", () => {
         },
       ],
     };
+
     const r = slimSearchResponse({ results: [abstractHit] }, true);
-    const h = r.results[0]! as Record<string, unknown>;
+    const h = detailed(r.results[0]!);
     expect(h.abstract).toHaveLength(600);
     expect(h.contexts).toEqual([]);
   });
@@ -344,9 +375,9 @@ describe("slimSearchResponse concise vs detail", () => {
   it("concise snippet falls back to a truncated abstract when no chunk matched", () => {
     const noChunk = { ...hit, matched_chunks: [] };
     const r = slimSearchResponse({ results: [noChunk] }, false);
-    const h = r.results[0]! as Record<string, unknown>;
-    expect((h.snippet as string).length).toBeLessThanOrEqual(283); // 280 + ellipsis
-    expect((h.snippet as string).endsWith("...")).toBe(true);
+    const snippet = concise(r.results[0]!).snippet ?? "";
+    expect(snippet.length).toBeLessThanOrEqual(283); // 280 + ellipsis
+    expect(snippet.endsWith("...")).toBe(true);
   });
 });
 
@@ -373,6 +404,7 @@ describe("slimCitations", () => {
         },
       ],
     };
+
     const out = slimCitations(raw);
     expect(out.direction).toBe("cited_by");
     expect(out.citations).toHaveLength(2);
@@ -402,6 +434,7 @@ describe("slimCitations", () => {
       total: 12,
       has_more: true,
     });
+
     expect(withPaging.total).toBe(12);
     expect(withPaging.has_more).toBe(true);
     const without = slimCitations({ direction: "cites", papers: [] });
@@ -430,6 +463,7 @@ describe("slimRelated", () => {
         similarity: 0.87,
       },
     ]);
+
     const hit = out.papers[0]!;
     expect(hit.similarity).toBe(0.87);
     expect(hit.conference).toBe("ICML");
@@ -477,6 +511,7 @@ describe("slimGuidanceSearch", () => {
         },
       ],
     });
+
     expect(r.results[0]).toEqual({
       doc_id: "d1",
       doc_title: "Title",
@@ -490,6 +525,7 @@ describe("slimGuidanceSearch", () => {
     const r = slimGuidanceSearch({
       results: [{ doc_id: "d1", doc_source_url: null }],
     });
+
     expect(r.results[0]!.source_url).toBeUndefined();
     expect(slimGuidanceSearch({}).results).toEqual([]);
     expect(slimGuidanceSearch(undefined).results).toEqual([]);
@@ -530,6 +566,7 @@ describe("slimGuidanceDoc", () => {
       source_url: null,
       tags: null,
     });
+
     expect(r.author).toBeUndefined();
     expect(r.author_affiliation).toBeUndefined();
     expect(r.source_url).toBeUndefined();
@@ -546,6 +583,7 @@ describe("slimGuidanceDoc", () => {
         { heading: "Drop", text: "" },
       ],
     });
+
     expect(r.content).toBeUndefined();
     expect(r.sections).toEqual([{ heading: "Keep", text: "real" }]);
   });

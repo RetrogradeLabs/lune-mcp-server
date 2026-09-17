@@ -1,10 +1,7 @@
 import { z } from "zod";
 
-// An id interpolated into an API URL path segment. encodeURIComponent leaves
-// "." and ".." intact, and the WHATWG URL parser then normalizes those segments
-// away before the request is sent, silently rewriting it to a DIFFERENT endpoint
-// (e.g. paper_id=".." turns /papers/../fulltext into /fulltext). Reject them so
-// a bad id is a clean validation error, not a wrong-endpoint GET.
+// Reject "." and "..": encoding leaves them intact and URL normalization could
+// silently rewrite the API endpoint.
 export const pathSegmentId = (description: string) =>
   z
     .string()
@@ -14,13 +11,8 @@ export const pathSegmentId = (description: string) =>
     })
     .describe(description);
 
-// Shared corpus|workspace selector. "corpus" (default) operates on the public
-// Lune corpus; "workspace" operates on the user's OWN uploaded workspace
-// documents. The active workspace is bound to the session credential server-side
-// (you never pass a workspace id); a non-workspace credential gets a 400 for
-// "workspace". Reused verbatim across search_papers, get_paper_fulltext,
-// extract_from_papers, verify_claims, and gather_evidence so the agent has one
-// uniform knob instead of a parallel family of workspace-only tools.
+// Reuse one corpus|workspace selector; the API binds workspace to the credential
+// and rejects ordinary credentials, so callers never pass a workspace id.
 const SOURCE_FIELD = z
   .enum(["corpus", "workspace"])
   .default("corpus")
@@ -491,4 +483,21 @@ export const ConfPapersInput = z.object({
     .describe(
       "`recency` (newest first, default) or `citations` (most-cited first).",
     ),
+});
+
+/** SearchInput without the workspace selector, for credentials without workspace access. */
+export const SearchInputExternal = SearchInput.omit({ source: true });
+
+/** FullTextInput without the workspace selector, for credentials without workspace access. */
+export const FullTextInputExternal = FullTextInput.omit({ source: true });
+
+/** ExtractInput without the workspace selector, for credentials without workspace access. */
+export const ExtractInputExternal = ExtractInput.omit({ source: true });
+
+/** VerifyInput without the workspace selector, for credentials without workspace access. */
+export const VerifyInputExternal = VerifyInput.omit({ source: true });
+
+/** GatherEvidenceInput without the workspace selector, for credentials without workspace access. */
+export const GatherEvidenceInputExternal = GatherEvidenceInput.omit({
+  source: true,
 });

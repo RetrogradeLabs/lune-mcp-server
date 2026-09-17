@@ -6,7 +6,7 @@
  * (Claude Desktop, Cursor, ...) silently refreshes and retries. Without this gate
  * the API's downstream 401 mapped to a tool error the model surfaced as "reconnect"
  * (no refresh), forcing roughly hourly re-consent (1h token TTL). See
- * `.claude/rules/mcp.md` (Remote-MCP OAuth).
+ * the MCP server design notes (Remote-MCP OAuth).
  *
  * Scope: only Lune's own OAuth tokens (RS256 JWTs minted by
  * `api.luneresearch.com`) are validated here. Personal Access Tokens (`lune_*`,
@@ -20,23 +20,17 @@ import {
   decodeProtectedHeader,
   jwtVerify,
 } from "jose";
-import type { JWTVerifyGetKey } from "jose";
+import type { JWTPayload, JWTVerifyGetKey } from "jose";
 
-// A small leeway so a modestly skewed client/task clock does not falsely flag a
-// still-valid (or just-issued) access token as expired and force a needless
-// re-auth. Negligible against the 1h access-token TTL.
+import { isJsonNumber, isJsonString, type JsonObject } from "../json.js";
+import runtimeDefaults from "../runtime-defaults.json";
+import { runtimeSetting } from "../runtime-config.js";
+
+// Allow 30 seconds of clock skew without forcing reauth on a one-hour token.
 const CLOCK_TOLERANCE_S = 30;
 
-// jose error `code`s that mean the TOKEN ITSELF is bad: expired, forged, signed
-// by a rotated-out / unknown key, or carrying invalid claims (e.g. wrong issuer).
-// These map to a 401 that triggers the client's silent refresh. Every other
-// failure, notably JWKS fetch / timeout / malformed-response
-// (ERR_JWKS_TIMEOUT / ERR_JWKS_INVALID) and raw network errors, FAILS OPEN: the
-// request proceeds and the API stays the backstop authority, so a JWKS outage
-// degrades to the pre-gate behavior rather than locking everyone out.
-// `ERR_JWKS_NO_MATCHING_KEY` is a token problem, not an infra one: jose throws it
-// only AFTER a JWKS was successfully fetched (and re-fetched, past its cooldown)
-// and still genuinely lacks the token's `kid`.
+// Only token-invalid jose codes trigger reauth; JWKS/network failures fail open
+// to the API. NO_MATCHING_KEY follows a successful refresh, so it is token-invalid.
 const TOKEN_ERROR_CODES = new Set<string>([
   "ERR_JWT_EXPIRED",
   "ERR_JWS_SIGNATURE_VERIFICATION_FAILED",
@@ -47,14 +41,16 @@ const TOKEN_ERROR_CODES = new Set<string>([
 ]);
 
 function authServerOrigin(): string {
-  return (
-    process.env.LUNE_AUTH_SERVER_URL ?? "https://api.luneresearch.com"
+  return runtimeSetting(
+    "LUNE_AUTH_SERVER_URL",
+    runtimeDefaults.api_public_url,
   ).replace(/\/+$/, "");
 }
 
 function resourceServerOrigin(): string {
-  return new URL(process.env.MCP_PUBLIC_URL || "https://mcp.luneresearch.com")
-    .origin;
+  return new URL(
+    runtimeSetting("MCP_PUBLIC_URL", runtimeDefaults.mcp_public_url),
+  ).origin;
 }
 
 const MCP_RESOURCE_PATHS = new Set(["/", "/mcp", "/v1/mcp"]);
@@ -63,6 +59,7 @@ function isMcpResourceAlias(value: string): boolean {
   try {
     const resource = new URL(value);
     const path = resource.pathname.replace(/\/+$/, "") || "/";
+
     return (
       resource.origin === resourceServerOrigin() &&
       !resource.search &&
@@ -77,7 +74,15 @@ function isMcpResourceAlias(value: string): boolean {
 function acceptedAudiences(expected: string): string[] {
   if (!isMcpResourceAlias(expected)) return [expected];
   const origin = resourceServerOrigin();
+
   return [origin, `${origin}/mcp`, `${origin}/v1/mcp`];
+}
+
+/** A single-valued `aud`, as opposed to the array form or an absent claim. */
+function isSingleAudience(
+  audience: string | string[] | undefined,
+): audience is string {
+  return typeof audience === "string";
 }
 
 function audienceMatches(
@@ -85,43 +90,50 @@ function audienceMatches(
   expected: string,
 ): boolean {
   const accepted = new Set(acceptedAudiences(expected));
-  return typeof audience === "string"
+
+  return isSingleAudience(audience)
     ? accepted.has(audience)
     : Array.isArray(audience) && audience.some((value) => accepted.has(value));
 }
 
-// Lazily build and memoise the remote JWKS resolver. `createRemoteJWKSet` caches
-// keys in-process, re-fetches on an unknown `kid` (bounded by a cooldown), and
-// tracks key rotation, so a network fetch happens about once per rotation, not
-// per request. Re-created only when the auth-server origin changes (tests point
-// it at a local JWKS server via `LUNE_AUTH_SERVER_URL`).
+/**
+ * A JWT payload viewed as the JSON object it is. jose types unrecognised claims
+ * as `unknown` because it cannot know a token's schema; every read below still
+ * goes through a predicate, so nothing here trusts a claim's type.
+ */
+function claimsOf(payload: JWTPayload): JsonObject {
+  // SAFETY: jose decoded and parsed this payload as JSON; predicates still
+  // establish every claim's type.
+  return payload as JsonObject;
+}
+
+interface CodedError extends Error {
+  code: string;
+}
+
+/** jose stamps a string `code` on the errors that mean the token itself is bad.
+ *  A thrown value need not be an Error at all, let alone carry one. */
+function isCodedError(cause: unknown): cause is CodedError {
+  return (
+    cause instanceof Error && "code" in cause && typeof cause.code === "string"
+  );
+}
+
+// Memoize jose's rotating JWKS resolver per auth origin so unknown kids refresh
+// keys without fetching on every request.
 let jwksRef: {
   origin: string;
   resolve: ReturnType<typeof createRemoteJWKSet>;
 } | null = null;
+
 function remoteJwks(): ReturnType<typeof createRemoteJWKSet> {
   const origin = authServerOrigin();
+
   if (!jwksRef || jwksRef.origin !== origin) {
     jwksRef = {
       origin,
-      // `timeoutDuration` caps the per-request wait when the JWKS endpoint hangs
-      // (default 5s); on timeout jose throws `ERR_JWKS_TIMEOUT`, which is NOT a
-      // token-error code, so the gate fails open. JWKS is co-located with the AS
-      // (~ms healthy), so 3s only bites a real outage.
-      //
-      // `cooldownDuration` is how long jose REFUSES to re-fetch after an unknown
-      // `kid`, and it is a straight tradeoff: it bounds the window in which a
-      // token signed by a freshly rotated key throws `ERR_JWKS_NO_MATCHING_KEY`
-      // (a 401 the client answers with a refresh that returns the SAME new kid,
-      // so it 401s again) against how hard a burst of forged kids may hammer the
-      // AS. 5s rather than jose's 30s default because that window is now
-      // PER TASK: the service runs several, each with its own cache, so a client
-      // sees the same token work on one call and fail on the next, which is
-      // exactly the pattern a consecutive-401 circuit breaker trips on. The
-      // reason it is degraded UX and not an outage at all is `oauth_keys.py`
-      // keeping the previous key live across a rotation, so only tokens minted
-      // after the flip are affected. 5s x 6 tasks is at most 6 extra JWKS GETs
-      // per rotation against an endpoint that serves a static document.
+      // 3s timeoutDuration so a hanging JWKS fails open; 5s cooldownDuration
+      // bounds the post-rotation kid miss. Why 5s: the MCP server design notes.
       resolve: createRemoteJWKSet(new URL(`${origin}/.well-known/jwks.json`), {
         timeoutDuration: 3000,
         cooldownDuration: 5_000,
@@ -129,6 +141,7 @@ function remoteJwks(): ReturnType<typeof createRemoteJWKSet> {
       }),
     };
   }
+
   return jwksRef.resolve;
 }
 
@@ -152,6 +165,90 @@ export interface AccessTokenInspection {
   verifiedIdentity?: VerifiedOAuthIdentity;
 }
 
+function decodedAlgorithm(token: string): string | undefined {
+  try {
+    return decodeProtectedHeader(token).alg;
+  } catch {
+    return undefined;
+  }
+}
+
+function decodedPayload(token: string): ReturnType<typeof decodeJwt> | null {
+  try {
+    return decodeJwt(token);
+  } catch {
+    return null;
+  }
+}
+
+function legacyAudienceOf(
+  payload: JWTPayload,
+  allowLegacyClientAudience: boolean,
+): string | undefined {
+  if (!allowLegacyClientAudience || !isSingleAudience(payload.aud)) {
+    return undefined;
+  }
+
+  return /^lune_oauth_[A-Za-z0-9_-]+$/.test(payload.aud)
+    ? payload.aud
+    : undefined;
+}
+
+function targetsResource(
+  payload: JWTPayload,
+  expectedAudience: string,
+  legacyAudience: string | undefined,
+): boolean {
+  return (
+    payload.iss === authServerOrigin() &&
+    (audienceMatches(payload.aud, expectedAudience) ||
+      legacyAudience !== undefined)
+  );
+}
+
+function verificationAudiences(
+  expectedAudience: string,
+  legacyAudience: string | undefined,
+): string[] {
+  const audiences = acceptedAudiences(expectedAudience);
+
+  return legacyAudience === undefined
+    ? audiences
+    : [...audiences, legacyAudience];
+}
+
+function verifiedIdentityOf(
+  payload: JWTPayload,
+): VerifiedOAuthIdentity | undefined {
+  const claims = claimsOf(payload);
+  const subject = claims.sub;
+
+  if (!isJsonString(subject) || !subject) return undefined;
+
+  const verifiedIdentity: VerifiedOAuthIdentity = {
+    distinctId: subject,
+    scopes: Array.isArray(claims.scopes)
+      ? claims.scopes.filter(isJsonString)
+      : [],
+  };
+
+  const orgId = claims.org_id;
+
+  if (isJsonString(orgId) && orgId) verifiedIdentity.orgId = orgId;
+
+  return verifiedIdentity;
+}
+
+function isTokenFailure(cause: unknown): boolean {
+  return isCodedError(cause) && TOKEN_ERROR_CODES.has(cause.code);
+}
+
+function isExpiredPayload(payload: JWTPayload): boolean {
+  const exp = claimsOf(payload).exp;
+
+  return isJsonNumber(exp) && exp < Date.now() / 1000 - CLOCK_TOLERANCE_S;
+}
+
 /**
  * Inspect a bearer without changing the resource-server decision contract.
  * Only a successfully verified Lune RS256 token yields an analytics identity;
@@ -163,90 +260,47 @@ export async function inspectAccessToken(
   expectedAudience = resourceServerOrigin(),
   allowLegacyClientAudience = false,
 ): Promise<AccessTokenInspection> {
-  let alg: string | undefined;
-  try {
-    alg = decodeProtectedHeader(token).alg;
-  } catch {
-    return { needsReauth: false }; // PAT / opaque bearer -> API authority.
-  }
+  const alg = decodedAlgorithm(token);
+
   if (alg !== "RS256") return { needsReauth: false };
-  let unverified: ReturnType<typeof decodeJwt>;
+  const unverified = decodedPayload(token);
+
+  if (unverified === null) return { needsReauth: true };
+
   try {
-    unverified = decodeJwt(token);
-  } catch {
-    return { needsReauth: true };
-  }
-  try {
-    const legacyAudience =
-      allowLegacyClientAudience &&
-      typeof unverified.aud === "string" &&
-      /^lune_oauth_[A-Za-z0-9_-]+$/.test(unverified.aud)
-        ? unverified.aud
-        : undefined;
-    if (
-      unverified.iss !== authServerOrigin() ||
-      (!audienceMatches(unverified.aud, expectedAudience) && !legacyAudience)
-    ) {
+    const legacyAudience = legacyAudienceOf(
+      unverified,
+      allowLegacyClientAudience,
+    );
+
+    if (!targetsResource(unverified, expectedAudience, legacyAudience)) {
       return { needsReauth: true };
     }
-    // Resolve the JWKS INSIDE the try so a malformed `LUNE_AUTH_SERVER_URL` (the
-    // `new URL(...)` in `remoteJwks()` throwing) fails open like any other JWKS
-    // infra fault, rather than 500-ing every request. Makes the fail-open
-    // invariant total.
+
+    // Resolved inside the try so a malformed LUNE_AUTH_SERVER_URL fails open
+    // like any other JWKS fault instead of 500-ing: fail-open is then total.
     const resolve = keyResolver ?? remoteJwks();
-    // Verify signature, issuer, audience, and expiry against the AS JWKS. The
-    // unverified check above makes audience rejection fail closed even during a
-    // JWKS outage; it never grants access, and the API still verifies the token
-    // cryptographically on the fail-open infrastructure path.
+
+    // The unverified audience check above is what keeps audience rejection
+    // fail-closed during a JWKS outage; the API re-verifies regardless.
     const { payload } = await jwtVerify(token, resolve, {
       algorithms: ["RS256"],
       issuer: authServerOrigin(),
-      audience: legacyAudience
-        ? [...acceptedAudiences(expectedAudience), legacyAudience]
-        : acceptedAudiences(expectedAudience),
+      audience: verificationAudiences(expectedAudience, legacyAudience),
       clockTolerance: CLOCK_TOLERANCE_S,
     });
-    if (typeof payload.sub !== "string" || !payload.sub) {
-      return { needsReauth: true };
-    }
+
+    const verifiedIdentity = verifiedIdentityOf(payload);
+
+    if (verifiedIdentity === undefined) return { needsReauth: true };
+
+    return { needsReauth: false, verifiedIdentity };
+  } catch (cause) {
+    // On the fail-open path a token past its own `exp` would dead-end as an API
+    // 401; challenge instead. An unverified decode only forces a refresh.
     return {
-      needsReauth: false,
-      verifiedIdentity: {
-        distinctId: payload.sub,
-        scopes: Array.isArray(payload.scopes)
-          ? payload.scopes.filter(
-              (scope): scope is string => typeof scope === "string",
-            )
-          : [],
-        ...(typeof payload.org_id === "string" && payload.org_id
-          ? { orgId: payload.org_id }
-          : {}),
-      },
+      needsReauth: isTokenFailure(cause) || isExpiredPayload(unverified),
     };
-  } catch (e) {
-    const code = (e as { code?: string }).code;
-    if (code !== undefined && TOKEN_ERROR_CODES.has(code)) {
-      return { needsReauth: true };
-    }
-    // Fail-open path (JWKS infra fault, network error): we could not VERIFY the
-    // token, so normally we forward it and let the API decide. But if the token
-    // is plainly past its own `exp`, forwarding it dead-ends as an API 401 mapped
-    // to a tool error (no client refresh). Challenge instead, so the connector
-    // refreshes even during a JWKS hiccup. Decoding exp WITHOUT verifying the
-    // signature is safe here: returning true never grants access, it only
-    // triggers a refresh, and a forged token still fails at the API.
-    try {
-      const exp = decodeJwt(token).exp;
-      if (
-        typeof exp === "number" &&
-        exp < Date.now() / 1000 - CLOCK_TOLERANCE_S
-      ) {
-        return { needsReauth: true };
-      }
-    } catch {
-      // Not a decodable JWT payload; fall through to fail-open.
-    }
-    return { needsReauth: false };
   }
 }
 

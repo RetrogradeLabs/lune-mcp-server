@@ -58,9 +58,11 @@ describe("SingleFlight", () => {
   it("collapses concurrent calls for the same key onto one factory invocation", async () => {
     const sf = new SingleFlight();
     let invocations = 0;
+
     const factory = async () => {
       invocations++;
       await sleep(20);
+
       return "value";
     };
 
@@ -74,10 +76,12 @@ describe("SingleFlight", () => {
 
   it("different keys do not block each other", async () => {
     const sf = new SingleFlight();
-    const calls: Record<string, number> = { a: 0, b: 0 };
-    const factory = (key: string) => async () => {
-      calls[key]!++;
+    const calls = { a: 0, b: 0 };
+
+    const factory = (key: "a" | "b") => async () => {
+      calls[key]++;
       await sleep(5);
+
       return `value-${key}`;
     };
 
@@ -85,6 +89,7 @@ describe("SingleFlight", () => {
       sf.do("a", factory("a")),
       sf.do("b", factory("b")),
     ]);
+
     expect([a, b]).toEqual(["value-a", "value-b"]);
     expect(calls).toEqual({ a: 1, b: 1 });
   });
@@ -101,6 +106,7 @@ describe("SingleFlight", () => {
     const errs = await Promise.allSettled(
       Array.from({ length: 5 }, () => sf.do("k", failing)),
     );
+
     expect(errs.every((r) => r.status === "rejected")).toBe(true);
     expect(attempts).toBe(1);
 

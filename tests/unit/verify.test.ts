@@ -27,6 +27,7 @@ import {
 } from "../../src/auth/verify.js";
 
 const ISSUER = "https://api.luneresearch.com";
+
 const AUDIENCE = "https://mcp.luneresearch.com";
 
 // Wrap a public key as the getKey resolver jwtVerify expects (jose calls it with
@@ -38,6 +39,7 @@ const keyResolver =
 
 async function makeKeys() {
   const { publicKey, privateKey } = await generateKeyPair("RS256");
+
   return { publicKey, privateKey };
 }
 
@@ -51,6 +53,7 @@ function sign(
   },
 ): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
+
   return new SignJWT({ org_id: "org-1", scopes: ["papers:read"] })
     .setProtectedHeader({ alg: "RS256", kid: opts.kid ?? "k1" })
     .setIssuer(opts.issuer ?? ISSUER)
@@ -105,10 +108,12 @@ describe("accessTokenNeedsReauth", () => {
 
   it("rejects a correctly-signed token from the wrong issuer", async () => {
     const { publicKey, privateKey } = await makeKeys();
+
     const token = await sign(privateKey, {
       expSecondsFromNow: 3600,
       issuer: "https://evil.example.com",
     });
+
     expect(await accessTokenNeedsReauth(token, keyResolver(publicKey))).toBe(
       true,
     );
@@ -116,10 +121,12 @@ describe("accessTokenNeedsReauth", () => {
 
   it("rejects a correctly-signed token for another resource", async () => {
     const { publicKey, privateKey } = await makeKeys();
+
     const token = await sign(privateKey, {
       expSecondsFromNow: 3600,
       audience: "https://api.luneresearch.com",
     });
+
     expect(await accessTokenNeedsReauth(token, keyResolver(publicKey))).toBe(
       true,
     );
@@ -133,10 +140,12 @@ describe("accessTokenNeedsReauth", () => {
     "accepts the %s audience on the equivalent %s endpoint alias",
     async (audience, expectedAudience) => {
       const { publicKey, privateKey } = await makeKeys();
+
       const token = await sign(privateKey, {
         expSecondsFromNow: 3600,
         audience,
       });
+
       expect(
         await accessTokenNeedsReauth(
           token,
@@ -153,10 +162,12 @@ describe("accessTokenNeedsReauth", () => {
     "https://mcp.luneresearch.com/mcp?tenant=other",
   ])("rejects the non-alias audience %s", async (audience) => {
     const { publicKey, privateKey } = await makeKeys();
+
     const token = await sign(privateKey, {
       expSecondsFromNow: 3600,
       audience,
     });
+
     expect(
       await accessTokenNeedsReauth(
         token,
@@ -168,10 +179,12 @@ describe("accessTokenNeedsReauth", () => {
 
   it("accepts a client-id audience only on the explicit legacy bridge", async () => {
     const { publicKey, privateKey } = await makeKeys();
+
     const token = await sign(privateKey, {
       expSecondsFromNow: 3600,
       audience: "lune_oauth_legacy-client",
     });
+
     expect(await accessTokenNeedsReauth(token, keyResolver(publicKey))).toBe(
       true,
     );
@@ -188,26 +201,31 @@ describe("accessTokenNeedsReauth", () => {
   it("flags a token whose signing key is absent from the JWKS (unknown kid)", async () => {
     const { privateKey } = await makeKeys();
     const token = await sign(privateKey, { expSecondsFromNow: 3600 });
+
     // A resolver that has fetched the JWKS but lacks the kid -> token problem.
     const resolver: JWTVerifyGetKey = () => {
       throw new joseErrors.JWKSNoMatchingKey();
     };
+
     expect(await accessTokenNeedsReauth(token, resolver)).toBe(true);
   });
 
   it("FAILS OPEN when the JWKS cannot be fetched (infra error, not a token error)", async () => {
     const { privateKey } = await makeKeys();
     const token = await sign(privateKey, { expSecondsFromNow: 3600 });
+
     // Timeout / network failure reaching our own JWKS must not 401 a possibly
     // valid token: proceed and let the API stay the authority.
     const timeout: JWTVerifyGetKey = () => {
       throw new joseErrors.JWKSTimeout();
     };
+
     expect(await accessTokenNeedsReauth(token, timeout)).toBe(false);
 
     const generic: JWTVerifyGetKey = () => {
       throw new TypeError("fetch failed"); // raw network error, no jose code.
     };
+
     expect(await accessTokenNeedsReauth(token, generic)).toBe(false);
     await expect(inspectAccessToken(token, timeout)).resolves.toEqual({
       needsReauth: false,
@@ -215,14 +233,14 @@ describe("accessTokenNeedsReauth", () => {
   });
 
   it("challenges an EXPIRED token even under a JWKS infra fault (exp decoded locally)", async () => {
-    // Fail-open could not VERIFY the token, but a token plainly past its own exp
-    // should still trigger a refresh (transport 401) rather than dead-end as an
-    // API tool error. Decoding exp without verifying the signature is safe here:
-    // returning true only triggers a refresh, never grants access.
+    // A token plainly past its own exp should trigger a refresh (transport 401)
+    // rather than dead-end as a tool error; an unverified decode never grants.
     const { privateKey } = await makeKeys();
+
     const timeout: JWTVerifyGetKey = () => {
       throw new joseErrors.JWKSTimeout();
     };
+
     const expired = await sign(privateKey, { expSecondsFromNow: -3600 });
     expect(await accessTokenNeedsReauth(expired, timeout)).toBe(true);
     // A still-valid token under the SAME fault stays fail-open (must not loop).
@@ -231,9 +249,8 @@ describe("accessTokenNeedsReauth", () => {
   });
 
   it("passes an opaque PAT through untouched (not a JWT)", async () => {
-    // PATs are validated by the API (DB lookup), never locally; they also have
-    // no refresh token, so there is nothing for a 401 to trigger here. The
-    // resolver is never reached (decodeProtectedHeader throws first).
+    // PATs are validated by the API, never locally, and have no refresh token,
+    // so the resolver is never reached (decodeProtectedHeader throws first).
     expect(await accessTokenNeedsReauth("lune_pat_abc123")).toBe(false);
     expect(await accessTokenNeedsReauth("not.a.jwt")).toBe(false);
     expect(await accessTokenNeedsReauth("fake")).toBe(false);
@@ -243,6 +260,7 @@ describe("accessTokenNeedsReauth", () => {
     const header = Buffer.from(
       JSON.stringify({ alg: "RS256", kid: "k1" }),
     ).toString("base64url");
+
     expect(await accessTokenNeedsReauth(`${header}.not-json.signature`)).toBe(
       true,
     );
@@ -251,11 +269,13 @@ describe("accessTokenNeedsReauth", () => {
   it("passes a non-RS256 JWT through (e.g. a Supabase ES256 session)", async () => {
     const { privateKey } = await generateKeyPair("ES256");
     const now = Math.floor(Date.now() / 1000);
+
     const es = await new SignJWT({})
       .setProtectedHeader({ alg: "ES256" })
       .setIssuedAt(now)
       .setExpirationTime(now + 3600)
       .sign(privateKey);
+
     // Not a Lune OAuth token: we do not adjudicate it (alg gate short-circuits
     // before the resolver), the API does.
     expect(await accessTokenNeedsReauth(es)).toBe(false);
@@ -269,6 +289,7 @@ describe("accessTokenNeedsReauth", () => {
     const token = await sign(privateKey, { expSecondsFromNow: 3600 });
     const prev = process.env.LUNE_AUTH_SERVER_URL;
     process.env.LUNE_AUTH_SERVER_URL = "not-a-valid-url";
+
     try {
       await expect(accessTokenNeedsReauth(token)).resolves.toBe(true);
     } finally {

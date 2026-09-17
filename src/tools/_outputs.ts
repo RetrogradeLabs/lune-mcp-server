@@ -117,11 +117,8 @@ const MatchedContextOut = z.object({
     ),
 });
 
-// Search hits default to an enriched shape with the abstract plus non-abstract
-// matched `contexts`; `detail: false` returns a concise shape (title, authors,
-// year, venue, citations, score, and a single grounding `snippet`). Every field
-// beyond the shared `PaperOut` core is optional so both modes validate against
-// one schema.
+// One schema covers enriched and detail:false hits; only the shared PaperOut
+// core is required, while contexts and concise projection fields stay optional.
 const SearchHitOut = PaperOut.extend({
   score: z
     .number()
@@ -185,11 +182,8 @@ export const SearchPapersOutput = z.object({
     ),
 });
 
-// Batch (multi-query) search reuses the per-hit `SearchHitOut` shape and adds
-// `matched_queries`: the provenance of which input variants surfaced this paper,
-// each with its 1-based rank in that variant's own ranked list. The envelope
-// reports how many variants ran, which ones failed, and `has_more` (always
-// false: fusion ranks a bounded merged shortlist with no stable cursor).
+// Batch hits reuse SearchHitOut with per-query ranks and run/failure counts;
+// has_more stays false because the fused shortlist has no stable cursor.
 const BatchSearchHitOut = SearchHitOut.extend({
   matched_queries: z
     .array(
@@ -243,9 +237,8 @@ export const SearchPapersManyOutput = z.object({
     ),
 });
 
-// Related neighbours are a search-style discovery result: each hit carries
-// metadata, abstract, one nearest non-abstract matched chunk when available,
-// and the embedding `similarity` to the seed paper.
+// Related hits add nearest non-abstract context and embedding similarity to
+// paper metadata.
 const RelatedPaperOut = PaperOut.extend({
   paper_id: z
     .string()
@@ -303,9 +296,8 @@ export const ListConferencesOutput = z.object({
 });
 
 export const GetConferencePapersOutput = z.object({
-  // Same PaperOut shape, but the projector omits the abstract on a browse page
-  // to keep venue pages light. `abstract` is already optional on PaperOut, so
-  // a page without it still validates.
+  // Browse pages reuse PaperOut but omit optional abstracts to keep results
+  // light.
   papers: z.array(PaperOut),
   total: z
     .number()
@@ -328,12 +320,8 @@ export const SearchGuidanceOutput = z.object({
 
 export const GetGuidanceDocOutput = GuidanceDocOut;
 
-// Structured extraction returns one compact row per successfully extracted
-// paper plus a per-paper failure list. `fields` is the caller-defined field
-// schema realised as a typed object, so the value bag is an open record (its
-// keys are the requested field names). Every input id is accounted for by
-// exactly one `rows` or `papers_failed` entry, so
-// `papers_processed === rows.length + papers_failed.length`.
+// Extraction fields are caller-defined open records; each input id lands in
+// rows or papers_failed, matching papers_processed.
 export const ExtractOutput = z.object({
   rows: z
     .array(
@@ -383,11 +371,8 @@ export const ExtractOutput = z.object({
     ),
 });
 
-// Claim verification returns one grounded verdict per input claim. The product
-// guarantee (enforced server-side in code, not trusted from the model) is that
-// `verbatim_quote` is copied from a retrieved passage (or null) and every
-// `supporting_paper_ids` entry is a retrieved candidate, so the agent can cite
-// the exact grounded text. `claims_processed` always equals verdicts.length.
+// The server checks quotes and paper ids against retrieved candidates;
+// claims_processed always matches verdicts.length.
 export const VerifyOutput = z.object({
   verdicts: z
     .array(
@@ -437,12 +422,8 @@ export const VerifyOutput = z.object({
     .describe("Total claims judged; equals verdicts.length."),
 });
 
-// gather_evidence returns the sufficiency state: per-requirement coverage with a
-// code-checked verbatim `supporting_quote`, the `evidence_spans` the judge saw,
-// `next_queries` for gaps, a `stop_reason`, optional per-sentence `draft_support`,
-// the `queries_failed` provenance, and metering (`queries_run` actual vs
-// `units_charged` ceiling). Null-valued API fields use `.nullable()` so the
-// pass-through structuredContent validates.
+// Preserve gap, failure, stop, draft, and metering state; nullable API fields
+// must stay nullable for structuredContent validation.
 const EvidenceSpanOut = z.object({
   span_id: z.string(),
   source: z.literal("papers"),
@@ -498,11 +479,8 @@ export const GatherEvidenceOutput = z.object({
     .describe(
       "Suggested follow-up search angles for partial / missing requirements.",
     ),
-  // Must stay in sync with GatherEvidenceResponse.stop_reason in
-  // apps/api/src/api/evidence/evidence_schemas.py. `time_budget` was missing
-  // here while evidence_service.py:512 emits it whenever _WALL_CLOCK_BUDGET_S
-  // (75s) trips, so a normal multi-iteration partial result failed its own
-  // declared outputSchema in clients that validate structuredContent.
+  // Keep this enum aligned with the API, including time_budget partial results
+  // from the 75-second wall-clock guard.
   stop_reason: z.enum([
     "sufficient",
     "max_iterations",
@@ -541,4 +519,78 @@ export const GatherEvidenceOutput = z.object({
     .describe(
       "Billed ceiling (max_total_queries, default len(queries), cap 25).",
     ),
+});
+
+/**
+ * One design reference. The analysis fields are the point of the tool: they are
+ * what an agent can act on without spending context on the image.
+ */
+const FigureOut = z.object({
+  figure_id: z.string(),
+  paper_id: z
+    .string()
+    .describe(
+      "Lune paper UUID. A fetch handle for get_paper_fulltext or " +
+        "get_paper_figures; do NOT show it to the user.",
+    ),
+  paper_title: z.string(),
+  paper_authors: z.array(z.string()),
+  year: z.number().int().nullable().optional(),
+  venue: z.string().nullable().optional(),
+  doi: z.string().nullable().optional(),
+  label: z.string().describe('The figure number as printed, e.g. "3".'),
+  caption: z.string(),
+  page_number: z.number().int().nullable().optional(),
+  image_url: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      "Public CDN URL of the cropped figure. Safe to show the user, and the " +
+        "citation to put beside it is the paper's title, authors and venue.",
+    ),
+  width_px: z.number().int().nullable().optional(),
+  height_px: z.number().int().nullable().optional(),
+  role: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("The rhetorical job it does."),
+  communicates: z
+    .string()
+    .describe("One sentence on what this figure does for its paper."),
+  composition: z
+    .string()
+    .describe("Panel arrangement and reading order. Borrow this."),
+  visual_devices: z
+    .array(z.string())
+    .describe("Reusable techniques the figure uses, each stated concretely."),
+  text_load: z.string().nullable().optional(),
+  color_strategy: z.string().describe("What each hue encodes, or monochrome."),
+  reuse_notes: z
+    .string()
+    .describe("How to adapt this composition to a different paper."),
+  why_it_works: z.string().describe("The decision doing the most work."),
+  score: z.number(),
+});
+
+export const SearchFiguresOutput = z.object({
+  query: z.string(),
+  total: z.number().int(),
+  results: z.array(FigureOut),
+});
+
+export const GetPaperFiguresOutput = z.object({
+  paper_id: z.string(),
+  total: z.number().int(),
+  figures: z.array(
+    FigureOut.extend({
+      is_design_reference: z
+        .boolean()
+        .describe(
+          "True when this figure is in the reference corpus. False means it was " +
+            "extracted but judged not worth learning a design from.",
+        ),
+    }),
+  ),
 });

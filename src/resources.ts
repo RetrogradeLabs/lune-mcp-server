@@ -1,12 +1,10 @@
-import {
-  ResourceNotFoundError,
-  type Server,
-} from "@modelcontextprotocol/server";
+import { ResourceNotFoundError } from "@modelcontextprotocol/server";
 import {
   analyticsEnabled,
   attributeFromEnvelope,
   captureMcp,
   type McpAnalyticsContext,
+  type McpServerLike,
 } from "./analytics.js";
 
 /**
@@ -28,20 +26,23 @@ import {
  * while the hint is still public.
  */
 export function registerResources(
-  server: Server,
+  server: McpServerLike,
   analyticsContext?: () => McpAnalyticsContext,
 ): void {
   // No upstream API call here either, so the request envelope is the only
   // source of client identity for the `$mcp_resources_list` event.
   server.setRequestHandler("resources/list", async (_req, ctx) => {
     attributeFromEnvelope(server, ctx);
+
     if (analyticsEnabled()) {
       captureMcp("$mcp_resources_list", server, analyticsContext?.(), {});
     }
+
     return { resources: [] };
   });
   server.setRequestHandler("resources/templates/list", async (_req, ctx) => {
     attributeFromEnvelope(server, ctx);
+
     return { resourceTemplates: [] };
   });
   server.setRequestHandler("resources/read", async (req, ctx) => {

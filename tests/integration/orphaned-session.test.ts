@@ -15,76 +15,24 @@
  * per-session state to have lost.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AddressInfo } from "node:net";
 import type { Server as HttpServer } from "node:http";
 import type { Express } from "express";
-import http from "node:http";
 import { buildHttpApp } from "../../src/transport/streamableHttp.js";
+import { jsonRpcObject, rawRequest } from "../support/http.js";
+import { jsonObject, jsonObjects } from "../support/json.js";
+import { portOf } from "../support/net.js";
 
-interface RawResponse {
-  status: number | undefined;
-  headers: http.IncomingHttpHeaders;
-  body: string;
-}
+function rpcTools(raw: string) {
+  const result = jsonObject(jsonRpcObject(raw).result, "JSON-RPC result");
 
-function rawRequest(
-  port: number,
-  method: string,
-  path: string,
-  headers: Record<string, string>,
-  body?: unknown,
-): Promise<RawResponse> {
-  return new Promise((resolve, reject) => {
-    const data = body === undefined ? undefined : JSON.stringify(body);
-    const req = http.request(
-      {
-        host: "127.0.0.1",
-        port,
-        path,
-        method,
-        headers: {
-          ...(data === undefined
-            ? {}
-            : {
-                "content-type": "application/json",
-                "content-length": Buffer.byteLength(data),
-              }),
-          ...headers,
-        },
-      },
-      (res) => {
-        let chunks = "";
-        res.on("data", (c) => (chunks += c));
-        res.on("end", () =>
-          resolve({
-            status: res.statusCode,
-            headers: res.headers,
-            body: chunks,
-          }),
-        );
-      },
-    );
-    req.on("error", reject);
-    if (data !== undefined) req.write(data);
-    req.end();
-  });
-}
-
-// Responses arrive as a single SSE frame (`event: message\ndata: {...}`) when
-// the transport answers, or as plain JSON from the guard branches.
-function parseJsonRpc(raw: string): {
-  result?: { tools?: Array<{ name: string }> };
-  error?: { code?: number; message?: string };
-} {
-  const dataLine = raw.split(/\r?\n/).find((line) => line.startsWith("data:"));
-  const payload = dataLine ? dataLine.slice("data:".length).trim() : raw.trim();
-  return JSON.parse(payload);
+  return jsonObjects(result.tools, "tool list");
 }
 
 const ACCEPT = "application/json, text/event-stream";
+
 const AUTH = "Bearer lune_fake_orphan_token";
 
-function initBody(): unknown {
+function initBody() {
   return {
     jsonrpc: "2.0",
     id: 1,
@@ -97,7 +45,7 @@ function initBody(): unknown {
   };
 }
 
-function toolsListBody(id: number): unknown {
+function toolsListBody(id: number) {
   return { jsonrpc: "2.0", id, method: "tools/list", params: {} };
 }
 
@@ -106,10 +54,12 @@ async function listen(
 ): Promise<{ server: HttpServer; port: number }> {
   const server = app.listen(0);
   await new Promise<void>((resolve) => server.once("listening", resolve));
-  return { server, port: (server.address() as AddressInfo).port };
+
+  return { server, port: portOf(server) };
 }
 
 let server: HttpServer;
+
 let port: number;
 
 beforeAll(async () => {
@@ -123,6 +73,7 @@ afterAll(async () => {
 describe("a stale session id is served, never refused", () => {
   it("serves tools/list on a never-seen session id and is repeatable", async () => {
     const sid = "id-minted-before-the-deploy";
+
     for (const id of [1, 2]) {
       const res = await rawRequest(
         port,
@@ -131,10 +82,10 @@ describe("a stale session id is served, never refused", () => {
         { accept: ACCEPT, authorization: AUTH, "mcp-session-id": sid },
         toolsListBody(id),
       );
+
       expect(res.status).toBe(200);
       expect(res.body).not.toContain("Session not found");
-      const tools = parseJsonRpc(res.body).result?.tools ?? [];
-      expect(tools.length).toBeGreaterThan(0);
+      expect(rpcTools(res.body).length).toBeGreaterThan(0);
       // Stateless handling mints nothing: the client keeps its own id.
       expect(res.headers["mcp-session-id"]).toBeUndefined();
     }
@@ -142,6 +93,7 @@ describe("a stale session id is served, never refused", () => {
 
   it("serves the same id against a fresh process (the deploy / restart case)", async () => {
     const fresh = await listen(buildHttpApp());
+
     try {
       const res = await rawRequest(
         fresh.port,
@@ -154,10 +106,9 @@ describe("a stale session id is served, never refused", () => {
         },
         toolsListBody(3),
       );
+
       expect(res.status).toBe(200);
-      expect(
-        (parseJsonRpc(res.body).result?.tools ?? []).length,
-      ).toBeGreaterThan(0);
+      expect(rpcTools(res.body).length).toBeGreaterThan(0);
     } finally {
       await new Promise<void>((resolve) => fresh.server.close(() => resolve()));
     }
@@ -175,6 +126,7 @@ describe("a stale session id is served, never refused", () => {
       },
       initBody(),
     );
+
     expect(res.status).toBe(200);
     // The legacy handshake still answers; it just no longer mints an id.
     expect(res.body).toContain("lune-research");
@@ -191,19 +143,17 @@ describe("a stale session id is served, never refused", () => {
       { accept: ACCEPT, authorization: AUTH },
       toolsListBody(4),
     );
+
     expect(res.status).toBe(200);
-    expect((parseJsonRpc(res.body).result?.tools ?? []).length).toBeGreaterThan(
-      0,
-    );
+    expect(rpcTools(res.body).length).toBeGreaterThan(0);
   });
 
   it("round-trips a stale-id tools/call through the per-request client", async () => {
-    // The prod failure was tools/call, not tools/list. Point the upstream at a
-    // guaranteed-closed local port: the tool's fetch fails fast (connection
-    // refused), but only after the request has flowed through the per-request
-    // server and the `makeClient(token)` factory.
+    // The prod failure was tools/call, not tools/list. The closed local port
+    // fails the fetch fast, but only after `makeClient(token)` has run.
     const savedBaseUrl = process.env.LUNE_API_BASE_URL;
     process.env.LUNE_API_BASE_URL = "http://127.0.0.1:1";
+
     try {
       const res = await rawRequest(
         port,
@@ -224,11 +174,9 @@ describe("a stale session id is served, never refused", () => {
           },
         },
       );
+
       expect(res.status).toBe(200);
-      const body = parseJsonRpc(res.body) as {
-        result?: unknown;
-        error?: unknown;
-      };
+      const body = jsonRpcObject(res.body);
       // Either an error-flagged tool result or a JSON-RPC error is fine; the
       // point is the call was served instead of refused.
       expect(body.result ?? body.error).toBeDefined();
@@ -250,6 +198,7 @@ describe("a stale session id is served, never refused", () => {
       },
       { jsonrpc: "2.0", method: "notifications/initialized" },
     );
+
     expect(res.status).toBe(202);
   });
 
@@ -261,20 +210,20 @@ describe("a stale session id is served, never refused", () => {
       { accept: ACCEPT, "mcp-session-id": "stale-no-auth" },
       toolsListBody(5),
     );
+
     expect(res.status).toBe(401);
     expect(res.headers["www-authenticate"]).toMatch(/^Bearer\s/);
   });
 
   it("answers GET with 405, never 404", async () => {
     // 405 = "no standalone SSE stream offered" (spec-legal at any time); 404
-    // would tell the client its session was terminated, which is exactly the
-    // signal the managed-agents client cannot recover from. We emit no
-    // server-initiated notifications, so there is nothing to stream anyway.
+    // would say the session was terminated, which the client cannot recover.
     const res = await rawRequest(port, "GET", "/", {
       accept: "text/event-stream",
       authorization: AUTH,
       "mcp-session-id": "id-minted-before-the-deploy",
     });
+
     expect(res.status).toBe(405);
   });
 });

@@ -13,40 +13,42 @@
  *    / `get_workspace_document` tool is advertised in the public list.
  */
 import { beforeEach, describe, expect, it } from "vitest";
-import type { KyInstance } from "ky";
 import { callPaperTool } from "../../src/tools/papers.js";
 import { listToolsResponse } from "../../src/tools/index.js";
 import { SearchPapersOutput } from "../../src/tools/_outputs.js";
 import { TOOL_RESPONSE_CACHE } from "../../src/cache.js";
+import type { JsonValue } from "../../src/json.js";
+import {
+  callTo,
+  createFakeKy,
+  jsonBodyOf,
+  jsonReply,
+} from "../support/fake-ky.js";
+import {
+  jsonNumber,
+  jsonObject,
+  jsonObjects,
+  jsonStrings,
+  parseJsonObject,
+} from "../support/json.js";
 
 beforeEach(async () => {
   await TOOL_RESPONSE_CACHE.clear();
 });
 
-/** Records every verb call and returns a thenable `{ json }` matcher. */
-function recordingKy(response: unknown = { results: [] }): {
-  ky: KyInstance;
-  calls: Array<{ method: string; url: string; opts?: { json?: unknown } }>;
-} {
-  const calls: Array<{
-    method: string;
-    url: string;
-    opts?: { json?: unknown };
-  }> = [];
-  const make =
-    (method: "get" | "post" | "delete") => (url: string, opts?: unknown) => {
-      calls.push({ method, url, opts: opts as { json?: unknown } });
-      return { json: async () => response } as unknown as Promise<unknown>;
-    };
-  return {
-    ky: {
-      get: make("get"),
-      post: make("post"),
-      delete: make("delete"),
-      put: make("get"),
-    } as unknown as KyInstance,
-    calls,
-  };
+function recordingKy(response: JsonValue = { results: [] }) {
+  return createFakeKy(() => jsonReply(response));
+}
+
+function contentText(
+  result: Awaited<ReturnType<typeof callPaperTool>>,
+): string {
+  const content = result.content.at(0);
+
+  if (content?.type !== "text")
+    throw new Error("tool returned no text content");
+
+  return content.text;
 }
 
 const WS_SPANS = {
@@ -84,9 +86,8 @@ describe("search_papers source=workspace routing", () => {
       // A model that tries to smuggle a workspace id must not get it on the wire.
       workspace_id: "someone-elses-workspace",
     });
-    const post = calls.find((c) => c.method === "post");
-    expect(post?.url).toBe("workspaces/search");
-    const body = (post?.opts?.json ?? {}) as Record<string, unknown>;
+    const post = callTo(calls, "workspaces/search", "post");
+    const body = jsonBodyOf(post);
     expect(body).toMatchObject({ query: "ablation", limit: 7 });
     expect("workspace_id" in body).toBe(false);
     // Never touches the corpus search endpoint.
@@ -95,25 +96,26 @@ describe("search_papers source=workspace routing", () => {
 
   it("groups flat spans into corpus-shaped doc hits (contexts per document)", async () => {
     const { ky } = recordingKy(WS_SPANS);
+
     const res = await callPaperTool(ky, "search_papers", {
       query: "x",
       source: "workspace",
     });
-    const payload = JSON.parse(res.content[0]!.text as string);
-    expect(payload.results).toHaveLength(1);
-    const hit = payload.results[0];
+
+    const payload = parseJsonObject(contentText(res));
+    const hits = jsonObjects(payload.results, "results");
+    expect(hits).toHaveLength(1);
+    const hit = jsonObject(hits.at(0), "first result");
     expect(hit.paper_id).toBe("doc-1");
     expect(hit.title).toBe("Design Doc");
-    expect(hit.authors).toEqual([]);
+    expect(jsonStrings(hit.authors, "authors")).toEqual([]);
     // Both spans of the document become contexts; the hit keeps the strongest
     // rerank score, which also drives best_score.
-    expect(hit.contexts).toHaveLength(2);
-    expect(hit.rerank_score).toBe(0.91);
-    expect(payload.best_score).toBe(0.91);
-    // Regression: the workspace hit MUST validate against the advertised
-    // outputSchema. PaperOut's year/conference are `.optional()` (absent or a
-    // value, NEVER null), so a workspace doc (no bibliographic metadata) must
-    // OMIT them; emitting null made a schema-aware client drop the result.
+    expect(jsonObjects(hit.contexts, "contexts")).toHaveLength(2);
+    expect(jsonNumber(hit.rerank_score, "rerank_score")).toBe(0.91);
+    expect(jsonNumber(payload.best_score, "best_score")).toBe(0.91);
+    // Regression: PaperOut's year/conference are `.optional()` (absent or a
+    // value, NEVER null), so a workspace doc must OMIT them, not emit null.
     expect(hit.year).toBeUndefined();
     expect(hit.conference).toBeUndefined();
     expect(SearchPapersOutput.safeParse(res.structuredContent).success).toBe(
@@ -135,17 +137,18 @@ describe("get_paper_fulltext source=workspace routing", () => {
       body: "# Design Doc\n\nfull text",
       title: "Design Doc",
     });
+
     const res = await callPaperTool(ky, "get_paper_fulltext", {
       paper_id: "doc-1",
       source: "workspace",
     });
-    const post = calls.find((c) => c.method === "post");
-    expect(post?.url).toBe("workspaces/document");
-    expect(post?.opts?.json).toMatchObject({
+
+    const post = callTo(calls, "workspaces/document", "post");
+    expect(jsonBodyOf(post)).toMatchObject({
       document_id: "doc-1",
       format: "markdown",
     });
-    expect(res.content[0]!.text).toContain("full text");
+    expect(contentText(res)).toContain("full text");
   });
 
   it("defaults to the corpus fulltext endpoint when source is omitted", async () => {
@@ -166,10 +169,8 @@ describe("analytical tools forward source in the request body", () => {
       claims: ["c"],
       source: "workspace",
     });
-    const post = calls.find((c) => c.url === "claims/verify");
-    expect(
-      (post?.opts?.json as Record<string, unknown> | undefined)?.source,
-    ).toBe("workspace");
+    const post = callTo(calls, "claims/verify");
+    expect(jsonBodyOf(post).source).toBe("workspace");
   });
 
   it("extract_from_papers sends source", async () => {
@@ -178,16 +179,15 @@ describe("analytical tools forward source in the request body", () => {
       papers_processed: 0,
       papers_failed: [],
     });
+
     await callPaperTool(ky, "extract_from_papers", {
       paper_ids: ["doc-1"],
       fields: [{ name: "x", type: "string" }],
       instruction: "pull x",
       source: "workspace",
     });
-    const post = calls.find((c) => c.url === "papers/extract");
-    expect(
-      (post?.opts?.json as Record<string, unknown> | undefined)?.source,
-    ).toBe("workspace");
+    const post = callTo(calls, "papers/extract");
+    expect(jsonBodyOf(post).source).toBe("workspace");
   });
 
   it("gather_evidence sends source", async () => {
@@ -201,15 +201,14 @@ describe("analytical tools forward source in the request body", () => {
       iterations_run: 1,
       queries_run: 1,
     });
+
     await callPaperTool(ky, "gather_evidence", {
       task: "t",
       queries: ["q"],
       source: "workspace",
     });
-    const post = calls.find((c) => c.url === "evidence/gather");
-    expect(
-      (post?.opts?.json as Record<string, unknown> | undefined)?.source,
-    ).toBe("workspace");
+    const post = callTo(calls, "evidence/gather");
+    expect(jsonBodyOf(post).source).toBe("workspace");
   });
 });
 
@@ -222,6 +221,7 @@ describe("no dedicated workspace tools are advertised", () => {
 
   it("the 5 unified tools expose a source enum (corpus|workspace)", () => {
     const tools = listToolsResponse().tools;
+
     for (const name of [
       "search_papers",
       "get_paper_fulltext",
@@ -229,13 +229,16 @@ describe("no dedicated workspace tools are advertised", () => {
       "verify_claims",
       "gather_evidence",
     ]) {
-      const tool = tools.find((t) => t.name === name)!;
-      const schema = tool.inputSchema as {
-        properties?: Record<string, { enum?: string[] }>;
-      };
-      const source = schema.properties?.source;
-      expect(source, `${name} should have a source field`).toBeDefined();
-      expect(source?.enum).toEqual(["corpus", "workspace"]);
+      const tool = tools.find((candidate) => candidate.name === name);
+
+      if (!tool) throw new Error(`tool list is missing ${name}`);
+      const schema = parseJsonObject(JSON.stringify(tool.inputSchema));
+      const properties = jsonObject(schema.properties, `${name}.properties`);
+      const source = jsonObject(properties.source, `${name}.source`);
+      expect(jsonStrings(source.enum, `${name}.source.enum`)).toEqual([
+        "corpus",
+        "workspace",
+      ]);
     }
   });
 });

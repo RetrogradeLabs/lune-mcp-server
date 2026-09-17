@@ -5,7 +5,7 @@
  * refresh its access token and retry. Before this gate the expired token was
  * forwarded to the API, whose 401 came back as a tool-execution error the model
  * surfaced as "your authorization expired, please reconnect" (see
- * .claude/rules/mcp.md and src/auth/verify.ts).
+ * the MCP server design notes and src/auth/verify.ts).
  *
  * Drives the real `buildHttpApp()` against a local JWKS server that stands in for
  * api.luneresearch.com's `/.well-known/jwks.json`. `src/auth/verify.ts` reads
@@ -15,14 +15,22 @@
  * at mcp.luneresearch.com, which we assert).
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import type { AddressInfo } from "node:net";
 import type { Server as HttpServer } from "node:http";
 import http from "node:http";
 import { SignJWT, exportJWK, generateKeyPair, type CryptoKey } from "jose";
 import { buildHttpApp } from "../../src/transport/streamableHttp.js";
 import { inspectAccessToken } from "../../src/auth/verify.js";
+import type { JsonValue } from "../../src/json.js";
+import {
+  fetchJsonObject,
+  jsonNumber,
+  jsonObject,
+  jsonString,
+} from "../support/json.js";
+import { portOf } from "../support/net.js";
 
 const KID = "reauth-test-1";
+
 // These requests hit the legacy `/mcp` alias, and the challenge is path-aware
 // (RFC 9728 §3.3), so it points at that alias's metadata document.
 const METADATA_URL =
@@ -44,7 +52,7 @@ function initBody(id: number) {
 async function post(
   port: number,
   headers: Record<string, string>,
-  body: unknown,
+  body: JsonValue,
   path = "/mcp",
 ) {
   return fetch(`http://127.0.0.1:${port}${path}`, {
@@ -58,6 +66,14 @@ async function post(
   });
 }
 
+function requiredHeader(response: Response, name: string): string {
+  const value = response.headers.get(name);
+
+  if (value === null) throw new Error(`response is missing ${name}`);
+
+  return value;
+}
+
 describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", () => {
   let app: HttpServer;
   let jwks: HttpServer;
@@ -69,6 +85,7 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
   beforeAll(async () => {
     const keys = await generateKeyPair("RS256");
     privateKey = keys.privateKey;
+
     const jwk = {
       ...(await exportJWK(keys.publicKey)),
       kid: KID,
@@ -83,19 +100,21 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
         res.setHeader("content-type", "application/json");
         res.setHeader("Connection", "close");
         res.end(JSON.stringify({ keys: [jwk] }));
+
         return;
       }
+
       res.statusCode = 404;
       res.end();
     });
     jwks.listen(0);
     await new Promise<void>((resolve) => jwks.once("listening", resolve));
-    issuer = `http://127.0.0.1:${(jwks.address() as AddressInfo).port}`;
+    issuer = `http://127.0.0.1:${portOf(jwks)}`;
     process.env.LUNE_AUTH_SERVER_URL = issuer;
 
     app = buildHttpApp().listen(0);
     await new Promise<void>((resolve) => app.once("listening", resolve));
-    port = (app.address() as AddressInfo).port;
+    port = portOf(app);
   });
 
   afterAll(async () => {
@@ -111,6 +130,7 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
     audience = "https://mcp.luneresearch.com/mcp",
   ) {
     const now = Math.floor(Date.now() / 1000);
+
     return new SignJWT({ org_id: "org-1", scopes: ["papers:read"] })
       .setProtectedHeader({ alg: "RS256", kid: KID })
       .setIssuer(issuer)
@@ -123,6 +143,7 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
 
   it("returns 401 with an invalid_token challenge for an EXPIRED access token", async () => {
     const expired = await mint(-3600);
+
     const r = await post(
       port,
       { authorization: `Bearer ${expired}` },
@@ -131,29 +152,27 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
 
     expect(r.status).toBe(401);
 
-    // The MCP client refreshes-then-retries off this exact header shape: an
-    // explicit `error="invalid_token"` (RFC 6750 §3.1) plus the resource_metadata
-    // pointer (RFC 9728). Without the error code a client may treat it as a fresh
-    // consent rather than a refresh.
-    const wa = r.headers.get("www-authenticate")!;
+    // The client refreshes-then-retries off this exact shape: `invalid_token`
+    // (RFC 6750 §3.1) plus the resource_metadata pointer (RFC 9728).
+    const wa = requiredHeader(r, "www-authenticate");
     expect(wa).toContain('error="invalid_token"');
     expect(wa).toContain(`resource_metadata="${METADATA_URL}"`);
 
-    const body = (await r.json()) as {
-      id: number;
-      error: {
-        code: number;
-        data: { _meta: { "mcp/www_authenticate": string } };
-      };
-    };
-    expect(body.id).toBe(1);
-    expect(body.error.code).toBe(-32001);
+    const body = await fetchJsonObject(r);
+    const error = jsonObject(body.error, "error");
+    const data = jsonObject(error.data, "error.data");
+    const meta = jsonObject(data._meta, "error.data._meta");
+    expect(jsonNumber(body.id, "id")).toBe(1);
+    expect(jsonNumber(error.code, "error.code")).toBe(-32001);
     // Header and body-echoed challenge are the identical string.
-    expect(body.error.data._meta["mcp/www_authenticate"]).toBe(wa);
+    expect(
+      jsonString(meta["mcp/www_authenticate"], "mcp/www_authenticate"),
+    ).toBe(wa);
   });
 
   it("lets a VALID access token through the gate (reaches the transport)", async () => {
     const valid = await mint(3600);
+
     const r = await post(
       port,
       { authorization: `Bearer ${valid}` },
@@ -169,11 +188,13 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
   it("accepts every equivalent MCP audience on every mounted endpoint alias", async () => {
     const aliases = ["", "/mcp", "/v1/mcp"];
     let id = 20;
+
     for (const audienceAlias of aliases) {
       const token = await mint(
         3600,
         `https://mcp.luneresearch.com${audienceAlias}`,
       );
+
       for (const endpointAlias of aliases) {
         const r = await post(
           port,
@@ -181,6 +202,7 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
           initBody(id++),
           endpointAlias || "/",
         );
+
         expect(
           r.status,
           `${audienceAlias || "/"} -> ${endpointAlias || "/"}`,
@@ -191,6 +213,7 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
 
   it("returns a transport 403 naming the one missing tool scope", async () => {
     const papersOnly = await mint(3600);
+
     const r = await post(
       port,
       { authorization: `Bearer ${papersOnly}` },
@@ -204,8 +227,9 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
         },
       },
     );
+
     expect(r.status).toBe(403);
-    const challenge = r.headers.get("www-authenticate")!;
+    const challenge = requiredHeader(r, "www-authenticate");
     expect(challenge).toContain('error="insufficient_scope"');
     expect(challenge).toContain('scope="guidance:read"');
     expect(challenge).not.toContain("papers:read");
@@ -213,6 +237,7 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
 
   it("applies scope step-up to tools/call inside a JSON-RPC batch", async () => {
     const papersOnly = await mint(3600);
+
     const r = await post(port, { authorization: `Bearer ${papersOnly}` }, [
       {
         jsonrpc: "2.0",
@@ -224,6 +249,7 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
         },
       },
     ]);
+
     expect(r.status).toBe(403);
     expect(r.headers.get("www-authenticate")).toContain(
       'scope="guidance:read"',
@@ -236,6 +262,7 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
       { authorization: "Bearer lune_pat_fake123" },
       initBody(3),
     );
+
     // PATs are not JWTs: the gate must not 401 them. (Their validity is the API's
     // call; an initialize needs no upstream call, so this succeeds locally.)
     expect(r.status).not.toBe(401);
@@ -244,7 +271,7 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
   it("still answers a NO-token request with the bare discovery challenge (no regression)", async () => {
     const r = await post(port, {}, initBody(4));
     expect(r.status).toBe(401);
-    const wa = r.headers.get("www-authenticate")!;
+    const wa = requiredHeader(r, "www-authenticate");
     // Anonymous discovery: bare challenge, NO error code (RFC 6750 §3).
     expect(wa).toBe(
       `Bearer resource_metadata="${METADATA_URL}", ` +
@@ -273,21 +300,24 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
 describe("JWKS cooldown after a signing-key rotation", () => {
   let jwks: HttpServer;
   let issuer: string;
-  let served: Array<Record<string, unknown>> = [];
+  let served: Array<Awaited<ReturnType<typeof exportJWK>>> = [];
 
   async function keyFor(kid: string) {
     const { publicKey, privateKey } = await generateKeyPair("RS256");
+
     const jwk = {
       ...(await exportJWK(publicKey)),
       kid,
       alg: "RS256",
       use: "sig",
     };
+
     return { jwk, privateKey };
   }
 
   function mintWith(privateKey: CryptoKey, kid: string, subject: string) {
     const now = Math.floor(Date.now() / 1000);
+
     return new SignJWT({ org_id: "org-1", scopes: ["papers:read"] })
       .setProtectedHeader({ alg: "RS256", kid })
       .setIssuer(issuer)
@@ -304,14 +334,16 @@ describe("JWKS cooldown after a signing-key rotation", () => {
         res.setHeader("content-type", "application/json");
         res.setHeader("Connection", "close");
         res.end(JSON.stringify({ keys: served }));
+
         return;
       }
+
       res.statusCode = 404;
       res.end();
     });
     jwks.listen(0);
     await new Promise<void>((resolve) => jwks.once("listening", resolve));
-    issuer = `http://127.0.0.1:${(jwks.address() as AddressInfo).port}`;
+    issuer = `http://127.0.0.1:${portOf(jwks)}`;
     vi.stubEnv("LUNE_AUTH_SERVER_URL", issuer);
   });
 
@@ -334,14 +366,14 @@ describe("JWKS cooldown after a signing-key rotation", () => {
       "rotation-old",
       "user-old",
     );
+
     await expect(inspectAccessToken(before)).resolves.toMatchObject({
       needsReauth: false,
       verifiedIdentity: { distinctId: "user-old" },
     });
 
-    // Rotate. The AS keeps the previous key live (`oauth_keys.py:all_pubkeys`
-    // yields current + previous), so tokens minted BEFORE the flip keep working
-    // and only freshly minted ones can land on an unknown kid.
+    // Rotate. The AS keeps the previous key live (`oauth_keys.py:all_pubkeys`),
+    // so only freshly minted tokens can land on an unknown kid.
     served = [newKey.jwk, oldKey.jwk];
     const warmedAt = Date.now();
     vi.useFakeTimers({ toFake: ["Date"] });

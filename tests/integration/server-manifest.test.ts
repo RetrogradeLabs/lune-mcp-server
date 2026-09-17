@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AddressInfo } from "node:net";
 import type { Server as HttpServer } from "node:http";
 
 import serverManifest from "../../server.json";
 import packageManifest from "../../package.json";
 import { buildHttpApp } from "../../src/transport/streamableHttp.js";
+import { portOf } from "../support/net.js";
 
 describe("MCP server manifest discovery", () => {
   let server: HttpServer;
@@ -13,7 +13,7 @@ describe("MCP server manifest discovery", () => {
   beforeAll(async () => {
     server = buildHttpApp().listen(0);
     await new Promise<void>((resolve) => server.once("listening", resolve));
-    port = (server.address() as AddressInfo).port;
+    port = portOf(server);
   });
 
   afterAll(async () => {
@@ -63,9 +63,11 @@ describe("MCP server manifest discovery", () => {
         }),
       ]),
     );
+
     const authorization = serverManifest.remotes[0]?.headers?.find(
       (header) => header.name === "Authorization",
     );
+
     expect(authorization?.description).toContain("OAuth-capable MCP client");
     expect(authorization?.description).not.toContain(
       "OAuth access token from https://luneresearch.com/dashboard/settings/credentials",

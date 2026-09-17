@@ -9,6 +9,67 @@
  * can keep depending on the full schema.
  */
 
+import {
+  isJsonBoolean,
+  isJsonNumber,
+  isJsonString,
+  type JsonInput,
+} from "../json.js";
+
+/**
+ * View an unvalidated API payload as the shape this module expects of it.
+ *
+ * Nothing below trusts a field's runtime type: every read goes through a guard or
+ * a default (`?? 0`, `|| undefined`, the `isJson*` predicates, the `has*`
+ * predicates). That is deliberate, and it is the contract these projectors owe
+ * the agent: an imperfect upstream response must still yield a usable result,
+ * never a failed tool call. So this view can widen the payload without being able
+ * to introduce a throw, and a schema parse here would trade that totality away.
+ */
+function optimisticView<T>(payload: JsonInput): T {
+  // SAFETY: downstream field guards make this optimistic cast degrade to
+  // defaults.
+  return (payload ?? {}) as T;
+}
+
+/** `conference` arrives either as a short name or as a nested object. */
+function isConferenceName(
+  value: string | RawConference | null | undefined,
+): value is string {
+  return typeof value === "string";
+}
+
+/** A row whose `text` arrived as a usable string. */
+function hasText<T extends { text?: string | null }>(
+  row: T | null | undefined,
+): row is T & { text: string } {
+  return (
+    row !== null &&
+    row !== undefined &&
+    isJsonString(row.text) &&
+    row.text.length > 0
+  );
+}
+
+/** Provenance that carries both halves. `rank` is 1-based, so a missing one has
+ *  no meaningful default and the row is dropped rather than fabricated. */
+function hasQueryAndRank<
+  T extends { query?: string | null; rank?: number | null },
+>(row: T | null | undefined): row is T & { query: string; rank: number } {
+  return (
+    row !== null &&
+    row !== undefined &&
+    isJsonString(row.query) &&
+    isJsonNumber(row.rank)
+  );
+}
+
+function hasQuery<T extends { query?: string | null }>(
+  row: T | null | undefined,
+): row is T & { query: string } {
+  return row !== null && row !== undefined && isJsonString(row.query);
+}
+
 interface RawConference {
   id?: string;
   short_name?: string;
@@ -31,12 +92,13 @@ export function slimConference(c: RawConference) {
   };
 }
 
-export function slimConferenceList(list: unknown) {
+export function slimConferenceList(list: JsonInput) {
   const arr = Array.isArray(list) ? list : [];
+
   return {
     conferences: arr
       .filter(Boolean)
-      .map((c) => slimConference(c as RawConference)),
+      .map((c) => slimConference(optimisticView<RawConference>(c))),
   };
 }
 
@@ -77,10 +139,9 @@ export function slimPaper(p: RawPaper) {
     pdf_cdn_url: p.pdf_cdn_url ?? undefined,
     url: p.url ?? undefined,
     citation_count: p.citation_count ?? 0,
-    conference:
-      typeof p.conference === "string"
-        ? p.conference
-        : p.conference?.short_name,
+    conference: isConferenceName(p.conference)
+      ? p.conference
+      : p.conference?.short_name,
   };
 }
 
@@ -97,20 +158,19 @@ function isAbstractSection(section: string | null | undefined): boolean {
  */
 function slimContexts(chunks: RawMatchedChunk[] | null | undefined) {
   if (!Array.isArray(chunks)) return [];
-  return chunks
-    .filter(
-      (c) =>
-        c &&
-        typeof c.text === "string" &&
-        c.text.length > 0 &&
-        !isAbstractSection(c.section_name),
-    )
-    .map((c) => ({
-      section: c.section_name || undefined,
-      text: c.text as string,
-      score: typeof c.score === "number" ? c.score : undefined,
-      chunk_id: c.chunk_id || undefined,
-    }));
+
+  return chunks.flatMap((chunk) =>
+    hasText(chunk) && !isAbstractSection(chunk.section_name)
+      ? [
+          {
+            section: chunk.section_name || undefined,
+            text: chunk.text,
+            score: isJsonNumber(chunk.score) ? chunk.score : undefined,
+            chunk_id: chunk.chunk_id || undefined,
+          },
+        ]
+      : [],
+  );
 }
 
 interface RawSearchResponse {
@@ -118,21 +178,24 @@ interface RawSearchResponse {
   has_more?: boolean;
 }
 
-// Abstention floor on Cohere Rerank v3.5 `rerank_score` (calibrated 0..1). Applied
-// to `rerank_score` ONLY, never the boosted `score` (not a calibrated relevance);
-// when no hit was reranked there is no calibrated basis to abstain.
+// Abstain only on calibrated rerank_score, never boosted score; without
+// reranking there is no calibrated basis for the floor.
 const LOW_CONFIDENCE_THRESHOLD = 0.3;
 
 // Build the search-envelope abstention tail: best of the numeric `rerank_score`s
 // (null when none reranked), `low_confidence` when it falls below the floor.
-function withAbstention<T extends { rerank_score?: number }>(
+function withAbstention<T extends { rerank_score?: number | null | undefined }>(
   results: T[],
   hasMore: boolean,
 ) {
-  const rerankScores = results
-    .map((h) => h.rerank_score)
-    .filter((s): s is number => typeof s === "number");
+  const rerankScores = results.flatMap((hit) => {
+    const score = hit.rerank_score;
+
+    return isJsonNumber(score) ? [score] : [];
+  });
+
   const bestScore = rerankScores.length ? Math.max(...rerankScores) : null;
+
   return {
     results,
     has_more: hasMore,
@@ -142,30 +205,34 @@ function withAbstention<T extends { rerank_score?: number }>(
 }
 
 const SNIPPET_MAX = 280;
+
 const CONCISE_AUTHOR_LIMIT = 6;
 
-// Pick the single grounding snippet for a concise hit: prefer the top
-// non-abstract matched span, else fall back to a truncated abstract so the
-// agent always has something to skim in token-saving mode.
+// Prefer top non-abstract context, then a truncated abstract, so concise hits
+// stay grounded.
 function bestSnippet(p: RawPaper): string | undefined {
   const chunks = slimContexts(p.matched_chunks);
+
   if (chunks.length > 0) return chunks[0]!.text;
   const abstract = p.abstract || "";
+
   if (!abstract) return undefined;
+
   return abstract.length > SNIPPET_MAX
     ? `${abstract.slice(0, SNIPPET_MAX)}...`
     : abstract;
 }
 
-// Project one hit. Carries the boosted `score` and (when the reranker ran) the
-// raw `rerank_score`; the latter is omitted for keyword/BM25 queries that skip
-// rerank. Enriched default = full paper + `contexts` (non-abstract matched spans);
-// `detail: false` drops heavy fields, trims authors, attaches one `snippet`.
+// Preserve boosted score and optional rerank_score; detail:false drops heavy
+// fields, trims authors, and adds one snippet.
 function projectHit(p: RawPaper, detail: boolean) {
   const base = slimPaper(p);
-  const score = typeof p.score === "number" ? p.score : undefined;
-  const rerank_score =
-    typeof p.rerank_score === "number" ? p.rerank_score : undefined;
+  const score = isJsonNumber(p.score) ? p.score : undefined;
+
+  const rerank_score = isJsonNumber(p.rerank_score)
+    ? p.rerank_score
+    : undefined;
+
   if (detail) {
     return {
       ...base,
@@ -174,7 +241,9 @@ function projectHit(p: RawPaper, detail: boolean) {
       contexts: slimContexts(p.matched_chunks),
     };
   }
+
   const authors = base.authors ?? [];
+
   return {
     paper_id: base.paper_id,
     title: base.title,
@@ -196,16 +265,16 @@ function projectHit(p: RawPaper, detail: boolean) {
  * is null and `low_confidence` false (no calibrated basis to abstain). Per-hit
  * shape is `projectHit` (enriched default vs `detail: false` concise).
  */
-export function slimSearchResponse(r: unknown, detail = true) {
-  const obj = (r ?? {}) as RawSearchResponse;
+export function slimSearchResponse(r: JsonInput, detail = true) {
+  const obj = optimisticView<RawSearchResponse>(r);
   const results = Array.isArray(obj.results) ? obj.results : [];
   const projected = results.map((p) => projectHit(p, detail));
-  // The API pages search after the rerank/boost and reports whether more
-  // results exist past this window. Default to false when the field is absent
-  // (e.g. a pre-deploy API) so the agent never pages off the end.
+
+  // The API reports whether more results exist past this window; default to
+  // false when the field is absent (a pre-deploy API) so the agent stops here.
   return withAbstention(
     projected,
-    typeof obj.has_more === "boolean" ? obj.has_more : false,
+    isJsonBoolean(obj.has_more) ? obj.has_more : false,
   );
 }
 
@@ -224,24 +293,22 @@ interface RawWorkspaceSearchResponse {
   results?: RawWorkspaceSpan[];
 }
 
-interface WorkspaceHit {
+type WorkspaceHit = {
   paper_id: string;
   title: string;
   authors: string[];
-  // year / conference are OMITTED (not null): SearchPapersOutput's PaperOut
-  // declares them `.optional()` (absent or a value, never null), so emitting
-  // null fails a schema-aware client's outputSchema validation. A workspace
-  // document has no bibliographic year/venue, so the fields are simply absent.
+  // Omit absent workspace year and conference because the output schema permits
+  // values or absence, not null.
   citation_count: number;
   score: number | undefined;
   rerank_score: number | undefined;
   contexts: {
-    section?: string;
+    section?: string | undefined;
     text: string;
-    score?: number;
-    chunk_id?: string;
+    score?: number | undefined;
+    chunk_id?: string | undefined;
   }[];
-}
+};
 
 /**
  * Slim the workspace search response into the SAME hit shape as corpus search
@@ -254,18 +321,20 @@ interface WorkspaceHit {
  * via `get_paper_fulltext(source="workspace")`). `best_score` / `low_confidence`
  * derive from `rerank_score` exactly as for the corpus.
  */
-export function slimWorkspaceSearchAsHits(r: unknown) {
-  const obj = (r ?? {}) as RawWorkspaceSearchResponse;
+export function slimWorkspaceSearchAsHits(r: JsonInput) {
+  const obj = optimisticView<RawWorkspaceSearchResponse>(r);
   const spans = Array.isArray(obj.results) ? obj.results : [];
   const byDoc = new Map<string, WorkspaceHit>();
+
   for (const sp of spans) {
-    if (!sp || typeof sp.text !== "string" || sp.text.length === 0) continue;
+    if (!hasText(sp)) continue;
     const docId = sp.document_id ? String(sp.document_id) : "";
+
     if (!docId) continue;
-    const score = typeof sp.score === "number" ? sp.score : undefined;
-    const rerank =
-      typeof sp.rerank_score === "number" ? sp.rerank_score : undefined;
+    const score = isJsonNumber(sp.score) ? sp.score : undefined;
+    const rerank = isJsonNumber(sp.rerank_score) ? sp.rerank_score : undefined;
     let hit = byDoc.get(docId);
+
     if (!hit) {
       hit = {
         paper_id: docId,
@@ -285,6 +354,7 @@ export function slimWorkspaceSearchAsHits(r: unknown) {
       ) {
         hit.score = score;
       }
+
       if (
         rerank !== undefined &&
         (hit.rerank_score === undefined || rerank > hit.rerank_score)
@@ -292,6 +362,7 @@ export function slimWorkspaceSearchAsHits(r: unknown) {
         hit.rerank_score = rerank;
       }
     }
+
     hit.contexts.push({
       section: sp.section_name || undefined,
       text: sp.text,
@@ -299,7 +370,9 @@ export function slimWorkspaceSearchAsHits(r: unknown) {
       chunk_id: sp.chunk_id || undefined,
     });
   }
+
   const results = [...byDoc.values()];
+
   return withAbstention(results, false);
 }
 
@@ -334,34 +407,39 @@ interface RawBatchSearchResponse {
  * `best_score` / `low_confidence`: the API fuses N ranked lists by RRF, so a
  * single calibrated rerank floor across the merge is not meaningful.
  */
-export function slimSearchManyResponse(r: unknown, detail = true) {
-  const obj = (r ?? {}) as RawBatchSearchResponse;
+export function slimSearchManyResponse(r: JsonInput, detail = true) {
+  const obj = optimisticView<RawBatchSearchResponse>(r);
   const results: RawBatchHit[] = Array.isArray(obj.results) ? obj.results : [];
+
   const projected = results.map((p) => ({
     ...projectHit(p, detail),
     matched_queries: Array.isArray(p.matched_queries)
       ? p.matched_queries
           // Drop malformed provenance rather than fabricate a rank: `rank` is a
           // 1-based position, so a missing one has no meaningful default.
-          .filter(
-            (mq) =>
-              mq && typeof mq.query === "string" && typeof mq.rank === "number",
+          .flatMap((query) =>
+            hasQueryAndRank(query)
+              ? [{ query: query.query, rank: query.rank }]
+              : [],
           )
-          .map((mq) => ({ query: mq.query as string, rank: mq.rank as number }))
       : [],
   }));
+
   const failed: RawBatchFailure[] = Array.isArray(obj.queries_failed)
     ? obj.queries_failed
     : [];
+
   return {
     results: projected,
-    queries_run: typeof obj.queries_run === "number" ? obj.queries_run : 0,
-    queries_failed: failed
-      .filter((f) => f && typeof f.query === "string")
-      .map((f) => ({ query: f.query as string, reason: f.reason ?? "" })),
+    queries_run: isJsonNumber(obj.queries_run) ? obj.queries_run : 0,
+    queries_failed: failed.flatMap((failure) =>
+      hasQuery(failure)
+        ? [{ query: failure.query, reason: failure.reason ?? "" }]
+        : [],
+    ),
     // The API ranks a bounded merged shortlist, so `has_more` is always false;
     // default to false when absent (e.g. a pre-deploy API).
-    has_more: typeof obj.has_more === "boolean" ? obj.has_more : false,
+    has_more: isJsonBoolean(obj.has_more) ? obj.has_more : false,
   };
 }
 
@@ -386,15 +464,17 @@ interface RawRelatedPaper {
  * search mirrors paper search's enriched default: abstract plus non-abstract
  * matched chunks are included so the agent can evaluate neighbours without a
  * separate hydration call. */
-export function slimRelated(rows: unknown) {
+export function slimRelated(rows: JsonInput) {
   const arr = Array.isArray(rows) ? rows : [];
+
   return {
     papers: arr.map((raw) => {
-      const p = raw as RawRelatedPaper;
+      const p = optimisticView<RawRelatedPaper>(raw);
+
       return {
-        ...slimPaper(raw as RawPaper),
+        ...slimPaper(optimisticView<RawPaper>(raw)),
         contexts: slimContexts(p.matched_chunks),
-        similarity: typeof p.similarity === "number" ? p.similarity : undefined,
+        similarity: isJsonNumber(p.similarity) ? p.similarity : undefined,
       };
     }),
   };
@@ -418,20 +498,19 @@ interface RawCitationsResponse {
   has_more?: boolean;
 }
 
-export function slimCitations(r: unknown) {
-  const obj = (r ?? {}) as RawCitationsResponse;
+export function slimCitations(r: JsonInput) {
+  const obj = optimisticView<RawCitationsResponse>(r);
   const papers = Array.isArray(obj.papers) ? obj.papers : [];
+
   return {
     direction: obj.direction,
-    // Paging metadata: `total` is the visible-edge count, `has_more` says
-    // whether more edges exist past this page. Both optional so a pre-deploy
-    // API that omits them still validates.
-    total: typeof obj.total === "number" ? obj.total : undefined,
-    has_more: typeof obj.has_more === "boolean" ? obj.has_more : undefined,
+    // Keep paging optional for older APIs; total counts visible edges and
+    // has_more signals later pages.
+    total: isJsonNumber(obj.total) ? obj.total : undefined,
+    has_more: isJsonBoolean(obj.has_more) ? obj.has_more : undefined,
     citations: papers.map((c) => ({
-      // `id` present => the edge resolved to a paper in our corpus, so the
-      // agent can fetch it. Absent => a parsed-only reference (display fields
-      // only). `in_corpus` makes that distinction explicit and actionable.
+      // id means corpus-resolved and fetchable; in_corpus distinguishes it from
+      // display-only references.
       paper_id: c.id ?? undefined,
       in_corpus: c.id != null,
       title: c.title ?? undefined,
@@ -452,24 +531,18 @@ interface RawConferencePapers {
   total_pages?: number;
 }
 
-// Conference browse: a lean per-paper shape WITHOUT the abstract, because a
-// page of N venue papers should stay light. Pagination is reported as `total`
-// + `has_more`, the same vocab every other paged tool uses (the API's
-// page/total_pages is collapsed away).
-//
-// `has_more` is computed from the REQUESTED offset, not the API's `page`: the
-// API floors offset into `page = offset // limit + 1`, so a non-multiple-of-
-// limit offset (e.g. offset=5, limit=10) loses its remainder and `page*limit`
-// over/under-counts the consumed rows. `offset + returned_count < total` is the
-// only exact predicate (offset-based slicing returns min(limit, total-offset)
-// rows, so the last page lands exactly on `total`).
-export function slimConferencePapers(r: unknown, offset = 0) {
-  const obj = (r ?? {}) as RawConferencePapers;
+// Omit abstracts and compute has_more from request offset plus returned count;
+// API page loses non-multiple offsets through floor division.
+export function slimConferencePapers(r: JsonInput, offset = 0) {
+  const obj = optimisticView<RawConferencePapers>(r);
   const total = obj.total ?? 0;
+
   const papers = (obj.papers ?? []).map((p) => {
     const { abstract: _abstract, ...rest } = slimPaper(p);
+
     return rest;
   });
+
   return {
     papers,
     total: obj.total,
@@ -489,8 +562,9 @@ interface RawGuidanceSearchResponse {
   results?: RawGuidanceHit[];
 }
 
-export function slimGuidanceSearch(r: unknown) {
-  const obj = (r ?? {}) as RawGuidanceSearchResponse;
+export function slimGuidanceSearch(r: JsonInput) {
+  const obj = optimisticView<RawGuidanceSearchResponse>(r);
+
   return {
     results: (obj.results ?? []).map((h) => ({
       doc_id: h.doc_id,
@@ -518,13 +592,15 @@ interface RawGuidanceDoc {
   sections?: RawGuidanceSection[] | null;
 }
 
-export function slimGuidanceDoc(r: unknown) {
-  const obj = (r ?? {}) as RawGuidanceDoc;
+export function slimGuidanceDoc(r: JsonInput) {
+  const obj = optimisticView<RawGuidanceDoc>(r);
+
   const sections = Array.isArray(obj.sections)
     ? obj.sections
-        .filter((s) => s && typeof s.text === "string" && s.text.length > 0)
-        .map((s) => ({ heading: s.heading || "Body", text: s.text as string }))
+        .filter(hasText)
+        .map((s) => ({ heading: s.heading || "Body", text: s.text }))
     : [];
+
   return {
     doc_id: obj.id,
     title: obj.title,
@@ -532,9 +608,8 @@ export function slimGuidanceDoc(r: unknown) {
     author_affiliation: obj.author_affiliation ?? undefined,
     source_url: obj.source_url ?? undefined,
     tags: obj.tags ?? [],
-    // The reassembled full document body (the whole point of this tool, vs
-    // the matched excerpt from search_research_guidance). `sections` carries
-    // the same text split by heading for callers that want structure.
+    // content is the reassembled document; sections repeats it by heading for
+    // structured callers.
     content: obj.content ?? undefined,
     sections,
   };

@@ -5,24 +5,26 @@
  * roadmap tool.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { KyInstance } from "ky";
-
-vi.mock("ky", () => ({
-  default: {
-    post: vi.fn(() => Promise.resolve()),
-    create: vi.fn(),
-  },
-}));
-
-import ky from "ky";
+import ky, { type KyInstance } from "ky";
 import {
+  createFakeServer,
+  type FakeServerExtras,
+} from "../support/fake-server.js";
+import {
+  isJsonNumber,
+  isJsonObject,
+  type JsonObject,
+  type JsonValue,
+} from "../../src/json.js";
+import {
+  type AnalyticsDelivery,
   analyticsEnabled,
   captureMcp,
   claimMcpAnalyticsBudget,
   clientHeaderFor,
   clientInfoFromEnvelope,
   flushAnalytics,
-  initAnalytics,
+  initAnalytics as initAnalyticsWithDelivery,
   resetAnalyticsForTests,
   sanitizeAnalyticsText,
   setServerClientInfo,
@@ -34,21 +36,84 @@ import { analyticsIdentityOf } from "../../src/transport/streamableHttp.js";
 import { registerPrompts } from "../../src/prompts.js";
 import { registerResources } from "../../src/resources.js";
 import { registerAllTools } from "../../src/tools/index.js";
+import { TOOL_RESPONSE_CACHE } from "../../src/cache.js";
 
-const kyPost = vi.mocked(ky.post);
+const kyPost = vi.fn<AnalyticsDelivery>(() => Promise.resolve());
 
-beforeEach(() => {
+const initAnalytics = () => initAnalyticsWithDelivery(kyPost);
+
+beforeEach(async () => {
   resetAnalyticsForTests();
   kyPost.mockClear();
+  await TOOL_RESPONSE_CACHE.clear();
 });
 
 afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-function lastPayload(): Record<string, unknown> {
-  const call = kyPost.mock.calls.at(-1)!;
-  return (call[1] as { json: Record<string, unknown> }).json;
+/**
+ * The JSON body of the most recent captured PostHog request, and its properties
+ * bag. Every assertion below reads through these two, so the one place ky's
+ * loosely-typed options are decoded is here.
+ */
+function lastPayload(): JsonObject {
+  const call = kyPost.mock.calls.at(-1);
+
+  if (!call) throw new Error("expected an analytics delivery");
+  const body: JsonValue = call[1].json;
+
+  return isJsonObject(body) ? body : {};
+}
+
+function lastProperties(): JsonObject {
+  const props = lastPayload()["properties"];
+
+  return isJsonObject(props) ? props : {};
+}
+
+function deliveredPayloads(): JsonObject[] {
+  return kyPost.mock.calls.map((call) => call[1].json);
+}
+
+function eventPayload(event: string): JsonObject {
+  const payload = deliveredPayloads().find(
+    (candidate) => candidate.event === event,
+  );
+
+  if (!payload) throw new Error(`expected ${event} analytics payload`);
+
+  return payload;
+}
+
+function eventProperties(event: string): JsonObject {
+  const properties = eventPayload(event).properties;
+
+  if (!isJsonObject(properties)) {
+    throw new Error(`expected ${event} analytics properties`);
+  }
+
+  return properties;
+}
+
+function fakeKy(): KyInstance {
+  return ky.create({
+    prefix: "https://api.example.test/",
+    retry: 0,
+    fetch: async () =>
+      new Response("{}", {
+        headers: { "content-type": "application/json" },
+      }),
+  });
+}
+
+interface ToolsListResult {
+  tools: Array<{ name: string }>;
+}
+
+interface ToolCallResult {
+  isError?: boolean;
+  content: Array<{ type?: string; text: string }>;
 }
 
 /**
@@ -59,24 +124,6 @@ function lastPayload(): Record<string, unknown> {
  * under test: with a positional lookup, a reordering silently routes `tools/call`
  * into the `tools/list` assertions instead of failing on the thing being pinned.
  */
-type RecordedHandler = (req: unknown, ctx?: unknown) => Promise<unknown>;
-
-function recordingServer(extras: Record<string, unknown> = {}) {
-  const handlers = new Map<string, RecordedHandler>();
-  const server = {
-    ...extras,
-    setRequestHandler: (method: unknown, fn: unknown) => {
-      handlers.set(method as string, fn as RecordedHandler);
-    },
-  };
-  const handler = (method: string): RecordedHandler => {
-    const found = handlers.get(method);
-    if (!found) throw new Error(`no handler registered for ${method}`);
-    return found;
-  };
-  return { server, handler };
-}
-
 describe("initAnalytics gating", () => {
   it("stays disabled without LUNE_POSTHOG_KEY (local installs emit nothing)", () => {
     vi.stubEnv("LUNE_POSTHOG_KEY", "");
@@ -118,7 +165,7 @@ describe("captureMcp wire shape", () => {
     expect(payload.api_key).toBe("phc_test");
     expect(payload.event).toBe("$mcp_tool_call");
     expect(payload.distinct_id).toBe("user-123");
-    const props = payload.properties as Record<string, unknown>;
+    const props = lastProperties();
     expect(props.$mcp_tool_name).toBe("search_papers");
     expect(props.$mcp_source).toBe("posthog_mcp_analytics");
     expect(props.$process_person_profile).toBeUndefined();
@@ -137,7 +184,7 @@ describe("captureMcp wire shape", () => {
     );
     const payload = lastPayload();
     expect(payload.distinct_id).toBe("credential:abcdef");
-    const props = payload.properties as Record<string, unknown>;
+    const props = lastProperties();
     expect(props.$process_person_profile).toBe(false);
   });
 
@@ -158,6 +205,7 @@ describe("captureMcp wire shape", () => {
     for (let index = 0; index < 1_000; index += 1) {
       expect(claimMcpAnalyticsBudget("one-identity")).toBe(true);
     }
+
     expect(claimMcpAnalyticsBudget("one-identity")).toBe(false);
   });
 
@@ -180,7 +228,7 @@ describe("captureMcp wire shape", () => {
       { identity: { distinctId: "u", personless: false } },
       {},
     );
-    const props = lastPayload().properties as Record<string, unknown>;
+    const props = lastProperties();
     expect(props.$mcp_client_name).toBe("claude-code");
     expect(props.$mcp_client_version).toBe("2.1.0");
     expect(props.$mcp_server_name).toBe("lune-research");
@@ -197,7 +245,7 @@ describe("captureMcp wire shape", () => {
           "Email alice@example.com, token=lune_private_value, Authorization: Bearer secret-value",
       },
     );
-    const props = lastPayload().properties as Record<string, unknown>;
+    const props = lastProperties();
     expect(props.$mcp_intent).toBe(
       "Email [email redacted], token=[redacted], Authorization: [redacted]",
     );
@@ -210,6 +258,7 @@ describe("sanitizeAnalyticsText", () => {
       `private_key=secret\u0000 ${"x".repeat(800)}`,
       120,
     );
+
     expect(value).not.toContain("secret");
     expect(value).not.toContain("\u0000");
     expect(value.length).toBeLessThanOrEqual(120);
@@ -234,12 +283,15 @@ describe("request-scoped analytics context", () => {
     initAnalytics();
     let releaseIdentified!: () => void;
     let releasePersonless!: () => void;
+
     const identifiedGate = new Promise<void>((resolve) => {
       releaseIdentified = resolve;
     });
+
     const personlessGate = new Promise<void>((resolve) => {
       releasePersonless = resolve;
     });
+
     const identified = withAnalyticsContext(
       {
         identity: { distinctId: "verified-user", personless: false },
@@ -252,6 +304,7 @@ describe("request-scoped analytics context", () => {
         });
       },
     );
+
     const personless = withAnalyticsContext(
       {
         identity: { distinctId: "credential:hash", personless: true },
@@ -272,21 +325,24 @@ describe("request-scoped analytics context", () => {
         );
       },
     );
+
     releasePersonless();
     await personless;
     releaseIdentified();
     await identified;
 
-    const payloads = kyPost.mock.calls.map(
-      (call) =>
-        (call[1] as { json: Record<string, unknown> }).json as {
-          distinct_id: string;
-          properties: Record<string, unknown>;
-        },
-    );
+    const payloads = deliveredPayloads();
+
     const byTool = new Map(
-      payloads.map((payload) => [payload.properties.$mcp_tool_name, payload]),
+      payloads.map((payload) => {
+        const properties = isJsonObject(payload.properties)
+          ? payload.properties
+          : {};
+
+        return [properties.$mcp_tool_name, payload];
+      }),
     );
+
     expect(byTool.get("identified_call")).toMatchObject({
       distinct_id: "verified-user",
       properties: { $session_id: "session-a" },
@@ -310,13 +366,15 @@ describe("flushAnalytics", () => {
     kyPost.mockReturnValueOnce(
       new Promise<void>((resolve) => {
         release = resolve;
-      }) as never,
+      }),
     );
     captureMcp("$mcp_initialize", {}, undefined, {});
     let flushed = false;
+
     const pending = flushAnalytics(1000).then(() => {
       flushed = true;
     });
+
     await Promise.resolve();
     expect(flushed).toBe(false);
     release();
@@ -327,7 +385,7 @@ describe("flushAnalytics", () => {
   it("returns when the deadline expires", async () => {
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
     initAnalytics();
-    kyPost.mockReturnValueOnce(new Promise(() => undefined) as never);
+    kyPost.mockReturnValueOnce(new Promise<void>(() => undefined));
     captureMcp("$mcp_initialize", {}, undefined, {});
     const started = Date.now();
     await flushAnalytics(10);
@@ -349,10 +407,8 @@ describe("clientHeaderFor (X-Lune-Client attribution)", () => {
   });
 
   it("names the transport even when no client has identified itself", () => {
-    // NOT `undefined`: with no header the API's `surface_of` reports the call
-    // as `api_direct`, so dropping it does not blank attribution, it moves
-    // every unidentified MCP request into the raw-API bucket. `unknown` keeps
-    // the transport fact without fabricating a client name.
+    // NOT `undefined`: with no header the API's `surface_of` reads the call as
+    // `api_direct`, so dropping it moves MCP traffic into the raw-API bucket.
     setTransportMode("http");
     expect(clientHeaderFor({})).toBe("mcp-remote/unknown/0");
     setTransportMode("stdio");
@@ -360,13 +416,12 @@ describe("clientHeaderFor (X-Lune-Client attribution)", () => {
   });
 
   it("falls back to the handshake identity when no envelope stamped one", () => {
-    // The 2025 era has no envelope, and `serveStdio` pins ONE instance per
-    // connection, so the handshake identity the SDK holds is the only client
-    // name a stdio install can report. Losing it labels every local install
-    // `unknown` for as long as the client ecosystem is pre-2026-07-28.
+    // The 2025 era has no envelope and `serveStdio` pins ONE instance per
+    // connection, so the handshake identity is all a stdio install can report.
     const server = {
       getClientVersion: () => ({ name: "claude-code", version: "2.1.0" }),
     };
+
     setTransportMode("stdio");
     expect(clientHeaderFor(server)).toBe("mcp-stdio/claude-code/2.1.0");
   });
@@ -375,6 +430,7 @@ describe("clientHeaderFor (X-Lune-Client attribution)", () => {
     const server = {
       getClientVersion: () => ({ name: "handshake-client", version: "1.0" }),
     };
+
     setServerClientInfo(server, { name: "cursor", version: "3.2" });
     setTransportMode("http");
     expect(clientHeaderFor(server)).toBe("mcp-remote/cursor/3.2");
@@ -418,6 +474,7 @@ describe("clientInfoFromEnvelope (2026-07-28 client attribution)", () => {
         envelope: { "io.modelcontextprotocol/clientInfo": { name: "cursor" } },
       },
     };
+
     expect(clientInfoFromEnvelope(ctx)).toEqual({
       name: "cursor",
       version: "0",
@@ -430,11 +487,12 @@ describe("clientInfoFromEnvelope (2026-07-28 client attribution)", () => {
   });
 
   it("refuses a structural name instead of attributing [object Object]", () => {
-    const ctx = (clientInfo: unknown) => ({
+    const ctx = (clientInfo: JsonValue) => ({
       mcpReq: {
         envelope: { "io.modelcontextprotocol/clientInfo": clientInfo },
       },
     });
+
     expect(clientInfoFromEnvelope(ctx({ name: { evil: 1 } }))).toBeUndefined();
     expect(clientInfoFromEnvelope(ctx("cursor"))).toBeUndefined();
     // A numeric version is a protocol violation, but a usable identity.
@@ -448,30 +506,43 @@ describe("clientInfoFromEnvelope (2026-07-28 client attribution)", () => {
    * goes wrong), so they assert the value that reaches the API rather than the
    * reader in isolation.
    */
-  function recordingTools(serverExtras: Record<string, unknown> = {}) {
+  function recordingTools(serverExtras: FakeServerExtras = {}) {
     const stamped: (Record<string, string> | undefined)[] = [];
     const signals: (AbortSignal | undefined)[] = [];
+
     const recordingKy = (): KyInstance =>
-      ({
-        get: () => ({ json: async () => ({}) }),
-        post: () => ({ json: async () => ({}) }),
-        extend: ({
-          headers,
-          signal,
-        }: {
-          headers?: Record<string, string>;
-          signal?: AbortSignal;
-        }) => {
+      ky.create({
+        prefix: "https://api.example.test/",
+        retry: 0,
+        fetch: async (input) => {
+          const request = input instanceof Request ? input : new Request(input);
+          const headers: Record<string, string> = {};
+          const client = request.headers.get("X-Lune-Client");
+
+          if (client) headers["X-Lune-Client"] = client;
+
+          for (const name of ["traceparent", "tracestate", "baggage"]) {
+            const value = request.headers.get(name);
+
+            if (value) headers[name] = value;
+          }
+
           stamped.push(headers);
-          signals.push(signal);
-          return recordingKy();
+          signals.push(request.signal);
+
+          const body = new URL(request.url).pathname.endsWith("/conferences")
+            ? "[]"
+            : "{}";
+
+          return new Response(body, {
+            headers: { "content-type": "application/json" },
+          });
         },
-      }) as unknown as KyInstance;
-    const { server, handler } = recordingServer(serverExtras);
-    registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
-      recordingKy,
-    );
+      });
+
+    const { server, handler } = createFakeServer(serverExtras);
+    registerAllTools(server, recordingKy);
+
     return { handler, signals, stamped };
   }
 
@@ -492,9 +563,8 @@ describe("clientInfoFromEnvelope (2026-07-28 client attribution)", () => {
   });
 
   it("stamps the transport on a legacy request that names no client", async () => {
-    // The HTTP legacy leg has no envelope AND no surviving handshake instance.
-    // Sending nothing here is what relabels every 2025-era MCP call as
-    // `api_direct` server-side, so the header still has to name the transport.
+    // The HTTP legacy leg has no envelope AND no surviving handshake instance,
+    // so the header is all that keeps 2025-era calls out of `api_direct`.
     setTransportMode("http");
     const { handler, stamped } = recordingTools();
     await handler("tools/list")({}, { mcpReq: {} });
@@ -505,9 +575,11 @@ describe("clientInfoFromEnvelope (2026-07-28 client attribution)", () => {
     // `serveStdio` pins one instance per connection, so the identity the 2025
     // handshake gave the SDK is still readable when the envelope is absent.
     setTransportMode("stdio");
+
     const { handler, stamped } = recordingTools({
       getClientVersion: () => ({ name: "claude-code", version: "2.1.0" }),
     });
+
     await handler("tools/list")({}, { mcpReq: {} });
     expect(stamped).toEqual([
       { "X-Lune-Client": "mcp-stdio/claude-code/2.1.0" },
@@ -517,6 +589,7 @@ describe("clientInfoFromEnvelope (2026-07-28 client attribution)", () => {
   it("propagates bounded W3C trace context and the cancellation signal", async () => {
     const controller = new AbortController();
     const { handler, signals, stamped } = recordingTools();
+
     const ctx = {
       mcpReq: {
         _meta: {
@@ -528,6 +601,7 @@ describe("clientInfoFromEnvelope (2026-07-28 client attribution)", () => {
         signal: controller.signal,
       },
     };
+
     await handler("tools/call")(
       { params: { name: "list_conferences", arguments: {} } },
       ctx,
@@ -537,7 +611,12 @@ describe("clientInfoFromEnvelope (2026-07-28 client attribution)", () => {
       tracestate: "vendor=value",
     });
     expect(stamped[0]).not.toHaveProperty("baggage");
-    expect(signals).toEqual([controller.signal]);
+    const propagated = signals[0];
+
+    if (!propagated) throw new Error("expected an upstream abort signal");
+    expect(propagated.aborted).toBe(false);
+    controller.abort();
+    expect(propagated.aborted).toBe(true);
   });
 
   it.each([
@@ -577,120 +656,82 @@ describe("analyticsIdentityOf", () => {
 });
 
 describe("get_more_tools (analytics-gated roadmap intake)", () => {
-  function fakeKy(): KyInstance {
-    const make = () => () =>
-      ({ json: async () => ({}) }) as unknown as Promise<unknown>;
-    return {
-      get: make(),
-      post: make(),
-      extend: () => fakeKy(),
-    } as unknown as KyInstance;
-  }
-
   it("is absent from tools/list when analytics is disabled (local installs)", async () => {
-    const { server, handler } = recordingServer();
-    registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
-      () => fakeKy(),
-    );
-    const res = (await handler("tools/list")({})) as {
-      tools: { name: string }[];
-    };
+    const { server, handler } = createFakeServer();
+    registerAllTools(server, () => fakeKy());
+    const res = await handler<ToolsListResult>("tools/list")({});
     expect(res.tools.map((t) => t.name)).not.toContain("get_more_tools");
   });
 
   it("is listed and records $mcp_missing_capability when enabled", async () => {
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
     initAnalytics();
-    const { server, handler } = recordingServer();
+    const { server, handler } = createFakeServer();
     registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
+      server,
       () => fakeKy(),
       () => ({
         identity: { distinctId: "user-42", personless: false },
         sessionId: "session-42",
       }),
     );
-    const res = (await handler("tools/list")({})) as {
-      tools: { name: string }[];
-    };
+    const res = await handler<ToolsListResult>("tools/list")({});
     expect(res.tools.map((t) => t.name)).toContain("get_more_tools");
 
-    const result = (await handler("tools/call")({
+    const result = await handler<ToolCallResult>("tools/call")({
       params: {
         name: "get_more_tools",
         arguments: { capability: "search preprint servers" },
       },
-    })) as { content: { type: string; text: string }[] };
+    });
+
     expect(result.content[0]!.text).toMatch(/submitted for roadmap review/);
 
-    const missing = kyPost.mock.calls
-      .map(
-        (c) =>
-          (
-            c[1] as {
-              json: { event: string; properties: Record<string, unknown> };
-            }
-          ).json,
-      )
-      .find((p) => p.event === "$mcp_missing_capability")!;
-    expect(missing).toBeDefined();
-    expect(missing.properties.$mcp_intent).toBe("search preprint servers");
+    expect(eventProperties("$mcp_missing_capability").$mcp_intent).toBe(
+      "search preprint servers",
+    );
   });
 
   it("does not claim a roadmap event was stored when capture is unavailable", async () => {
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
     initAnalytics();
-    const { server, handler } = recordingServer();
+    const { server, handler } = createFakeServer();
     registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
+      server,
       () => fakeKy(),
       () => ({ captureEnabled: false }),
     );
-    const result = (await handler("tools/call")({
+
+    const result = await handler<ToolCallResult>("tools/call")({
       params: {
         name: "get_more_tools",
         arguments: { capability: "search preprint servers" },
       },
-    })) as { content: { text: string }[] };
+    });
+
     expect(result.content[0]!.text).toContain("No roadmap event was stored");
   });
 
   it("records canonical list, resource, and prompt lifecycle events", async () => {
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
     initAnalytics();
+
     const context = () => ({
       identity: { distinctId: "user-42", personless: false },
       sessionId: "session-42",
     });
-    const { server, handler } = recordingServer();
-    registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
-      () => fakeKy(),
-      context,
-    );
-    registerResources(
-      server as unknown as Parameters<typeof registerResources>[0],
-      context,
-    );
-    registerPrompts(
-      server as unknown as Parameters<typeof registerPrompts>[0],
-      context,
-    );
+
+    const { server, handler } = createFakeServer();
+    registerAllTools(server, () => fakeKy(), context);
+    registerResources(server, context);
+    registerPrompts(server, context);
     await handler("tools/list")({});
     await handler("resources/list")({});
     await handler("prompts/list")({});
     await handler("prompts/get")({
       params: { name: "verify_draft", arguments: { draft: "claim" } },
     });
-    const payloads = kyPost.mock.calls.map(
-      (call) =>
-        (
-          call[1] as {
-            json: { event: string; properties: Record<string, unknown> };
-          }
-        ).json,
-    );
+    const payloads = deliveredPayloads();
     expect(payloads.map((payload) => payload.event)).toEqual(
       expect.arrayContaining([
         "$mcp_tools_list",
@@ -699,49 +740,51 @@ describe("get_more_tools (analytics-gated roadmap intake)", () => {
         "$mcp_prompt_get",
       ]),
     );
+
     const toolsList = payloads.find(
       (payload) => payload.event === "$mcp_tools_list",
-    )!;
+    );
+
+    if (!toolsList || !isJsonObject(toolsList.properties)) {
+      throw new Error("expected tools-list properties");
+    }
+
     expect(toolsList.properties.$mcp_listed_tool_names).toContain(
       "search_papers",
     );
+
     const promptGet = payloads.find(
       (payload) => payload.event === "$mcp_prompt_get",
-    )!;
+    );
+
+    if (!promptGet || !isJsonObject(promptGet.properties)) {
+      throw new Error("expected prompt-get properties");
+    }
+
     expect(promptGet.properties.$mcp_resource_name).toBe("verify_draft");
   });
 
   it("re-emits every list event per call, since no server outlives one request", async () => {
     // `createMcpHandler` builds a server per request, so the de-dup flags these
-    // three handlers used to close over were always false on entry. Re-adding
-    // one at module scope would be the cross-request state the stateless
-    // transport deleted, so per-call emission IS the contract.
+    // handlers closed over were always false: per-call emission IS the rule.
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
     initAnalytics();
+
     const context = () => ({
       identity: { distinctId: "user-42", personless: false },
     });
-    const { server, handler } = recordingServer();
-    registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
-      () => fakeKy(),
-      context,
-    );
-    registerResources(
-      server as unknown as Parameters<typeof registerResources>[0],
-      context,
-    );
-    registerPrompts(
-      server as unknown as Parameters<typeof registerPrompts>[0],
-      context,
-    );
+
+    const { server, handler } = createFakeServer();
+    registerAllTools(server, () => fakeKy(), context);
+    registerResources(server, context);
+    registerPrompts(server, context);
+
     for (const method of ["tools/list", "resources/list", "prompts/list"]) {
       await handler(method)({});
       await handler(method)({});
     }
-    const events = kyPost.mock.calls.map(
-      (call) => (call[1] as { json: { event: string } }).json.event,
-    );
+
+    const events = deliveredPayloads().map((payload) => payload.event);
     const tally = (event: string) => events.filter((e) => e === event).length;
     expect([
       tally("$mcp_tools_list"),
@@ -753,9 +796,9 @@ describe("get_more_tools (analytics-gated roadmap intake)", () => {
   it("records a $mcp_tool_call with duration for real tool dispatches", async () => {
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
     initAnalytics();
-    const { server, handler } = recordingServer();
+    const { server, handler } = createFakeServer();
     registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
+      server,
       () => fakeKy(),
       () => ({
         identity: { distinctId: "credential:deadbeef", personless: true },
@@ -764,20 +807,10 @@ describe("get_more_tools (analytics-gated roadmap intake)", () => {
     await handler("tools/call")({
       params: { name: "list_conferences", arguments: {} },
     });
-    const toolCall = kyPost.mock.calls
-      .map(
-        (c) =>
-          (
-            c[1] as {
-              json: { event: string; properties: Record<string, unknown> };
-            }
-          ).json,
-      )
-      .find((p) => p.event === "$mcp_tool_call")!;
-    expect(toolCall).toBeDefined();
-    expect(toolCall.properties.$mcp_tool_name).toBe("list_conferences");
-    expect(typeof toolCall.properties.$mcp_duration_ms).toBe("number");
-    expect(toolCall.properties.$mcp_is_error).toBe(false);
+    const properties = eventProperties("$mcp_tool_call");
+    expect(properties.$mcp_tool_name).toBe("list_conferences");
+    expect(isJsonNumber(properties.$mcp_duration_ms)).toBe(true);
+    expect(properties.$mcp_is_error).toBe(false);
   });
 
   it("records the error message and HTTP status behind a failed tool call", async () => {
@@ -785,33 +818,28 @@ describe("get_more_tools (analytics-gated roadmap intake)", () => {
     // without these two properties every diagnosis meant a CloudWatch dig.
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
     initAnalytics();
-    const { server, handler } = recordingServer();
-    const rejecting = (): KyInstance => {
-      const boom = () => () =>
-        Promise.reject(
-          Object.assign(new Error("HTTPError"), {
-            response: {
-              status: 422,
-              headers: new Headers(),
-              json: async () => ({
-                detail: [
-                  {
-                    loc: ["body", "fields", 0, "name"],
-                    msg: "Value error, field name 'model_dump' is reserved",
-                  },
-                ],
-              }),
-            },
-          }),
-        );
-      return {
-        get: boom(),
-        post: boom(),
-        extend: () => rejecting(),
-      } as unknown as KyInstance;
-    };
+    const { server, handler } = createFakeServer();
+
+    const rejecting = (): KyInstance =>
+      ky.create({
+        prefix: "https://api.example.test/",
+        retry: 0,
+        fetch: async () =>
+          new Response(
+            JSON.stringify({
+              detail: [
+                {
+                  loc: ["body", "fields", 0, "name"],
+                  msg: "Value error, field name 'model_dump' is reserved",
+                },
+              ],
+            }),
+            { status: 422, headers: { "content-type": "application/json" } },
+          ),
+      });
+
     registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
+      server,
       () => rejecting(),
       () => ({
         identity: { distinctId: "credential:deadbeef", personless: true },
@@ -827,20 +855,11 @@ describe("get_more_tools (analytics-gated roadmap intake)", () => {
         },
       },
     });
-    const payload = kyPost.mock.calls
-      .map(
-        (call) =>
-          (
-            call[1] as {
-              json: { event: string; properties: Record<string, unknown> };
-            }
-          ).json,
-      )
-      .find((event) => event.event === "$mcp_tool_call")!;
-    expect(payload.properties.$mcp_is_error).toBe(true);
-    expect(payload.properties.$mcp_error_type).toBe("tool_error");
-    expect(payload.properties.$mcp_error_status).toBe("422");
-    expect(payload.properties.$mcp_error_message).toContain(
+    const properties = eventProperties("$mcp_tool_call");
+    expect(properties.$mcp_is_error).toBe(true);
+    expect(properties.$mcp_error_type).toBe("tool_error");
+    expect(properties.$mcp_error_status).toBe("422");
+    expect(properties.$mcp_error_message).toContain(
       "fields.0.name: field name 'model_dump' is reserved",
     );
   });
@@ -848,15 +867,16 @@ describe("get_more_tools (analytics-gated roadmap intake)", () => {
   it("records output contract drift as a model-readable tool error", async () => {
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
     initAnalytics();
-    const { server, handler } = recordingServer();
+    const { server, handler } = createFakeServer();
     registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
+      server,
       () => fakeKy(),
       () => ({
         identity: { distinctId: "credential:deadbeef", personless: true },
       }),
     );
-    const result = (await handler("tools/call")({
+
+    const result = await handler<ToolCallResult>("tools/call")({
       params: {
         name: "extract_from_papers",
         arguments: {
@@ -865,22 +885,14 @@ describe("get_more_tools (analytics-gated roadmap intake)", () => {
           instruction: "extract the dataset",
         },
       },
-    })) as { isError?: boolean; content: Array<{ text: string }> };
+    });
+
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toContain("Stop retrying");
 
-    const payload = kyPost.mock.calls
-      .map(
-        (call) =>
-          (
-            call[1] as {
-              json: { event: string; properties: Record<string, unknown> };
-            }
-          ).json,
-      )
-      .find((event) => event.event === "$mcp_tool_call")!;
-    expect(payload.properties.$mcp_error_type).toBe("output_schema_violation");
-    expect(payload.properties.$mcp_error_message).toContain(
+    const properties = eventProperties("$mcp_tool_call");
+    expect(properties.$mcp_error_type).toBe("output_schema_violation");
+    expect(properties.$mcp_error_message).toContain(
       "invalid response for extract_from_papers",
     );
   });
@@ -888,9 +900,9 @@ describe("get_more_tools (analytics-gated roadmap intake)", () => {
   it("records protocol failures without exporting the thrown message", async () => {
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
     initAnalytics();
-    const { server, handler } = recordingServer();
+    const { server, handler } = createFakeServer();
     registerAllTools(
-      server as unknown as Parameters<typeof registerAllTools>[0],
+      server,
       () => fakeKy(),
       () => ({
         identity: { distinctId: "credential:x", personless: true },
@@ -904,18 +916,9 @@ describe("get_more_tools (analytics-gated roadmap intake)", () => {
         },
       }),
     ).rejects.toThrow(/unknown tool/i);
-    const payload = kyPost.mock.calls
-      .map(
-        (call) =>
-          (
-            call[1] as {
-              json: { event: string; properties: Record<string, unknown> };
-            }
-          ).json,
-      )
-      .find((event) => event.event === "$mcp_tool_call")!;
-    expect(payload.properties.$mcp_error_type).toBe("protocol_error");
-    expect(payload.properties.$mcp_error_message).toBeUndefined();
-    expect(payload.properties.$mcp_tool_name).toBe("[email redacted]");
+    const properties = eventProperties("$mcp_tool_call");
+    expect(properties.$mcp_error_type).toBe("protocol_error");
+    expect(properties.$mcp_error_message).toBeUndefined();
+    expect(properties.$mcp_tool_name).toBe("[email redacted]");
   });
 });

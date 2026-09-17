@@ -10,73 +10,33 @@
  * client used "MUST NOT be used"). These tests pin all three.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { AddressInfo } from "node:net";
 import type { Server as HttpServer } from "node:http";
-import http from "node:http";
 import type { Express } from "express";
 import { buildHttpApp } from "../../src/transport/streamableHttp.js";
+import { jsonRpcObject, rawRequest } from "../support/http.js";
+import {
+  jsonObject,
+  jsonObjects,
+  jsonString,
+  jsonStrings,
+  parseJsonObject,
+} from "../support/json.js";
+import { portOf } from "../support/net.js";
 
-interface RawResponse {
-  status: number | undefined;
-  headers: http.IncomingHttpHeaders;
-  body: string;
+function rpcResult(raw: string) {
+  return jsonObject(jsonRpcObject(raw).result, "JSON-RPC result");
 }
 
-function rawRequest(
-  port: number,
-  method: string,
-  path: string,
-  headers: Record<string, string>,
-  body?: unknown,
-): Promise<RawResponse> {
-  return new Promise((resolve, reject) => {
-    const data = body === undefined ? undefined : JSON.stringify(body);
-    const req = http.request(
-      {
-        host: "127.0.0.1",
-        port,
-        path,
-        method,
-        headers: {
-          ...(data === undefined
-            ? {}
-            : {
-                "content-type": "application/json",
-                "content-length": Buffer.byteLength(data),
-              }),
-          ...headers,
-        },
-      },
-      (res) => {
-        let chunks = "";
-        res.on("data", (c) => (chunks += c));
-        res.on("end", () =>
-          resolve({
-            status: res.statusCode,
-            headers: res.headers,
-            body: chunks,
-          }),
-        );
-      },
-    );
-    req.on("error", reject);
-    if (data !== undefined) req.write(data);
-    req.end();
-  });
-}
-
-function parseJsonRpc(raw: string): {
-  result?: { tools?: Array<{ name: string }>; serverInfo?: { name: string } };
-} {
-  const dataLine = raw.split(/\r?\n/).find((line) => line.startsWith("data:"));
-  return JSON.parse(
-    dataLine ? dataLine.slice("data:".length).trim() : raw.trim(),
-  );
+function rpcTools(raw: string) {
+  return jsonObjects(rpcResult(raw).tools, "tool list");
 }
 
 const ACCEPT = "application/json, text/event-stream";
+
 const AUTH = "Bearer lune_fake_paths_token";
+
 const ORIGIN = "https://mcp.luneresearch.com";
+
 const METADATA_URL = `${ORIGIN}/.well-known/oauth-protected-resource`;
 
 // Every path a user could have configured, plus the trailing-slash spellings
@@ -86,6 +46,7 @@ const ENDPOINTS = ["/", "/mcp", "/mcp/", "/v1/mcp", "/v1/mcp/"];
 /** The RFC 9728 resource-identifier suffix a request on `path` belongs to. */
 function aliasOf(path: string): string {
   const p = path.replace(/\/+$/, "");
+
   return p === "/mcp" || p === "/v1/mcp" ? p : "";
 }
 
@@ -99,7 +60,8 @@ const initBody = {
     clientInfo: { name: "vitest", version: "0.0.0" },
   },
 };
-const toolsList = (id: number): unknown => ({
+
+const toolsList = (id: number) => ({
   jsonrpc: "2.0",
   id,
   method: "tools/list",
@@ -107,14 +69,16 @@ const toolsList = (id: number): unknown => ({
 });
 
 let app: Express;
+
 let server: HttpServer;
+
 let port: number;
 
 beforeAll(async () => {
   app = buildHttpApp();
   server = app.listen(0);
   await new Promise<void>((resolve) => server.once("listening", resolve));
-  port = (server.address() as AddressInfo).port;
+  port = portOf(server);
 });
 
 afterAll(async () => {
@@ -130,12 +94,17 @@ describe("every endpoint spelling serves the JSON-RPC transport", () => {
       { accept: ACCEPT, authorization: AUTH },
       initBody,
     );
+
     expect(init.status).toBe(200);
+
     // Stateless serving mints no session id, so the handshake RESULT is the
     // proof the request reached a server instance rather than a guard branch.
-    expect(parseJsonRpc(init.body).result?.serverInfo?.name).toBe(
-      "lune-research",
+    const serverInfo = jsonObject(
+      rpcResult(init.body).serverInfo,
+      "server info",
     );
+
+    expect(serverInfo.name).toBe("lune-research");
 
     const list = await rawRequest(
       port,
@@ -144,10 +113,9 @@ describe("every endpoint spelling serves the JSON-RPC transport", () => {
       { accept: ACCEPT, authorization: AUTH },
       toolsList(2),
     );
+
     expect(list.status).toBe(200);
-    expect(
-      (parseJsonRpc(list.body).result?.tools ?? []).length,
-    ).toBeGreaterThan(0);
+    expect(rpcTools(list.body).length).toBeGreaterThan(0);
   });
 
   it.each(ENDPOINTS)("challenges an anonymous POST on %s", async (path) => {
@@ -158,11 +126,10 @@ describe("every endpoint spelling serves the JSON-RPC transport", () => {
       { accept: ACCEPT },
       initBody,
     );
+
     expect(res.status).toBe(401);
-    // RFC 9728 §3.3: the pointer names the metadata for the endpoint the client
-    // actually called, and that document echoes the matching identifier. One
-    // shared document would make a conforming client on a legacy URL discard it
-    // ("MUST NOT be used") and fail OAuth outright.
+    // RFC 9728 §3.3: the pointer names the metadata for the endpoint called,
+    // so a shared document makes a legacy-URL client discard it and fail OAuth.
     expect(res.headers["www-authenticate"]).toBe(
       `Bearer resource_metadata="${METADATA_URL}${aliasOf(path)}", ` +
         'scope="papers:read guidance:read account:read"',
@@ -179,6 +146,7 @@ describe("the DNS-rebinding guard covers the new root path", () => {
       { accept: ACCEPT, authorization: AUTH, host: "attacker.example.com" },
       initBody,
     );
+
     expect(res.status).toBe(403);
     expect(res.body).toMatch(/host not allowed/i);
   });
@@ -191,6 +159,7 @@ describe("the DNS-rebinding guard covers the new root path", () => {
       { accept: ACCEPT, authorization: AUTH, host: "attacker.example.com" },
       initBody,
     );
+
     expect(res.status).toBe(404);
   });
 
@@ -208,6 +177,7 @@ describe("the DNS-rebinding guard covers the new root path", () => {
         },
         initBody,
       );
+
       expect(res.status).toBe(403);
       expect(res.body).toMatch(/origin not allowed/i);
     },
@@ -217,8 +187,7 @@ describe("the DNS-rebinding guard covers the new root path", () => {
 describe("the endpoint spellings are interchangeable mid-conversation", () => {
   it("opens on the legacy /mcp, continues on the root, and its stale id is ignored on /v1/mcp", async () => {
     // A client that opened against `/mcp` before the migration keeps sending
-    // the id its handshake returned. Nothing looks it up any more, so every
-    // spelling serves it, and none of them refuses it.
+    // that id; nothing looks it up now, so every spelling serves it.
     const init = await rawRequest(
       port,
       "POST",
@@ -226,6 +195,7 @@ describe("the endpoint spellings are interchangeable mid-conversation", () => {
       { accept: ACCEPT, authorization: AUTH },
       initBody,
     );
+
     expect(init.status).toBe(200);
 
     for (const path of ["/", "/v1/mcp"]) {
@@ -240,10 +210,9 @@ describe("the endpoint spellings are interchangeable mid-conversation", () => {
         },
         toolsList(2),
       );
+
       expect(list.status).toBe(200);
-      expect(
-        (parseJsonRpc(list.body).result?.tools ?? []).length,
-      ).toBeGreaterThan(0);
+      expect(rpcTools(list.body).length).toBeGreaterThan(0);
     }
   });
 });
@@ -262,14 +231,12 @@ describe("each endpoint advertises its own resource identifier", () => {
         `/.well-known/oauth-protected-resource${alias}`,
         {},
       );
+
       expect(res.status).toBe(200);
-      const body = JSON.parse(res.body) as {
-        resource: string;
-        authorization_servers: string[];
-      };
-      expect(body.resource).toBe(expected);
+      const body = parseJsonObject(res.body);
+      expect(jsonString(body.resource, "resource")).toBe(expected);
       // Everything else is shared: one authorization server for every alias.
-      expect(body.authorization_servers).toEqual([
+      expect(jsonStrings(body.authorization_servers)).toEqual([
         "https://api.luneresearch.com",
       ]);
     },
@@ -281,18 +248,18 @@ describe("GET on the endpoint", () => {
     const res = await rawRequest(port, "GET", "/", {
       accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     });
+
     expect(res.status).toBe(302);
     expect(res.headers.location).toBe("https://luneresearch.com/docs/mcp");
   });
 
-  // 405 = "no standalone SSE stream offered at this endpoint", which the
-  // Streamable-HTTP spec allows at any time, and which `2026-07-28` makes
-  // unconditional: GET was a session operation and sessions are gone. It must
-  // never become 404, which declares the session terminated.
+  // 405 = "no standalone SSE stream here", spec-legal at any time and
+  // unconditional in 2026-07-28. Never 404: that declares the session dead.
   it("declines the stream for an MCP client with 405", async () => {
     const res = await rawRequest(port, "GET", "/", {
       accept: "text/event-stream",
     });
+
     expect(res.status).toBe(405);
   });
 
@@ -303,6 +270,7 @@ describe("GET on the endpoint", () => {
         accept:
           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       });
+
       expect(res.status).toBe(405);
     },
   );

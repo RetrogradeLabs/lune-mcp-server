@@ -15,7 +15,15 @@
  *     request is dispatched.
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import type { KyInstance } from "ky";
+import {
+  createFakeKy,
+  jsonReply,
+  EMPTY_REPLY,
+  type FakeReply,
+  type RecordedCall,
+} from "../support/fake-ky.js";
+import type { JsonValue } from "../../src/json.js";
+import type { ToolCallResult } from "../../src/tool-result.js";
 import { callPaperTool } from "../../src/tools/papers.js";
 import { callGuidanceTool } from "../../src/tools/guidance.js";
 import { TOOL_RESPONSE_CACHE } from "../../src/cache.js";
@@ -25,37 +33,23 @@ beforeEach(async () => {
 });
 
 /** Minimal ky double: records calls, returns whatever you set. */
-function fakeKy(): {
-  ky: KyInstance;
-  calls: Array<{ method: string; url: string; opts?: unknown }>;
-  setResponse: (data: unknown) => void;
-} {
-  const calls: Array<{ method: string; url: string; opts?: unknown }> = [];
-  let response: unknown = {};
-  const make = (method: string) => (url: string, opts?: unknown) => {
-    calls.push({ method, url, opts });
-    return {
-      json: async () => response,
-    } as unknown as Promise<unknown>;
-  };
+function fakeKy() {
+  let reply: FakeReply = EMPTY_REPLY;
+  const { ky, calls } = createFakeKy(() => reply);
+
   return {
-    ky: {
-      get: make("GET"),
-      post: make("POST"),
-      delete: make("DELETE"),
-      put: make("PUT"),
-    } as unknown as KyInstance,
+    ky,
     calls,
-    setResponse: (d) => {
-      response = d;
+    setResponse(data: JsonValue) {
+      reply = jsonReply(data);
     },
   };
 }
 
 /** Confirm zod rejected before any HTTP went out. */
 async function expectZodReject(
-  fn: () => Promise<unknown>,
-  calls: Array<{ method: string; url: string; opts?: unknown }>,
+  fn: () => Promise<ToolCallResult>,
+  calls: RecordedCall[],
 ): Promise<void> {
   await expect(fn()).rejects.toThrow();
   expect(calls, "tool must reject before issuing HTTP").toHaveLength(0);
@@ -74,11 +68,7 @@ describe("search_papers input validation", () => {
 
   it("rejects missing query (undefined)", async () => {
     const { ky, calls } = fakeKy();
-    await expectZodReject(
-      () =>
-        callPaperTool(ky, "search_papers", {} as unknown as { query: string }),
-      calls,
-    );
+    await expectZodReject(() => callPaperTool(ky, "search_papers", {}), calls);
   });
 
   it("rejects non-string query", async () => {
@@ -86,7 +76,7 @@ describe("search_papers input validation", () => {
     await expectZodReject(
       () =>
         callPaperTool(ky, "search_papers", {
-          query: 123 as unknown as string,
+          query: 123,
         }),
       calls,
     );
@@ -154,7 +144,7 @@ describe("search_papers input validation", () => {
       () =>
         callPaperTool(ky, "search_papers", {
           query: "x",
-          detail: "yes" as unknown as boolean,
+          detail: "yes",
         }),
       calls,
     );
@@ -177,12 +167,7 @@ describe("search_related_papers input validation", () => {
   it("rejects missing paper_id", async () => {
     const { ky, calls } = fakeKy();
     await expectZodReject(
-      () =>
-        callPaperTool(
-          ky,
-          "search_related_papers",
-          {} as unknown as { paper_id: string },
-        ),
+      () => callPaperTool(ky, "search_related_papers", {}),
       calls,
     );
   });
@@ -219,7 +204,7 @@ describe("get_paper_fulltext input validation", () => {
       () =>
         callPaperTool(ky, "get_paper_fulltext", {
           paper_id: "abc",
-          format: "xml" as unknown as "markdown",
+          format: "xml",
         }),
       calls,
     );
@@ -267,7 +252,7 @@ describe("get_paper_citations input validation", () => {
       () =>
         callPaperTool(ky, "get_paper_citations", {
           paper_id: "abc",
-          direction: "sideways" as unknown as "cited_by",
+          direction: "sideways",
         }),
       calls,
     );
@@ -276,12 +261,14 @@ describe("get_paper_citations input validation", () => {
   it("accepts direction=cited_by|cites", async () => {
     const { ky, calls, setResponse } = fakeKy();
     setResponse({ citations: [] });
+
     for (const d of ["cited_by", "cites"] as const) {
       await callPaperTool(ky, "get_paper_citations", {
         paper_id: "abc",
         direction: d,
       });
     }
+
     expect(calls).toHaveLength(2);
   });
 });
@@ -344,10 +331,8 @@ describe("get_conference_papers input validation", () => {
 
   it("accepts year in valid range + offset=0", async () => {
     const { ky, calls, setResponse } = fakeKy();
-    // get_conference_papers fuzzy-resolves the conference short name via
-    // a list_conferences pre-call, so a successful invocation is ≥1 call,
-    // not exactly 1. The point of this test is "boundary value accepted,
-    // a request was issued".
+    // get_conference_papers fuzzy-resolves the short name via list_conferences
+    // pre-call, so a successful invocation is >=1 call, not exactly 1.
     setResponse({ conferences: [{ short_name: "NeurIPS" }], papers: [] });
     await callPaperTool(ky, "get_conference_papers", {
       conference: "NeurIPS",

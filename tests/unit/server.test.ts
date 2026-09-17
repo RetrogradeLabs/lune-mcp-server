@@ -10,6 +10,7 @@
  * would carry the previous client's attribution.
  */
 import { describe, expect, it, vi } from "vitest";
+import { createFakeKy } from "../support/fake-ky.js";
 import { Server } from "@modelcontextprotocol/server";
 import type { KyInstance } from "ky";
 import {
@@ -42,25 +43,21 @@ describe("server constants", () => {
 
 describe("makeServer", () => {
   it("returns an MCP Server instance with tools registered", () => {
-    const makeClient = vi.fn<() => KyInstance>(
-      () => ({}) as unknown as KyInstance,
-    );
+    const makeClient = vi.fn<() => KyInstance>(() => createFakeKy().ky);
     const server = makeServer(makeClient);
     expect(server).toBeInstanceOf(Server);
   });
 
   it("does not eagerly invoke the client factory at construction time", () => {
     // The factory must only run per tool invocation, never at wiring time.
-    const makeClient = vi.fn<() => KyInstance>(
-      () => ({}) as unknown as KyInstance,
-    );
+    const makeClient = vi.fn<() => KyInstance>(() => createFakeKy().ky);
     makeServer(makeClient);
     expect(makeClient).not.toHaveBeenCalled();
   });
 
   it("builds independent server instances on repeated calls", () => {
-    const a = makeServer(() => ({}) as unknown as KyInstance);
-    const b = makeServer(() => ({}) as unknown as KyInstance);
+    const a = makeServer(() => createFakeKy().ky);
+    const b = makeServer(() => createFakeKy().ky);
     expect(a).not.toBe(b);
   });
 });

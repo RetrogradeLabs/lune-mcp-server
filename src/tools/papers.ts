@@ -1,6 +1,7 @@
 import { ProtocolError } from "@modelcontextprotocol/server";
 import type { KyInstance } from "ky";
 import { cachedJson } from "../api/cached-fetch.js";
+import { isJsonString, type JsonValue } from "../json.js";
 import { HEAVY_TOOL_TIMEOUT_MS } from "../api/client.js";
 import { httpErrorToToolResult, LuneErrorCode } from "../errors.js";
 import {
@@ -10,6 +11,7 @@ import {
 import {
   ALWAYS_LOAD_META,
   plainText,
+  READ_ONLY_OPEN,
   structuredJson,
   type ToolAnnotations,
   type ToolCallResult,
@@ -39,41 +41,36 @@ import {
   CitationsInput,
   ConfPapersInput,
   ExtractInput,
+  ExtractInputExternal,
   FullTextInput,
+  FullTextInputExternal,
   GatherEvidenceInput,
+  GatherEvidenceInputExternal,
   ListConfsInput,
   RelatedInput,
   SearchInput,
+  SearchInputExternal,
   SearchManyInput,
   VerifyInput,
+  VerifyInputExternal,
 } from "./papers.schemas.js";
 
-// Per-tool TTL fallbacks (ms) used when the API response carries no usable
-// `Cache-Control: max-age=N` header. The HTTP-cache policy on the API mirrors
-// these values, so steady-state these defaults rarely fire; they're a hedge
-// against rolling deploys where the API hasn't been updated yet.
+// API cache headers normally win; these per-tool TTLs cover rolling-deploy
+// responses without usable max-age.
 const TTL_SEARCH = 60_000;
+
 const TTL_PAPER = 300_000;
+
 const TTL_FULLTEXT = 24 * 60 * 60_000;
+
 const TTL_CITATIONS = 300_000;
+
 const TTL_CONFERENCES = 600_000;
+
 const TTL_CONFERENCE_PAPERS = 120_000;
 
-// Tool catalog
-
-// Read-only retrieval tools that surface academic papers. `openWorldHint: true`
-// because the corpus indexes external publications, the underlying world that
-// shapes the answer is unbounded, not just our DB.
-const READ_ONLY_OPEN: ToolAnnotations = {
-  readOnlyHint: true,
-  destructiveHint: false,
-  openWorldHint: true,
-  idempotentHint: true,
-};
-
-// search_papers is read-only but NOT idempotent: the same query can return
-// different results across calls (HyDE LLM rewrite + citation/freshness
-// boost). Omit idempotentHint so a client cannot memoize a stale search.
+// Omit idempotentHint: HyDE rewrites and ranking boosts can change repeated
+// search results. `READ_ONLY_OPEN` in `_shared.ts` is the idempotent variant.
 const READ_ONLY_OPEN_NONIDEMPOTENT: ToolAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -122,6 +119,7 @@ export const PAPER_TOOLS: ToolDef[] = [
       "citations; date and citations re-rank within the ranked shortlist, not the whole " +
       "corpus). Narrow with `year_min` / `year_max` / `venues`.",
     inputSchema: SearchInput,
+    externalInputSchema: SearchInputExternal,
     outputSchema: SearchPapersOutput,
     annotations: READ_ONLY_OPEN_NONIDEMPOTENT,
     meta: ALWAYS_LOAD_META,
@@ -175,6 +173,7 @@ export const PAPER_TOOLS: ToolDef[] = [
       '`sections` (case-insensitive headings, e.g. ["Methods"]) to fetch only those ' +
       "sections instead of the whole document.",
     inputSchema: FullTextInput,
+    externalInputSchema: FullTextInputExternal,
     // No outputSchema: response shape varies by `format` (markdown text vs
     // structured sections). Declaring one would mismatch one of the branches.
     annotations: READ_ONLY_OPEN,
@@ -256,6 +255,7 @@ export const PAPER_TOOLS: ToolDef[] = [
       "extract only papers you already judged relevant from a search or citation " +
       "result. For the raw text of a single paper, use get_paper_fulltext instead.",
     inputSchema: ExtractInput,
+    externalInputSchema: ExtractInputExternal,
     outputSchema: ExtractOutput,
     annotations: READ_ONLY_OPEN,
   },
@@ -284,11 +284,10 @@ export const PAPER_TOOLS: ToolDef[] = [
       "`paper_id`s are fetch handles for get_paper_fulltext, not for showing to " +
       "the user, cite papers by title, authors, and venue.",
     inputSchema: VerifyInput,
+    externalInputSchema: VerifyInputExternal,
     outputSchema: VerifyOutput,
-    // Verify runs a SEARCH (HyDE-free hybrid retrieval) + an LLM judgment per
-    // claim, so the same claim can yield different evidence / verdicts across
-    // calls. NON-idempotent like search_papers / search_papers_many (NOT like a
-    // pure lookup), so omit idempotentHint to keep clients from memoizing it.
+    // Omit idempotentHint: retrieval and per-claim LLM judgment can change
+    // evidence and verdicts between calls.
     annotations: READ_ONLY_OPEN_NONIDEMPOTENT,
   },
   {
@@ -312,6 +311,7 @@ export const PAPER_TOOLS: ToolDef[] = [
       "verbatim quote verified server-side, so you can cite it directly. You " +
       "write the answer; cite papers by title, authors, and venue, not by paper_id.",
     inputSchema: GatherEvidenceInput,
+    externalInputSchema: GatherEvidenceInputExternal,
     outputSchema: GatherEvidenceOutput,
     annotations: READ_ONLY_OPEN_NONIDEMPOTENT,
   },
@@ -335,6 +335,7 @@ async function resolveConferenceArg(
   raw: string,
 ): Promise<string> {
   let list: ConferenceCandidate[] | null = null;
+
   try {
     const r = await cachedJson<ConferenceCandidate[]>(
       api,
@@ -342,14 +343,17 @@ async function resolveConferenceArg(
       "conferences",
       { defaultTtlMs: TTL_CONFERENCES },
     );
+
     if (Array.isArray(r)) list = r;
   } catch {
     // Unreachable conferences endpoint shouldn't break the tool; fall
     // through and let the downstream call surface its own error.
   }
+
   if (!list) return raw;
 
   const result = resolveConferenceShortName(raw, list);
+
   switch (result.kind) {
     case "match":
       return result.short_name;
@@ -374,24 +378,149 @@ async function resolveConferenceArg(
  * through the fuzzy resolver so a near-miss short name reaches the API as the
  * value it expects.
  */
+/**
+ * The corpus filter fields `applySharedFilters` may set. Every consuming route is
+ * `extra="forbid"` server-side, so this field set is a wire contract rather than a
+ * convenience: a name the route does not declare 422s the whole request. Both
+ * `conference` and `conference_short_name` appear because single search renames it
+ * and the batch, verify and gather routes do not; the caller picks via `conferenceKey`.
+ */
+type SharedFilterTarget = {
+  conference?: string | undefined;
+  conference_short_name?: string | undefined;
+  year?: number | undefined;
+  year_min?: number | undefined;
+  year_max?: number | undefined;
+  venues?: string[] | undefined;
+};
+
+/**
+ * Request bodies for the corpus routes. Each API route is `extra="forbid"`, so the
+ * field set below is the wire contract: adding a name the route does not declare
+ * turns every call into a 422, and no test in this repo posts to a real API. They are
+ * `type` rather than `interface` on purpose, because only a type alias carries the
+ * implicit index signature that makes it assignable to the JSON body contract.
+ *
+ * Fields that zod fills from a `.default()` stay optional here: absent and present
+ * are equivalent on the wire, since the API applies the same defaults.
+ */
+type SearchRequestBody = {
+  query: string;
+  limit?: number | undefined;
+  offset?: number | undefined;
+  sort_by?: string | undefined;
+  conference?: string | undefined;
+  conference_short_name?: string | undefined;
+  year?: number | undefined;
+  year_min?: number | undefined;
+  year_max?: number | undefined;
+  venues?: string[] | undefined;
+};
+
+type SearchManyRequestBody = {
+  queries: string[];
+  limit?: number | undefined;
+  conference?: string | undefined;
+  conference_short_name?: string | undefined;
+  year?: number | undefined;
+  year_min?: number | undefined;
+  year_max?: number | undefined;
+  venues?: string[] | undefined;
+};
+
+type ExtractRequestBody = {
+  paper_ids: string[];
+  fields: { name: string; type: string; description?: string | undefined }[];
+  instruction?: string | undefined;
+  source: string;
+  sections?: string[] | undefined;
+};
+
+type VerifyRequestBody = {
+  claims: string[];
+  source: string;
+  context?: string | undefined;
+  conference?: string | undefined;
+  conference_short_name?: string | undefined;
+  year?: number | undefined;
+  year_min?: number | undefined;
+  year_max?: number | undefined;
+  venues?: string[] | undefined;
+};
+
+type GatherEvidenceRequestBody = {
+  task: string;
+  queries: string[];
+  source: string;
+  requirements?: { key: string; description: string }[] | undefined;
+  draft?: string | undefined;
+  max_iterations?: number | undefined;
+  max_total_queries?: number | undefined;
+  conference?: string | undefined;
+  conference_short_name?: string | undefined;
+  year?: number | undefined;
+  year_min?: number | undefined;
+  year_max?: number | undefined;
+  venues?: string[] | undefined;
+};
+
+type WorkspaceDocumentRequestBody = {
+  document_id: string;
+  format: string;
+  sections?: string[] | undefined;
+};
+
+/**
+ * A response body that carries either a rendered document or its sections. The
+ * fields are `JsonValue` because nothing has validated the upstream payload yet.
+ */
+type DocumentResponse = {
+  body?: JsonValue;
+  sections?: JsonValue;
+  title?: JsonValue;
+};
+
+/**
+ * `URLSearchParams` stringifies an `undefined` value to the literal "undefined",
+ * which reaches FastAPI as a real argument and 422s. Omit the key instead.
+ */
+function setIfPresent(
+  params: URLSearchParams,
+  key: string,
+  value: string | number | undefined,
+): void {
+  if (value !== undefined) params.set(key, String(value));
+}
+
+function citationParams(a: {
+  direction?: string | undefined;
+  limit?: number | undefined;
+  offset?: number | undefined;
+}): URLSearchParams {
+  const params = new URLSearchParams();
+  setIfPresent(params, "direction", a.direction);
+  setIfPresent(params, "limit", a.limit);
+  setIfPresent(params, "offset", a.offset);
+
+  return params;
+}
+
 async function applySharedFilters(
   api: KyInstance,
-  body: Record<string, unknown>,
-  filters: {
-    conference?: string;
-    year?: number;
-    year_min?: number;
-    year_max?: number;
-    venues?: string[];
-  },
+  body: SharedFilterTarget,
+  filters: SharedFilterTarget,
   conferenceKey: "conference" | "conference_short_name",
 ): Promise<void> {
   if (filters.conference) {
     body[conferenceKey] = await resolveConferenceArg(api, filters.conference);
   }
+
   if (filters.year) body.year = filters.year;
+
   if (filters.year_min !== undefined) body.year_min = filters.year_min;
+
   if (filters.year_max !== undefined) body.year_max = filters.year_max;
+
   if (filters.venues && filters.venues.length > 0) {
     body.venues = await Promise.all(
       filters.venues.map((v) => resolveConferenceArg(api, v)),
@@ -402,6 +531,7 @@ async function applySharedFilters(
 // Per-tool handlers
 
 type SearchArgs = ReturnType<typeof SearchInput.parse>;
+
 type FullTextArgs = ReturnType<typeof FullTextInput.parse>;
 
 /**
@@ -418,68 +548,71 @@ async function workspaceSearch(
   a: SearchArgs,
 ): Promise<ToolCallResult> {
   const wr = await cachedJson(api, "post", "workspaces/search", {
-    json: { query: a.query, limit: a.limit },
+    json:
+      a.limit === undefined
+        ? { query: a.query }
+        : { query: a.query, limit: a.limit },
   });
+
   return structuredJson(slimWorkspaceSearchAsHits(wr));
 }
 
 async function handleSearchPapers(
   api: KyInstance,
-  args: unknown,
+  args: JsonValue,
 ): Promise<ToolCallResult> {
   const a = SearchInput.parse(args);
+
   if (a.source === "workspace") return workspaceSearch(api, a);
   // Enriched by default; `detail: false` opts down to the concise shape.
   const detail = a.detail ?? true;
-  // The catalog's body field is `conference_short_name`; surface as `conference` to the agent.
-  // zod 4 materialises `.default()` even on `.optional()` fields, so `limit`,
-  // `offset`, and `sort_by` are defined at runtime; the assertions narrow the
-  // residual `| undefined` carried by `.optional()`.
-  const body: Record<string, unknown> = {
+
+  // Body field is `conference_short_name`; the agent sees `conference`. zod
+  // materialises the nested `.default()`, so these optional fields are set.
+  const body: SearchRequestBody = {
     query: a.query,
     limit: a.limit,
-    offset: a.offset as number,
-    sort_by: a.sort_by as string,
+    offset: a.offset,
+    sort_by: a.sort_by,
   };
+
   await applySharedFilters(api, body, a, "conference_short_name");
-  // `detail` is an MCP-boundary projection knob, NOT an
-  // API request field: the /search response already carries
-  // `matched_chunks` per hit, and the API's SearchRequest is
-  // `extra="forbid"` (an unknown body field 422s). So we never send the
-  // flag upstream; we only decide here how to shape the response.
+
+  // `detail` is an MCP-boundary projection knob, not an API field: the
+  // response already carries matched_chunks, and SearchRequest is extra=forbid.
   const r = await cachedJson(api, "post", "search", {
     json: body,
     defaultTtlMs: TTL_SEARCH,
   });
+
   return structuredJson(slimSearchResponse(r, detail));
 }
 
 async function handleSearchPapersMany(
   api: KyInstance,
-  args: unknown,
+  args: JsonValue,
 ): Promise<ToolCallResult> {
   const a = SearchManyInput.parse(args);
   // Enriched by default; `detail: false` opts down to the concise shape.
   const detail = a.detail ?? true;
-  // The batch request's body field is literally `conference` (a real
-  // field; `conference_short_name` is only a derived read-only property
-  // server-side), so this maps with NO rename, unlike single search.
-  // zod 4 materialises `.default()` so `limit` is defined at runtime; the
-  // assertion narrows the residual `| undefined`.
-  const body: Record<string, unknown> = {
+
+  // The batch body field is literally `conference` (server-side,
+  // `conference_short_name` is derived), so no rename here, unlike search.
+  const body: SearchManyRequestBody = {
     queries: a.queries,
-    limit: a.limit as number,
+    limit: a.limit,
   };
+
   await applySharedFilters(api, body, a, "conference");
-  // `detail` is an MCP-boundary projection knob, NOT an API field: the
-  // batch response already carries `matched_chunks` per hit, and the
-  // API's BatchSearchRequest is `extra="forbid"` (an unknown body field
-  // 422s). So we never send it upstream; we only shape the response here.
+
+  // `detail` is an MCP-boundary projection knob, not an API field: the
+  // batch response carries matched_chunks, and the body is extra=forbid too.
   const r = await cachedJson(api, "post", "search/batch", {
     json: body,
     defaultTtlMs: TTL_SEARCH,
     timeout: HEAVY_TOOL_TIMEOUT_MS,
   });
+
   return structuredJson(slimSearchManyResponse(r, detail));
 }
 
@@ -495,35 +628,45 @@ async function workspaceDocument(
   api: KyInstance,
   a: FullTextArgs,
 ): Promise<ToolCallResult> {
-  const wbody: Record<string, unknown> = {
+  const wbody: WorkspaceDocumentRequestBody = {
     document_id: a.paper_id,
-    format: (a.format ?? "markdown") as string,
+    format: a.format ?? "markdown",
   };
+
   if (a.sections && a.sections.length > 0) wbody.sections = a.sections;
-  const wr = await cachedJson<{
-    body?: string;
-    sections?: unknown;
-    title?: string;
-  }>(api, "post", "workspaces/document", { json: wbody });
-  if ((a.format ?? "markdown") === "markdown" && typeof wr.body === "string") {
+
+  const wr = await cachedJson<DocumentResponse>(
+    api,
+    "post",
+    "workspaces/document",
+    {
+      json: wbody,
+    },
+  );
+
+  if ((a.format ?? "markdown") === "markdown" && isJsonString(wr.body)) {
     return plainText(wr.body);
   }
-  return structuredJson(wr as Record<string, unknown>);
+
+  return structuredJson(wr);
 }
 
 async function handleFullText(
   api: KyInstance,
-  args: unknown,
+  args: JsonValue,
 ): Promise<ToolCallResult> {
   const a = FullTextInput.parse(args);
+
   if (a.source === "workspace") return workspaceDocument(api, a);
-  // Build searchParams from an array of pairs so each `sections` entry is
-  // its own repeated query param. A plain object value would be CSV-joined
-  // by Ky's URLSearchParams stringification, and FastAPI's `list[str]`
-  // param would then receive one comma-joined value, not a list.
-  const sp = new URLSearchParams([["format", a.format as string]]);
+  // Pairs, not an object: Ky CSV-joins an array value, and FastAPI's
+  // `list[str]` would then receive one comma-joined string, not a list.
+  const sp = new URLSearchParams();
+
+  if (a.format !== undefined) sp.set("format", a.format);
+
   for (const s of a.sections ?? []) sp.append("sections", s);
-  const r = await cachedJson<{ body?: string; sections?: unknown }>(
+
+  const r = await cachedJson<DocumentResponse>(
     api,
     "get",
     `papers/${encodeURIComponent(a.paper_id)}/fulltext`,
@@ -532,17 +675,19 @@ async function handleFullText(
       defaultTtlMs: TTL_FULLTEXT,
     },
   );
+
   // Markdown response carries a `body` field; JSON form carries `sections`.
-  if (a.format === "markdown" && typeof r.body === "string")
-    return plainText(r.body);
-  return structuredJson(r as Record<string, unknown>);
+  if (a.format === "markdown" && isJsonString(r.body)) return plainText(r.body);
+
+  return structuredJson(r);
 }
 
 async function handleCitations(
   api: KyInstance,
-  args: unknown,
+  args: JsonValue,
 ): Promise<ToolCallResult> {
   const a = CitationsInput.parse(args);
+
   // `limit` / `offset` carry zod `.default()`s, so they are defined at
   // runtime; the assertions narrow the `.optional()` `| undefined`.
   const r = await cachedJson(
@@ -550,47 +695,43 @@ async function handleCitations(
     "get",
     `papers/${encodeURIComponent(a.paper_id)}/citations`,
     {
-      searchParams: {
-        direction: a.direction,
-        limit: a.limit as number,
-        offset: a.offset as number,
-      },
+      searchParams: citationParams(a),
       defaultTtlMs: TTL_CITATIONS,
     },
   );
+
   return structuredJson(slimCitations(r));
 }
 
 async function handleListConferences(
   api: KyInstance,
-  args: unknown,
+  args: JsonValue,
 ): Promise<ToolCallResult> {
   const a = ListConfsInput.parse(args);
   const sp: Record<string, string> = {};
+
   if (a.category) sp.category = a.category;
+
   const r = await cachedJson(api, "get", "conferences", {
     searchParams: sp,
     defaultTtlMs: TTL_CONFERENCES,
   });
+
   return structuredJson(slimConferenceList(r));
 }
 
 async function handleConferencePapers(
   api: KyInstance,
-  args: unknown,
+  args: JsonValue,
 ): Promise<ToolCallResult> {
   const a = ConfPapersInput.parse(args);
   const conference = await resolveConferenceArg(api, a.conference);
-  // zod 4 materialises both `.default()`s even on `.optional()` fields,
-  // so `a.limit` / `a.offset` are guaranteed defined at runtime; the
-  // assertions narrow away the residual TS `| undefined` carried by
-  // `.optional()`.
-  const sp: Record<string, string | number> = {
-    limit: a.limit as number,
-    offset: a.offset as number,
-    sort: a.sort as string,
-  };
-  if (a.year) sp.year = a.year;
+  const sp = new URLSearchParams();
+  setIfPresent(sp, "limit", a.limit);
+  setIfPresent(sp, "offset", a.offset);
+  setIfPresent(sp, "sort", a.sort);
+  setIfPresent(sp, "year", a.year);
+
   const r = await cachedJson(
     api,
     "get",
@@ -600,113 +741,118 @@ async function handleConferencePapers(
       defaultTtlMs: TTL_CONFERENCE_PAPERS,
     },
   );
-  return structuredJson(slimConferencePapers(r, a.offset as number));
+
+  return structuredJson(slimConferencePapers(r, a.offset ?? 0));
 }
 
 async function handleRelated(
   api: KyInstance,
-  args: unknown,
+  args: JsonValue,
 ): Promise<ToolCallResult> {
   const a = RelatedInput.parse(args);
-  const sp: Record<string, number> = { limit: a.limit as number };
+  const sp = new URLSearchParams();
+  setIfPresent(sp, "limit", a.limit);
+
   const r = await cachedJson(
     api,
     "get",
     `papers/${encodeURIComponent(a.paper_id)}/related`,
     { searchParams: sp, defaultTtlMs: TTL_PAPER },
   );
+
   return structuredJson(slimRelated(r));
 }
 
 async function handleExtract(
   api: KyInstance,
-  args: unknown,
+  args: JsonValue,
 ): Promise<ToolCallResult> {
   const a = ExtractInput.parse(args);
-  // Every field maps 1:1 onto the API's ExtractRequest body (paper_ids,
-  // fields, instruction, sections), so the parsed input is the body. The
-  // response rows are already compact, so there is no slim projection: we
-  // pass the structured envelope straight through. `papers/extract` is on
-  // PER_PRINCIPAL_PATHS (source="workspace" reads the caller's active
-  // workspace), so cachedJson bypasses BOTH the shared cache and the
-  // single-flight: every call re-runs and never collapses onto another
-  // principal's response.
-  const body: Record<string, unknown> = {
+
+  // Fields map 1:1 onto the API's ExtractRequest and the rows are already
+  // compact, so no projection. `papers/extract` is on PER_PRINCIPAL_PATHS.
+  const body: ExtractRequestBody = {
     paper_ids: a.paper_ids,
     fields: a.fields,
     instruction: a.instruction,
     source: a.source ?? "corpus",
   };
+
   if (a.sections && a.sections.length > 0) body.sections = a.sections;
+
   const r = await cachedJson(api, "post", "papers/extract", {
     json: body,
     defaultTtlMs: 0,
     timeout: HEAVY_TOOL_TIMEOUT_MS,
   });
-  return structuredJson(r as Record<string, unknown>);
+
+  return structuredJson(r);
 }
 
 async function handleVerify(
   api: KyInstance,
-  args: unknown,
+  args: JsonValue,
 ): Promise<ToolCallResult> {
   const a = VerifyInput.parse(args);
-  // Every field maps 1:1 onto the API's VerifyRequest body. `conference`
-  // is a real body field there (resolved server-side via
-  // resolve_search_filters), like the batch route, so it maps with NO
-  // rename; we still canonicalise it (and each `venues` entry) through the
-  // fuzzy resolver so a near-miss short name reaches the API as the value
-  // it expects. `claims/verify` is per-principal (it applies the caller's
-  // excluded_conference_ids to its evidence search) AND not in
-  // GLOBAL_CACHEABLE_PATHS, so cachedJson bypasses the shared cache and
-  // every call re-runs the verification.
-  const body: Record<string, unknown> = {
+
+  // Fields map 1:1 onto VerifyRequest; `conference` is a real body field
+  // there, but still fuzzy-resolved so a near-miss short name reaches the API.
+  const body: VerifyRequestBody = {
     claims: a.claims,
     source: a.source ?? "corpus",
   };
+
   if (a.context) body.context = a.context;
+
   // Corpus filters do not apply to source="workspace" (the API ignores
-  // them); skip resolution so an unknown venue can't spuriously 422 a
-  // workspace verify.
+  // them), so skipping keeps an unknown venue from 422-ing a workspace verify.
   if (a.source !== "workspace") {
     await applySharedFilters(api, body, a, "conference");
   }
+
   const r = await cachedJson(api, "post", "claims/verify", {
     json: body,
     defaultTtlMs: 0,
     timeout: HEAVY_TOOL_TIMEOUT_MS,
   });
-  return structuredJson(r as Record<string, unknown>);
+
+  return structuredJson(r);
 }
 
 async function handleGatherEvidence(
   api: KyInstance,
-  args: unknown,
+  args: JsonValue,
 ): Promise<ToolCallResult> {
   const a = GatherEvidenceInput.parse(args);
-  // `conference` maps 1:1 (a real body field, like search_papers_many /
-  // verify_claims), resolved through the fuzzy resolver. evidence/gather is
-  // per-principal and not cacheable, so ttl 0 re-runs every call.
-  const body: Record<string, unknown> = {
+
+  // `conference` is a real body field here (like search_papers_many), still
+  // fuzzy-resolved. evidence/gather is per-principal, so ttl 0 re-runs it.
+  const body: GatherEvidenceRequestBody = {
     task: a.task,
     queries: a.queries,
     source: a.source ?? "corpus",
   };
+
   if (a.requirements) body.requirements = a.requirements;
+
   if (a.draft) body.draft = a.draft;
   body.max_iterations = a.max_iterations;
+
   if (a.max_total_queries !== undefined)
     body.max_total_queries = a.max_total_queries;
+
   // Corpus filters do not apply to source="workspace" (API ignores them).
   if (a.source !== "workspace") {
     await applySharedFilters(api, body, a, "conference");
   }
+
   const r = await cachedJson(api, "post", "evidence/gather", {
     json: body,
     defaultTtlMs: 0,
     timeout: HEAVY_TOOL_TIMEOUT_MS,
   });
-  return structuredJson(r as Record<string, unknown>);
+
+  return structuredJson(r);
 }
 
 // Dispatcher
@@ -714,7 +860,7 @@ async function handleGatherEvidence(
 export async function callPaperTool(
   api: KyInstance,
   name: string,
-  args: unknown,
+  args: JsonValue,
 ): Promise<ToolCallResult> {
   try {
     switch (name) {
@@ -742,11 +888,8 @@ export async function callPaperTool(
         throw new Error(`unknown paper tool: ${name}`);
     }
   } catch (e) {
-    // Upstream Lune-API failures (401/402/403/404/429/5xx/...) resolve to a
-    // `{ isError: true }` tool result so the agent gets the actionable
-    // message in-context. Non-HTTP errors (zod validation, the fuzzy
-    // `InvalidParams`, the `unknown paper tool` guard) are re-thrown as
-    // JSON-RPC protocol errors.
+    // Upstream API failures (401/402/403/404/429/5xx) resolve to an
+    // `{ isError: true }` tool result; the rest re-throw as protocol errors.
     return await httpErrorToToolResult(e, name);
   }
 }

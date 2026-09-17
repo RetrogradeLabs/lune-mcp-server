@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { listToolsResponse } from "../../src/tools/index.js";
+import { jsonObject } from "../support/json.js";
 
 const EXPECTED_TOOL_NAMES = [
   "get_conference_papers",
@@ -14,10 +15,12 @@ const EXPECTED_TOOL_NAMES = [
   "gather_evidence",
   "search_related_papers",
   "search_research_guidance",
+  "search_figure_references",
+  "get_paper_figures",
 ];
 
 describe("tool catalog parity", () => {
-  it("exposes the 12 documented tools with stable names", () => {
+  it("exposes the 14 documented tools with stable names", () => {
     const r = listToolsResponse();
     const names = r.tools.map((t) => t.name).sort();
     expect(names).toEqual([...EXPECTED_TOOL_NAMES].sort());
@@ -25,10 +28,9 @@ describe("tool catalog parity", () => {
 
   it("every tool has a JSON schema with type=object", () => {
     const r = listToolsResponse();
+
     for (const t of r.tools) {
-      expect(t.inputSchema).toBeTypeOf("object");
-      // zod-to-json-schema renders an object schema for z.object(...)
-      const schema = t.inputSchema as { type?: string; properties?: unknown };
+      const schema = jsonObject(t.inputSchema, `${t.name} input schema`);
       expect(schema.type).toBe("object");
     }
   });
@@ -44,7 +46,9 @@ describe("tool catalog parity", () => {
 
   it("search_papers advertises the enriched default and paper_id agent hints", () => {
     const r = listToolsResponse();
-    const search = r.tools.find((t) => t.name === "search_papers")!;
+    const search = r.tools.find((t) => t.name === "search_papers");
+
+    if (!search) throw new Error("search_papers is missing from the catalog");
     // Hint 1: omitted `detail` returns the full abstract + matched `contexts`;
     // `detail: false` opts down to concise mode.
     expect(search.description).toMatch(/detail/);
@@ -59,19 +63,14 @@ describe("tool catalog parity", () => {
     );
 
     // The `detail` knob is exposed on the input schema as a boolean.
-    const schema = search.inputSchema as {
-      properties?: {
-        detail?: { type?: string; description?: string };
-        should_include_context?: { type?: string; description?: string };
-      };
-    };
-    expect(schema.properties?.detail?.type).toBe("boolean");
-    expect(schema.properties?.detail?.description).toMatch(
-      /true \(default\).*contexts/i,
-    );
-    expect(schema.properties?.detail?.description).toMatch(/false.*concise/i);
+    const schema = jsonObject(search.inputSchema, "search_papers input schema");
+    const properties = jsonObject(schema.properties, "schema properties");
+    const detail = jsonObject(properties.detail, "detail property");
+    expect(detail.type).toBe("boolean");
+    expect(detail.description).toMatch(/true \(default\).*contexts/i);
+    expect(detail.description).toMatch(/false.*concise/i);
     // The deprecated alias was dropped pre-publish; it must NOT be advertised.
-    expect(schema.properties?.should_include_context).toBeUndefined();
+    expect(properties.should_include_context).toBeUndefined();
   });
 
   it("stdio and HTTP transports share the same tool catalog (single source of truth)", () => {
@@ -80,33 +79,29 @@ describe("tool catalog parity", () => {
     const names = listToolsResponse()
       .tools.map((t) => t.name)
       .sort();
+
     expect(names).toEqual([...EXPECTED_TOOL_NAMES].sort());
   });
 
   it("every result-bearing tool advertises an outputSchema (MCP 2025-06-18)", () => {
     const r = listToolsResponse();
-    // get_paper_fulltext is the only tool whose response shape varies by
-    // input (markdown text vs JSON sections), so it intentionally omits
-    // outputSchema. Every other tool MUST declare one or the ChatGPT
-    // connector UI raises a "missing output schema" recommendation.
+    // get_paper_fulltext is the only tool whose response shape varies by input
+    // (markdown vs JSON sections); every other tool MUST declare outputSchema.
     const exempt = new Set(["get_paper_fulltext"]);
+
     for (const t of r.tools) {
-      const tool = t as { name: string; outputSchema?: { type?: string } };
-      if (exempt.has(tool.name)) {
+      if (exempt.has(t.name)) {
         expect(
-          tool.outputSchema,
-          `${tool.name} should not declare an outputSchema`,
+          t.outputSchema,
+          `${t.name} should not declare an outputSchema`,
         ).toBeUndefined();
         continue;
       }
-      expect(
-        tool.outputSchema,
-        `${tool.name} is missing outputSchema`,
-      ).toBeDefined();
-      expect(
-        tool.outputSchema?.type,
-        `${tool.name} outputSchema must be an object`,
-      ).toBe("object");
+
+      const output = jsonObject(t.outputSchema, `${t.name} output schema`);
+      expect(output.type, `${t.name} outputSchema must be an object`).toBe(
+        "object",
+      );
     }
   });
 });

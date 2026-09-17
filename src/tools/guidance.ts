@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { KyInstance } from "ky";
 import { cachedJson } from "../api/cached-fetch.js";
 import { httpErrorToToolResult } from "../errors.js";
+import type { JsonValue } from "../json.js";
 import {
   ALWAYS_LOAD_META,
   structuredJson,
@@ -77,37 +78,44 @@ export const GUIDANCE_TOOLS: ToolDef[] = [
 export async function callGuidanceTool(
   api: KyInstance,
   name: string,
-  args: unknown,
+  args: JsonValue,
 ): Promise<ToolCallResult> {
   try {
     switch (name) {
       case "search_research_guidance": {
         const a = SearchIn.parse(args);
-        // No defaultTtlMs: research-guidance/search is on PER_PRINCIPAL_PATHS
-        // (scope-gated + billable), so cachedJson bypasses the shared cache and
-        // single-flight entirely - every call reaches the API to be scoped + metered.
+
+        // No defaultTtlMs: research-guidance/search is on PER_PRINCIPAL_PATHS,
+        // so every call reaches the API to be scoped and metered.
         const r = await cachedJson(api, "post", "research-guidance/search", {
-          json: { query: a.query, limit: a.limit },
+          json:
+            a.limit === undefined
+              ? { query: a.query }
+              : { query: a.query, limit: a.limit },
         });
+
         return structuredJson(slimGuidanceSearch(r));
       }
+
       case "get_research_guidance_doc": {
         const a = GetIn.parse(args);
+
         const r = await cachedJson(
           api,
           "get",
           `research-guidance/${encodeURIComponent(a.doc_id)}`,
           { defaultTtlMs: TTL_GUIDANCE_DOC },
         );
+
         return structuredJson(slimGuidanceDoc(r));
       }
+
       default:
         throw new Error(`unknown guidance tool: ${name}`);
     }
   } catch (e) {
-    // Upstream Lune-API failures resolve to a `{ isError: true }` tool result
-    // (actionable, in-context); non-HTTP errors (zod, unknown-tool) re-throw
-    // as JSON-RPC protocol errors. See `httpErrorToToolResult`.
+    // API failures become an `{ isError: true }` tool result (actionable, in
+    // context); zod and unknown-tool errors re-throw as protocol errors.
     return await httpErrorToToolResult(e, name);
   }
 }

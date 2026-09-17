@@ -2,58 +2,71 @@
  * Unit coverage for the stdio transport runner (`src/transport/stdio.ts`).
  *
  * `runStdio` captures the Bearer token once, then hands ONE factory to
- * `serveStdio`, which owns the era decision for the connection. We mock both so
- * no real stdio handshake is attempted, and assert the wiring order.
+ * `serveStdio`, which owns the era decision for the connection. Its three
+ * collaborators are injected, so the wiring order is asserted without any real
+ * stdio handshake and without replacing a module.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-const makeServer = vi.fn<(factory: () => unknown) => object>(() => ({}));
-const makeClient = vi.fn<(token: string) => unknown>();
-const serveStdio = vi.fn<(factory: () => unknown) => { close: () => void }>(
-  () => ({ close: () => {} }),
-);
+import { runStdio, type StdioDeps } from "../../src/transport/stdio.js";
+import { createFakeKy } from "../support/fake-ky.js";
+import {
+  createRecordingServer,
+  createServerContext,
+} from "../support/mcp-server.js";
 
-vi.mock("../../src/server.js", () => ({
-  makeServer: (factory: () => unknown) => makeServer(factory),
-}));
-vi.mock("../../src/api/client.js", () => ({
-  makeClient: (token: string) => makeClient(token),
-}));
-vi.mock("@modelcontextprotocol/server/stdio", () => ({
-  serveStdio: (factory: () => unknown) => serveStdio(factory),
-}));
+/**
+ * Doubles for the three collaborators, typed off `StdioDeps` itself so each one
+ * has to satisfy the real signature it stands in for. `serve` has no
+ * implementation because `runStdio` discards its handle.
+ */
+function stdioDoubles() {
+  const buildClient = vi.fn<NonNullable<StdioDeps["buildClient"]>>(
+    () => createFakeKy().ky,
+  );
+
+  const buildServer = vi.fn<NonNullable<StdioDeps["buildServer"]>>(() =>
+    createRecordingServer(),
+  );
+
+  const serve = vi.fn<NonNullable<StdioDeps["serve"]>>();
+  const deps: StdioDeps = { serve, buildServer, buildClient };
+
+  return { deps, serve, buildServer, buildClient };
+}
 
 describe("runStdio", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
-    vi.clearAllMocks();
   });
 
   it("captures the token, builds a server, and serves it over stdio", async () => {
     vi.stubEnv("LUNE_API_KEY", "lune_stdio_token");
-    const { runStdio } = await import("../../src/transport/stdio.js");
+    const { deps, serve, buildServer, buildClient } = stdioDoubles();
 
-    await runStdio();
+    await runStdio(deps);
 
-    expect(serveStdio).toHaveBeenCalledTimes(1);
+    expect(serve).toHaveBeenCalledTimes(1);
 
     // `serveStdio` calls the factory itself (once per connection, plus once for
     // a discarded `server/discover` probe), so nothing is built until it does.
-    expect(makeServer).not.toHaveBeenCalled();
-    const factory = serveStdio.mock.calls[0]![0];
-    factory();
-    expect(makeServer).toHaveBeenCalledTimes(1);
+    expect(buildServer).not.toHaveBeenCalled();
+    const factory = serve.mock.calls[0]![0];
+    // `serveStdio` hands the factory a request context carrying the era it
+    // negotiated; stdio pins one connection, so either era exercises the wiring.
+    await factory({ ...createServerContext().mcpReq, era: "modern" });
+    expect(buildServer).toHaveBeenCalledTimes(1);
 
     // The client factory passed into makeServer must, when invoked, build a
     // client bound to the token captured at startup.
-    makeServer.mock.calls[0]![0]();
-    expect(makeClient).toHaveBeenCalledWith("lune_stdio_token");
+    buildServer.mock.calls[0]![0]();
+    expect(buildClient).toHaveBeenCalledWith("lune_stdio_token");
   });
 
   it("throws when LUNE_API_KEY is missing before anything is served", async () => {
     vi.stubEnv("LUNE_API_KEY", "");
-    const { runStdio } = await import("../../src/transport/stdio.js");
-    await expect(runStdio()).rejects.toThrow(/LUNE_API_KEY/);
-    expect(serveStdio).not.toHaveBeenCalled();
+    const { deps, serve } = stdioDoubles();
+    await expect(runStdio(deps)).rejects.toThrow(/LUNE_API_KEY/);
+    expect(serve).not.toHaveBeenCalled();
   });
 });

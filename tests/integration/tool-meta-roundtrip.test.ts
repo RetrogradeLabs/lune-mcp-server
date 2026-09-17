@@ -25,6 +25,8 @@ import {
   specTypeSchemas,
 } from "@modelcontextprotocol/server";
 import { makeServer } from "../../src/server.js";
+import { createFakeKy } from "../support/fake-ky.js";
+import { jsonRpcObject } from "../support/http.js";
 
 const ENTRY_TOOLS = [
   "search_papers",
@@ -32,31 +34,26 @@ const ENTRY_TOOLS = [
   "search_research_guidance",
 ];
 
-interface ParsedTool {
-  name: string;
-  _meta?: Record<string, unknown>;
-}
-
 /** Serve one `tools/list` and parse it the way a conformant client would. */
-async function listTools(
-  era: "modern" | "legacy",
-): Promise<readonly ParsedTool[]> {
-  // The makeClient factory is never invoked for tools/list (served locally).
-  const handler = createMcpHandler(() => makeServer(() => ({}) as never));
+async function listTools(era: "modern" | "legacy") {
+  const upstream = createFakeKy();
+  const handler = createMcpHandler(() => makeServer(() => upstream.ky));
+
   try {
+    const headers = new Headers({
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    });
+
+    if (era === "modern") {
+      headers.set("MCP-Protocol-Version", "2026-07-28");
+      headers.set("Mcp-Method", "tools/list");
+    }
+
     const res = await handler.fetch(
       new Request("https://mcp.test/", {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json, text/event-stream",
-          ...(era === "modern"
-            ? {
-                "MCP-Protocol-Version": "2026-07-28",
-                "Mcp-Method": "tools/list",
-              }
-            : {}),
-        },
+        headers,
         body: JSON.stringify({
           jsonrpc: "2.0",
           id: 1,
@@ -77,19 +74,23 @@ async function listTools(
         }),
       }),
     );
+
     expect(res.status).toBe(200);
     // 2025-era responses arrive as a single SSE frame; modern ones as plain JSON.
     const raw = await res.text();
-    const frame = raw.split(/\r?\n/).find((l) => l.startsWith("data:"));
-    const envelope = JSON.parse(
-      frame ? frame.slice("data:".length).trim() : raw,
-    ) as { result: unknown };
+    const envelope = jsonRpcObject(raw);
 
     const parsed = specTypeSchemas.ListToolsResult["~standard"].validate(
       envelope.result,
     );
-    expect("issues" in parsed ? parsed.issues : undefined).toBeUndefined();
-    return (parsed as { value: { tools: ParsedTool[] } }).value.tools;
+
+    if ("issues" in parsed) {
+      throw new Error(
+        `SDK rejected tools/list: ${JSON.stringify(parsed.issues)}`,
+      );
+    }
+
+    return parsed.value.tools;
   } finally {
     await handler.close();
   }
@@ -101,12 +102,13 @@ describe.each(["modern", "legacy"] as const)(
     it("the SDK's result validator keeps _meta['anthropic/alwaysLoad'] on exactly the entry tools", async () => {
       const tools = await listTools(era);
       // The full catalog parses (no tool rejected over the added _meta).
-      expect(tools.length).toBe(12);
+      expect(tools.length).toBe(14);
 
       const flagged = tools
         .filter((t) => t._meta?.["anthropic/alwaysLoad"] === true)
         .map((t) => t.name)
         .sort();
+
       expect(flagged).toEqual([...ENTRY_TOOLS].sort());
 
       // And nothing else leaks a _meta.

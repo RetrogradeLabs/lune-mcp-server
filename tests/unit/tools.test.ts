@@ -1,65 +1,63 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { KyInstance } from "ky";
+import type { JsonObject, JsonValue } from "../../src/json.js";
+import { describe, it, expect, beforeEach } from "vitest";
+import {
+  createFakeKy,
+  httpErrorReply,
+  jsonBodyOf,
+  jsonReply,
+  queryRecordOf,
+  searchParamsOf,
+  timeoutOf,
+  EMPTY_REPLY,
+  type FakeReply,
+} from "../support/fake-ky.js";
 import { callPaperTool } from "../../src/tools/papers.js";
 import { HEAVY_TOOL_TIMEOUT_MS } from "../../src/api/client.js";
 import { callGuidanceTool } from "../../src/tools/guidance.js";
 import { listToolsResponse } from "../../src/tools/index.js";
 import { TOOL_RESPONSE_CACHE } from "../../src/cache.js";
+import { toolText, wireJson } from "../support/tool-result.js";
 
-// The tool cache is module-singleton, so tests would otherwise share state
-// (a paper-id cached as 200 in one test would short-circuit a 401 test using
-// the same id). Reset before each test to keep them independent.
+/**
+ * The payload shapes these tests read back. Annotated at the `JSON.parse` rather
+ * than asserted onto the result, so the shape is the test's stated contract and
+ * `wireJson` has already proved both channels agree.
+ */
+interface DetailPayload {
+  results: Array<{ abstract: string; contexts: JsonObject[] }>;
+}
+
+interface ConcisePayload {
+  results: JsonObject[];
+}
+
+interface ContextsPayload {
+  results: Array<{ contexts: JsonValue[] }>;
+}
+
+// The tool cache is a module singleton, so tests would otherwise share state
+// (a paper id cached as 200 short-circuits a 401 test using the same id).
 beforeEach(async () => {
   await TOOL_RESPONSE_CACHE.clear();
 });
 
-/** Build a fake KyInstance whose verbs return a thenable {json} matcher. */
-function fakeKy(): {
-  ky: KyInstance;
-  calls: Array<{ method: string; url: string; opts?: unknown }>;
-  setResponse: (data: unknown) => void;
-  setError: (status: number, body?: unknown) => void;
-} {
-  const calls: Array<{ method: string; url: string; opts?: unknown }> = [];
-  let response: unknown = {};
-  let errorStatus: number | null = null;
-  let errorBody: unknown = {};
-
-  const make = (method: string) => (url: string, opts?: unknown) => {
-    calls.push({ method, url, opts });
-    return {
-      json: async () => {
-        if (errorStatus !== null) {
-          throw {
-            response: {
-              status: errorStatus,
-              headers: new Headers({ "x-request-id": "req-test" }),
-              json: async () => errorBody,
-            },
-          };
-        }
-        return response;
-      },
-    } as unknown as Promise<unknown>;
-  };
-
-  const ky = {
-    get: make("GET"),
-    post: make("POST"),
-    delete: make("DELETE"),
-    put: make("PUT"),
-  } as unknown as KyInstance;
+/**
+ * A stateful ky double over the shared `createFakeKy`: `setResponse` and
+ * `setError` swap what every subsequent verb answers, which is how these tests
+ * drive one handler through its success and its failure arm.
+ */
+function fakeKy() {
+  let reply: FakeReply = EMPTY_REPLY;
+  const { ky, calls } = createFakeKy(() => reply);
 
   return {
     ky,
     calls,
-    setResponse: (data) => {
-      response = data;
-      errorStatus = null;
+    setResponse(data: JsonValue) {
+      reply = jsonReply(data);
     },
-    setError: (status, body = {}) => {
-      errorStatus = status;
-      errorBody = body;
+    setError(status: number, body: JsonValue = {}) {
+      reply = httpErrorReply(status, body, { requestId: "req-test" });
     },
   };
 }
@@ -68,29 +66,27 @@ describe("paper tools", () => {
   it("search_papers POSTs to /search with mapped body", async () => {
     const { ky, calls, setResponse } = fakeKy();
     setResponse({ results: [{ id: "p1" }] });
+
     const r = await callPaperTool(ky, "search_papers", {
       query: "transformer attention",
       conference: "NeurIPS",
       limit: 5,
     });
-    // The fuzzy resolver does a `GET /conferences` lookup before issuing
-    // the search. The shared fake returns the same response for every
-    // call; the resolver gracefully treats a non-array body as
-    // "no candidates" and passes the input through unchanged.
+
+    // The fuzzy resolver does a `GET /conferences` first; the shared fake
+    // answers every call, and a non-array body is treated as no candidates.
     const c = calls.find((x) => x.url === "search")!;
-    expect(c.method).toBe("POST");
-    expect((c.opts as { json: Record<string, unknown> }).json).toEqual({
+    expect(c.method).toBe("post");
+    expect(jsonBodyOf(c)).toEqual({
       query: "transformer attention",
       conference_short_name: "NeurIPS",
       limit: 5,
       offset: 0,
       sort_by: "relevance",
     });
-    // Search defaults to the enriched projection: `id` -> `paper_id`, default
-    // `authors: []` + `citation_count: 0`, and a predictable `contexts: []`
-    // even when no chunk matched. The envelope carries `best_score` +
-    // `low_confidence`; this hit has no calibrated `rerank_score`, so there is
-    // no basis to abstain: best_score is null and low_confidence is false.
+
+    // Search defaults to the enriched projection. This hit has no calibrated
+    // `rerank_score`, so nothing to abstain on: best_score null, flag false.
     const expected = {
       results: [
         { paper_id: "p1", authors: [], citation_count: 0, contexts: [] },
@@ -99,10 +95,10 @@ describe("paper tools", () => {
       best_score: null,
       low_confidence: false,
     };
+
     expect(JSON.parse(r.content[0]!.text)).toEqual(expected);
-    // MCP 2025-06-18: tools with `outputSchema` MUST also surface the
-    // result via `structuredContent` so clients can validate against the
-    // declared schema instead of re-parsing the text content.
+    // MCP 2025-06-18: a tool with `outputSchema` MUST also surface the result
+    // via `structuredContent` so clients validate instead of re-parsing text.
     expect(r.structuredContent).toEqual(expected);
   });
 
@@ -116,10 +112,12 @@ describe("paper tools", () => {
   it("get_paper_fulltext returns JSON when format=json", async () => {
     const { ky, setResponse } = fakeKy();
     setResponse({ sections: [{ name: "intro", text: "..." }] });
+
     const r = await callPaperTool(ky, "get_paper_fulltext", {
       paper_id: "p1",
       format: "json",
     });
+
     expect(JSON.parse(r.content[0]!.text)).toEqual({
       sections: [{ name: "intro", text: "..." }],
     });
@@ -132,13 +130,10 @@ describe("paper tools", () => {
       paper_id: "p1",
       direction: "cites",
     });
-    expect(
-      (calls[0]!.opts as { searchParams: Record<string, unknown> })
-        .searchParams,
-    ).toEqual({
+    expect(searchParamsOf(calls[0]!)).toEqual({
       direction: "cites",
-      limit: 25,
-      offset: 0,
+      limit: "25",
+      offset: "0",
     });
   });
 
@@ -146,10 +141,7 @@ describe("paper tools", () => {
     const { ky, calls, setResponse } = fakeKy();
     setResponse([]);
     await callPaperTool(ky, "list_conferences", {});
-    expect(
-      (calls[0]!.opts as { searchParams: Record<string, unknown> })
-        .searchParams,
-    ).toEqual({});
+    expect(queryRecordOf(calls[0]!)).toEqual({});
   });
 
   it("get_conference_papers includes year, limit, offset", async () => {
@@ -164,13 +156,11 @@ describe("paper tools", () => {
     // assertion target is the actual conference-papers fetch.
     const c = calls.find((x) => x.url === "conferences/CCS/papers")!;
     expect(c).toBeDefined();
-    expect(
-      (c.opts as { searchParams: Record<string, unknown> }).searchParams,
-    ).toEqual({
-      limit: 30,
-      offset: 0,
+    expect(searchParamsOf(c)).toEqual({
+      limit: "30",
+      offset: "0",
       sort: "recency",
-      year: 2025,
+      year: "2025",
     });
   });
 
@@ -185,13 +175,14 @@ describe("paper tools", () => {
 
   it("surfaces a 401 from the API as an isError tool result (not a throw)", async () => {
     // Upstream API failures are Tool Execution Errors: the agent must see the
-    // actionable message in-context, so the handler returns isError instead
-    // of throwing a JSON-RPC protocol error the client would discard.
+    // actionable message, so the handler returns isError instead of throwing.
     const { ky, setError } = fakeKy();
     setError(401, { detail: "expired" });
+
     const r = await callPaperTool(ky, "get_paper_citations", {
       paper_id: "p1",
     });
+
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toMatch(/unauthorized|rotate|lune login/i);
   });
@@ -199,9 +190,11 @@ describe("paper tools", () => {
   it("surfaces a 429 (L1 concurrency) as a retryable isError tool result", async () => {
     const { ky, setError } = fakeKy();
     setError(429, { error: "rate_limited", retry_after_seconds: 1 });
+
     const r = await callPaperTool(ky, "search_papers", {
       query: "diffusion guidance",
     });
+
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toMatch(/rate limited/i);
     expect(r.content[0]!.text).toContain("retry_after_seconds=1");
@@ -225,9 +218,11 @@ describe("paper tools", () => {
       upgrade_url: "https://lune/dashboard/settings/billing",
       buy_credits_url: "https://lune/dashboard/settings/billing",
     });
+
     const r = await callPaperTool(ky, "search_papers", {
       query: "side channels",
     });
+
     expect(r.isError).toBe(true);
     const text = r.content[0]!.text;
     expect(text).toContain("Lune quota exhausted");
@@ -258,15 +253,12 @@ describe("paper tools", () => {
         },
       ],
     });
+
     const r = await callPaperTool(ky, "search_papers", {
       query: "training tricks",
     });
-    const parsed = JSON.parse(r.content[0]!.text) as {
-      results: Array<{
-        abstract: string;
-        contexts: Array<Record<string, unknown>>;
-      }>;
-    };
+
+    const parsed: DetailPayload = JSON.parse(toolText(r));
     expect(parsed.results[0]!.abstract).toBe("We study training.");
     expect(parsed.results[0]!.contexts).toEqual([
       { section: "Methods", text: "we trained", score: 0.9 },
@@ -286,13 +278,13 @@ describe("paper tools", () => {
         },
       ],
     });
+
     const r = await callPaperTool(ky, "search_papers", {
       query: "training tricks",
       detail: false,
     });
-    const parsed = JSON.parse(r.content[0]!.text) as {
-      results: Array<Record<string, unknown>>;
-    };
+
+    const parsed: ConcisePayload = JSON.parse(toolText(r));
     expect(parsed.results[0]!.snippet).toBe("we trained");
     expect("contexts" in parsed.results[0]!).toBe(false);
   });
@@ -315,20 +307,18 @@ describe("paper tools", () => {
         },
       ],
     });
+
     const r = await callPaperTool(ky, "search_papers", {
       query: "training setup",
       detail: true,
     });
-    const parsed = JSON.parse(r.content[0]!.text) as {
-      results: Array<{ contexts: Array<Record<string, unknown>> }>;
-    };
+
+    const parsed: ContextsPayload = JSON.parse(toolText(r));
     expect(parsed.results[0]!.contexts).toEqual([
       { section: "Methods", text: "we trained on 8 GPUs", score: 0.91 },
     ]);
     // structuredContent mirrors the text content for schema-validating clients.
-    const sc = r.structuredContent as {
-      results: Array<{ contexts: unknown[] }>;
-    };
+    const sc: ContextsPayload = JSON.parse(wireJson(r));
     expect(sc.results[0]!.contexts).toHaveLength(1);
   });
 
@@ -342,7 +332,7 @@ describe("paper tools", () => {
       detail: true,
     });
     const c = calls.find((x) => x.url === "search")!;
-    const body = (c.opts as { json: Record<string, unknown> }).json;
+    const body = jsonBodyOf(c);
     expect("detail" in body).toBe(false);
   });
 });
@@ -351,7 +341,8 @@ describe("search_papers_many tool", () => {
   it("appears in tools/list with an object outputSchema", () => {
     const tool = listToolsResponse().tools.find(
       (t) => t.name === "search_papers_many",
-    ) as { outputSchema?: { type?: string } } | undefined;
+    );
+
     expect(tool).toBeDefined();
     expect(tool!.outputSchema?.type).toBe("object");
   });
@@ -377,18 +368,21 @@ describe("search_papers_many tool", () => {
       queries_failed: [{ query: "x broken", reason: "boom" }],
       has_more: false,
     });
+
     const r = await callPaperTool(ky, "search_papers_many", {
       queries: ["x methods", "x training", "x broken"],
       limit: 5,
     });
+
     const c = calls.find((x) => x.url === "search/batch")!;
-    expect(c.method).toBe("POST");
+    expect(c.method).toBe("post");
     // `detail` is an MCP-side projection knob; the API body must omit it and
     // carry only `queries` + the shared filters + `limit`.
-    expect((c.opts as { json: Record<string, unknown> }).json).toEqual({
+    expect(jsonBodyOf(c)).toEqual({
       queries: ["x methods", "x training", "x broken"],
       limit: 5,
     });
+
     // Enriched by default: the hit keeps its abstract + contexts AND its
     // matched_queries provenance; the envelope keeps run/failed/has_more.
     const expected = {
@@ -410,6 +404,7 @@ describe("search_papers_many tool", () => {
       queries_failed: [{ query: "x broken", reason: "boom" }],
       has_more: false,
     };
+
     expect(r.structuredContent).toEqual(expected);
     expect(JSON.parse(r.content[0]!.text)).toEqual(expected);
   });
@@ -429,7 +424,7 @@ describe("search_papers_many tool", () => {
       conference: "NeurIPS",
     });
     const c = calls.find((x) => x.url === "search/batch")!;
-    const body = (c.opts as { json: Record<string, unknown> }).json;
+    const body = jsonBodyOf(c);
     expect(body.conference).toBe("NeurIPS");
     expect("conference_short_name" in body).toBe(false);
   });
@@ -451,13 +446,14 @@ describe("search_papers_many tool", () => {
       queries_failed: [],
       has_more: false,
     });
+
     const r = await callPaperTool(ky, "search_papers_many", {
       queries: ["x"],
       detail: false,
     });
-    const hit = (
-      r.structuredContent as { results: Array<Record<string, unknown>> }
-    ).results[0]!;
+
+    const many: ConcisePayload = JSON.parse(wireJson(r));
+    const hit = many.results[0]!;
     expect(hit.snippet).toBe("we trained");
     expect("contexts" in hit).toBe(false);
     expect(hit.matched_queries).toEqual([{ query: "x", rank: 1 }]);
@@ -475,13 +471,15 @@ describe("extract_from_papers tool", () => {
   it("appears in tools/list with an object outputSchema", () => {
     const tool = listToolsResponse().tools.find(
       (t) => t.name === "extract_from_papers",
-    ) as { outputSchema?: { type?: string } } | undefined;
+    );
+
     expect(tool).toBeDefined();
     expect(tool!.outputSchema?.type).toBe("object");
   });
 
   it("POSTs the body to papers/extract and returns the envelope via structuredContent", async () => {
     const { ky, calls, setResponse } = fakeKy();
+
     const envelope = {
       rows: [
         {
@@ -493,7 +491,9 @@ describe("extract_from_papers tool", () => {
       papers_processed: 2,
       papers_failed: [{ paper_id: "p2", reason: "no_fulltext" }],
     };
+
     setResponse(envelope);
+
     const r = await callPaperTool(ky, "extract_from_papers", {
       paper_ids: ["p1", "p2"],
       fields: [
@@ -503,11 +503,12 @@ describe("extract_from_papers tool", () => {
       instruction: "Extract the dataset and accuracy.",
       sections: ["Results"],
     });
+
     const c = calls.find((x) => x.url === "papers/extract")!;
-    expect(c.method).toBe("POST");
+    expect(c.method).toBe("post");
     // The fields map 1:1 onto the API body (paper_ids, fields, instruction,
     // sections); there is no rename and no projection knob.
-    expect((c.opts as { json: Record<string, unknown> }).json).toEqual({
+    expect(jsonBodyOf(c)).toEqual({
       paper_ids: ["p1", "p2"],
       fields: [
         { name: "dataset", type: "string", description: "eval set" },
@@ -531,11 +532,7 @@ describe("extract_from_papers tool", () => {
       fields: [{ name: "x", type: "string" }],
       instruction: "extract x",
     });
-    const body = (
-      calls.find((x) => x.url === "papers/extract")!.opts as {
-        json: Record<string, unknown>;
-      }
-    ).json;
+    const body = jsonBodyOf(calls.find((x) => x.url === "papers/extract")!);
     expect("sections" in body).toBe(false);
   });
 
@@ -566,13 +563,15 @@ describe("verify_claims tool", () => {
   it("appears in tools/list with an object outputSchema", () => {
     const tool = listToolsResponse().tools.find(
       (t) => t.name === "verify_claims",
-    ) as { outputSchema?: { type?: string } } | undefined;
+    );
+
     expect(tool).toBeDefined();
     expect(tool!.outputSchema?.type).toBe("object");
   });
 
   it("POSTs the body to claims/verify and returns the envelope via structuredContent", async () => {
     const { ky, calls, setResponse } = fakeKy();
+
     const envelope = {
       verdicts: [
         {
@@ -586,16 +585,19 @@ describe("verify_claims tool", () => {
       ],
       claims_processed: 1,
     };
+
     setResponse(envelope);
+
     const r = await callPaperTool(ky, "verify_claims", {
       claims: ["Transformers scale to long sequences."],
       context: "Survey of sequence models.",
     });
+
     const c = calls.find((x) => x.url === "claims/verify")!;
-    expect(c.method).toBe("POST");
+    expect(c.method).toBe("post");
     // The fields map 1:1 onto the API body (claims, context, + shared filters);
     // there is no rename and no projection knob.
-    expect((c.opts as { json: Record<string, unknown> }).json).toEqual({
+    expect(jsonBodyOf(c)).toEqual({
       claims: ["Transformers scale to long sequences."],
       context: "Survey of sequence models.",
       source: "corpus",
@@ -606,9 +608,8 @@ describe("verify_claims tool", () => {
   });
 
   it("maps `conference` onto the wire `conference` body field (NOT conference_short_name)", async () => {
-    // Like search_papers_many, the verify request's actual field is
-    // `conference`; there is no rename. The fuzzy resolver canonicalises first
-    // (no conferences list mocked here, so an unresolved name passes through).
+    // Like search_papers_many, verify's field is `conference`: no rename.
+    // The fuzzy resolver runs first (no list mocked, so the name passes).
     const { ky, calls, setResponse } = fakeKy();
     setResponse({ verdicts: [], claims_processed: 1 });
     await callPaperTool(ky, "verify_claims", {
@@ -616,7 +617,7 @@ describe("verify_claims tool", () => {
       conference: "NeurIPS",
     });
     const c = calls.find((x) => x.url === "claims/verify")!;
-    const body = (c.opts as { json: Record<string, unknown> }).json;
+    const body = jsonBodyOf(c);
     expect(body.conference).toBe("NeurIPS");
     expect("conference_short_name" in body).toBe(false);
   });
@@ -625,11 +626,7 @@ describe("verify_claims tool", () => {
     const { ky, calls, setResponse } = fakeKy();
     setResponse({ verdicts: [], claims_processed: 1 });
     await callPaperTool(ky, "verify_claims", { claims: ["x"] });
-    const body = (
-      calls.find((x) => x.url === "claims/verify")!.opts as {
-        json: Record<string, unknown>;
-      }
-    ).json;
+    const body = jsonBodyOf(calls.find((x) => x.url === "claims/verify")!);
     expect("context" in body).toBe(false);
     expect(body).toEqual({ claims: ["x"], source: "corpus" });
   });
@@ -660,7 +657,7 @@ describe("guidance tools", () => {
       limit: 3,
     });
     expect(calls[0]!.url).toBe("research-guidance/search");
-    expect((calls[0]!.opts as { json: Record<string, unknown> }).json).toEqual({
+    expect(jsonBodyOf(calls[0]!)).toEqual({
       query: "ablation",
       limit: 3,
     });
@@ -675,11 +672,9 @@ describe("guidance tools", () => {
 });
 
 describe("heavy tools get an elevated per-call timeout", () => {
-  // gather_evidence / verify_claims / extract_from_papers / search_papers_many
-  // each fan out MULTIPLE server-side LLM + search calls and legitimately run past
-  // the 30s default, so they pass HEAVY_TOOL_TIMEOUT_MS per call. Blanket-30s timed
-  // a workspace gather_evidence out as a generic "protocol error" (the report).
-  const HEAVY: Array<[string, Record<string, unknown>, string]> = [
+  // These four fan out MULTIPLE server-side LLM + search calls and run past
+  // the 30s default, so they pass HEAVY_TOOL_TIMEOUT_MS per call.
+  const HEAVY: Array<[string, JsonValue, string]> = [
     ["search_papers_many", { queries: ["x"] }, "search/batch"],
     [
       "extract_from_papers",
@@ -717,9 +712,7 @@ describe("heavy tools get an elevated per-call timeout", () => {
       });
       await callPaperTool(ky, tool, args);
       const c = calls.find((x) => x.url === path)!;
-      expect((c.opts as { timeout?: number }).timeout).toBe(
-        HEAVY_TOOL_TIMEOUT_MS,
-      );
+      expect(timeoutOf(c)).toBe(HEAVY_TOOL_TIMEOUT_MS);
     },
   );
 
@@ -728,9 +721,6 @@ describe("heavy tools get an elevated per-call timeout", () => {
     setResponse({ results: [] });
     await callPaperTool(ky, "search_papers", { query: "x" });
     const c = calls.find((x) => x.url === "search")!;
-    expect((c.opts as { timeout?: number }).timeout).toBeUndefined();
+    expect(timeoutOf(c)).toBeUndefined();
   });
 });
-
-// Silence unused-import warning if present
-vi.fn();

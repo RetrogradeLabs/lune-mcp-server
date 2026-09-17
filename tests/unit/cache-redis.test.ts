@@ -1,241 +1,244 @@
-/**
- * Unit coverage for the Redis-backed cache path (`RedisCache` + the
- * `pickCache` selection branch).
- *
- * The `redis` module is mocked with a controllable fake client so we can
- * drive get/set/del/scan, connection failures, and protocol-level errors
- * without a real Redis. `RedisCache` is contractually a "degrade to misses,
- * never throw" wrapper, so every error branch must return cleanly.
- */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-/* Controllable fake redis client */
+import {
+  createToolResponseCache,
+  InProcessTTLCache,
+  RedisCache,
+  type RedisCacheClient,
+  type RedisClientFactory,
+  type RedisClientOptions,
+} from "../../src/cache.js";
 
-interface FakeClient {
-  url?: string;
-  reconnectStrategy?: (retries: number) => number | Error;
-  handlers: Record<string, (arg: unknown) => void>;
-  store: Map<string, string>;
-  connectImpl: () => Promise<void>;
-  failOps: boolean;
-  on: (event: string, cb: (arg: unknown) => void) => FakeClient;
-  connect: () => Promise<void>;
-  get: (key: string) => Promise<string | null>;
-  set: (key: string, val: string, opts: unknown) => Promise<void>;
-  del: (keys: string | string[]) => Promise<void>;
-  scanIterator: (opts: unknown) => AsyncGenerator<string | string[]>;
-  scanYields: Array<string | string[]>;
+type RedisErrorHandler = (cause: Error) => void;
+
+class FakeRedisClient implements RedisCacheClient {
+  readonly handlers: Partial<Record<"error", RedisErrorHandler>> = {};
+  readonly store = new Map<string, string>();
+  connectImpl: () => Promise<void> = async () => undefined;
+  failOps = false;
+  scanYields: Array<string | string[]> = [];
+  options?: RedisClientOptions;
+
+  on(event: "error", listener: RedisErrorHandler): RedisCacheClient {
+    this.handlers[event] = listener;
+
+    return this;
+  }
+
+  async connect(): Promise<RedisCacheClient> {
+    await this.connectImpl();
+
+    return this;
+  }
+
+  async get(key: string): Promise<string | null> {
+    if (this.failOps) throw new Error("GET protocol error");
+
+    return this.store.get(key) ?? null;
+  }
+
+  async set(
+    key: string,
+    value: string,
+    _options: { EX: number },
+  ): Promise<string | null> {
+    if (this.failOps) throw new Error("SET protocol error");
+    this.store.set(key, value);
+
+    return "OK";
+  }
+
+  async del(keys: string | string[]): Promise<number> {
+    if (this.failOps) throw new Error("DEL protocol error");
+    let deleted = 0;
+
+    for (const key of Array.isArray(keys) ? keys : [keys]) {
+      if (this.store.delete(key)) deleted++;
+    }
+
+    return deleted;
+  }
+
+  async *scanIterator(_options: {
+    MATCH: string;
+    COUNT: number;
+  }): AsyncGenerator<string | string[]> {
+    if (this.failOps) throw new Error("SCAN protocol error");
+
+    for (const value of this.scanYields) yield value;
+  }
 }
 
-let fake: FakeClient;
+let fake: FakeRedisClient;
 
-function makeFakeClient(): FakeClient {
-  const c: FakeClient = {
-    handlers: {},
-    store: new Map(),
-    connectImpl: async () => {},
-    failOps: false,
-    scanYields: [],
-    on(event, cb) {
-      c.handlers[event] = cb;
-      return c;
-    },
-    async connect() {
-      return c.connectImpl();
-    },
-    async get(key) {
-      if (c.failOps) throw new Error("GET protocol error");
-      return c.store.has(key) ? c.store.get(key)! : null;
-    },
-    async set(key, val) {
-      if (c.failOps) throw new Error("SET protocol error");
-      c.store.set(key, val);
-    },
-    async del(keys) {
-      if (c.failOps) throw new Error("DEL protocol error");
-      for (const k of Array.isArray(keys) ? keys : [keys]) c.store.delete(k);
-    },
-    async *scanIterator() {
-      if (c.failOps) throw new Error("SCAN protocol error");
-      for (const y of c.scanYields) yield y;
-    },
-  };
-  return c;
+let createRedisClient: RedisClientFactory;
+
+function cache(defaultTtlMs = 60_000): RedisCache {
+  return new RedisCache(
+    "redis://localhost:6379",
+    "mcp_tools",
+    defaultTtlMs,
+    createRedisClient,
+  );
 }
 
-vi.mock("redis", () => ({
-  createClient: (opts: {
-    url: string;
-    socket: { reconnectStrategy: (n: number) => number | Error };
-  }) => {
-    fake.url = opts.url;
-    fake.reconnectStrategy = opts.socket.reconnectStrategy;
-    return fake;
-  },
-}));
+function onlyStoredKey(): string {
+  const key = fake.store.keys().next().value;
+
+  if (key === undefined) throw new Error("expected one stored Redis key");
+
+  return key;
+}
+
+function redisErrorHandler(): RedisErrorHandler {
+  const handler = fake.handlers.error;
+
+  if (!handler) throw new Error("expected a Redis error handler");
+
+  return handler;
+}
+
+function reconnectStrategy(): (retries: number) => number | Error {
+  const strategy = fake.options?.socket.reconnectStrategy;
+
+  if (!strategy) throw new Error("expected a reconnect strategy");
+
+  return strategy;
+}
 
 beforeEach(() => {
-  fake = makeFakeClient();
-  vi.spyOn(console, "error").mockImplementation(() => {});
-  vi.spyOn(console, "log").mockImplementation(() => {});
+  fake = new FakeRedisClient();
+  createRedisClient = (options) => {
+    fake.options = options;
+
+    return fake;
+  };
+
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
 });
 
 afterEach(() => {
-  vi.unstubAllEnvs();
   vi.restoreAllMocks();
-  vi.resetModules();
 });
 
 describe("RedisCache", () => {
   it("namespaces keys and round-trips get/set", async () => {
-    const { RedisCache } = await import("../../src/cache.js");
-    const cache = new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
-    await cache.set("paper:1", { title: "Foo" });
-    // Stored under the lune:<ns-prefix>:<namespace>:<key> form.
-    const storedKey = [...fake.store.keys()][0]!;
-    expect(storedKey).toContain(":mcp_tools:paper:1");
-    expect(await cache.get("paper:1")).toEqual({ title: "Foo" });
+    const redisCache = cache();
+    await redisCache.set("paper:1", { title: "Foo" });
+    expect(onlyStoredKey()).toContain(":mcp_tools:paper:1");
+    expect(await redisCache.get("paper:1")).toEqual({ title: "Foo" });
   });
 
   it("returns undefined for an unknown key", async () => {
-    const { RedisCache } = await import("../../src/cache.js");
-    const cache = new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
-    expect(await cache.get("missing")).toBeUndefined();
+    expect(await cache().get("missing")).toBeUndefined();
   });
 
   it("connects exactly once across concurrent calls", async () => {
-    const { RedisCache } = await import("../../src/cache.js");
     let connects = 0;
     fake.connectImpl = async () => {
       connects++;
     };
-    const cache = new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
-    await Promise.all([cache.get("a"), cache.get("b"), cache.set("c", 1)]);
+
+    const redisCache = cache();
+    await Promise.all([
+      redisCache.get("a"),
+      redisCache.get("b"),
+      redisCache.set("c", 1),
+    ]);
     expect(connects).toBe(1);
   });
 
-  it("the registered error handler swallows connection blips", async () => {
-    const { RedisCache } = await import("../../src/cache.js");
-    new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
-    expect(fake.handlers.error).toBeTypeOf("function");
-    // Must not throw.
-    expect(() => fake.handlers.error!(new Error("ECONNRESET"))).not.toThrow();
+  it("swallows connection-error events", () => {
+    cache();
+    expect(() => redisErrorHandler()(new Error("ECONNRESET"))).not.toThrow();
   });
 
-  it("the reconnect strategy caps individual waits at ~3s", async () => {
-    const { RedisCache } = await import("../../src/cache.js");
-    new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
-    const strat = fake.reconnectStrategy!;
-    expect(strat(0)).toBe(50);
-    expect(strat(10)).toBe(550);
-    expect(strat(1000)).toBe(3000);
+  it("caps individual reconnect waits at three seconds", () => {
+    cache();
+    const strategy = reconnectStrategy();
+    expect(strategy(0)).toBe(50);
+    expect(strategy(10)).toBe(550);
+    expect(strategy(1000)).toBe(3000);
   });
 
-  it("degrades to a miss when the initial connect fails", async () => {
-    const { RedisCache } = await import("../../src/cache.js");
+  it("degrades to misses and no-ops when the initial connect fails", async () => {
     fake.connectImpl = async () => {
       throw new Error("connection refused");
     };
-    const cache = new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
-    expect(await cache.get("k")).toBeUndefined();
-    // set / clear also no-op cleanly when disconnected.
-    await expect(cache.set("k", 1)).resolves.toBeUndefined();
-    await expect(cache.clear()).resolves.toBeUndefined();
+
+    const redisCache = cache();
+    expect(await redisCache.get("k")).toBeUndefined();
+    await expect(redisCache.set("k", 1)).resolves.toBeUndefined();
+    await expect(redisCache.clear()).resolves.toBeUndefined();
   });
 
   it("degrades to a miss on a GET protocol error", async () => {
-    const { RedisCache } = await import("../../src/cache.js");
-    const cache = new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
+    const redisCache = cache();
     fake.failOps = true;
-    expect(await cache.get("k")).toBeUndefined();
+    expect(await redisCache.get("k")).toBeUndefined();
   });
 
-  it("drops the write on a SET protocol error without throwing", async () => {
-    const { RedisCache } = await import("../../src/cache.js");
-    const cache = new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
+  it("drops a SET protocol error", async () => {
+    const redisCache = cache();
     fake.failOps = true;
-    await expect(cache.set("k", { a: 1 })).resolves.toBeUndefined();
+    await expect(redisCache.set("k", { a: 1 })).resolves.toBeUndefined();
   });
 
-  it("clamps a sub-second TTL to a 1s floor", async () => {
-    const { RedisCache } = await import("../../src/cache.js");
+  it("clamps a sub-second TTL to one second", async () => {
     const setSpy = vi.spyOn(fake, "set");
-    const cache = new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
-    await cache.set("k", "v", 10);
+    await cache().set("k", "v", 10);
     expect(setSpy).toHaveBeenCalledWith(
       expect.any(String),
       expect.any(String),
-      {
-        EX: 1,
-      },
+      { EX: 1 },
     );
   });
 
   it("uses the default TTL when no per-call TTL is given", async () => {
-    const { RedisCache } = await import("../../src/cache.js");
     const setSpy = vi.spyOn(fake, "set");
-    const cache = new RedisCache(
-      "redis://localhost:6379",
-      "mcp_tools",
-      120_000,
-    );
-    await cache.set("k", "v");
+    await cache(120_000).set("k", "v");
     expect(setSpy).toHaveBeenCalledWith(
       expect.any(String),
       expect.any(String),
-      {
-        EX: 120,
-      },
+      { EX: 120 },
     );
   });
 
-  it("clear evicts the namespaced keys so subsequent reads miss", async () => {
-    const { RedisCache } = await import("../../src/cache.js");
-    const cache = new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
-
-    await cache.set("a", { v: 1 });
-    await cache.set("b", { v: 2 });
-    expect(await cache.get("a")).toEqual({ v: 1 });
-
-    // SCAN surfaces the namespaced keys the cache just wrote (one string per
-    // yield), which clear() must then delete.
+  it("clears namespaced keys", async () => {
+    const redisCache = cache();
+    await redisCache.set("a", { v: 1 });
+    await redisCache.set("b", { v: 2 });
     fake.scanYields = [...fake.store.keys()];
-    await cache.clear();
-
+    await redisCache.clear();
     expect(fake.store.size).toBe(0);
-    expect(await cache.get("a")).toBeUndefined();
-    expect(await cache.get("b")).toBeUndefined();
+    expect(await redisCache.get("a")).toBeUndefined();
   });
 
-  it("clear handles array-shaped scan yields", async () => {
-    const { RedisCache } = await import("../../src/cache.js");
-    const cache = new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
+  it("handles array-shaped scan yields and skips empty batches", async () => {
     const delSpy = vi.spyOn(fake, "del");
     fake.scanYields = [["k1", "k2"], []];
-    await cache.clear();
-    // Non-empty array → one del; empty array → skipped.
-    expect(delSpy).toHaveBeenCalledTimes(1);
+    await cache().clear();
+    expect(delSpy).toHaveBeenCalledOnce();
     expect(delSpy).toHaveBeenCalledWith(["k1", "k2"]);
   });
 
-  it("clear swallows a SCAN protocol error", async () => {
-    const { RedisCache } = await import("../../src/cache.js");
-    const cache = new RedisCache("redis://localhost:6379", "mcp_tools", 60_000);
+  it("swallows a SCAN protocol error", async () => {
+    const redisCache = cache();
     fake.failOps = true;
-    await expect(cache.clear()).resolves.toBeUndefined();
+    await expect(redisCache.clear()).resolves.toBeUndefined();
   });
 });
 
-describe("pickCache selection", () => {
-  it("selects the Redis backend when REDIS_URL is set", async () => {
-    vi.stubEnv("REDIS_URL", "redis://localhost:6379");
-    const mod = await import("../../src/cache.js");
-    expect(mod.TOOL_RESPONSE_CACHE).toBeInstanceOf(mod.RedisCache);
+describe("cache selection", () => {
+  it("selects Redis when a URL is configured", () => {
+    expect(
+      createToolResponseCache("redis://localhost:6379", createRedisClient),
+    ).toBeInstanceOf(RedisCache);
   });
 
-  it("selects the in-process backend when REDIS_URL is absent", async () => {
-    vi.stubEnv("REDIS_URL", "");
-    const mod = await import("../../src/cache.js");
-    expect(mod.TOOL_RESPONSE_CACHE).toBeInstanceOf(mod.InProcessTTLCache);
+  it("selects the in-process backend without a Redis URL", () => {
+    expect(createToolResponseCache("", createRedisClient)).toBeInstanceOf(
+      InProcessTTLCache,
+    );
   });
 });

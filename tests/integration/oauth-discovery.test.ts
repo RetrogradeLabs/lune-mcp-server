@@ -4,7 +4,7 @@
  * Claude Desktop's remote-MCP connector hits POST /mcp anonymously, expects a
  * `401 + WWW-Authenticate: Bearer resource_metadata="..."`, then fetches that
  * absolute URL to discover the authorization server. Both pieces are required
- * (see .claude/rules/mcp.md "Remote-MCP OAuth discovery"); missing either
+ * (see the MCP server design notes "Remote-MCP OAuth discovery"); missing either
  * surfaces to the user as a generic "Couldn't reach the MCP server".
  *
  * These tests drive the same `buildHttpApp()` + `app.listen(0)` + `fetch`
@@ -14,20 +14,30 @@
  * import (which would be a no-op).
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import type { AddressInfo } from "node:net";
 import type { Server as HttpServer } from "node:http";
 import { buildHttpApp } from "../../src/transport/streamableHttp.js";
+import {
+  fetchJsonObject,
+  jsonNumber,
+  jsonObject,
+  jsonString,
+  jsonStrings,
+} from "../support/json.js";
+import { portOf } from "../support/net.js";
 
-type Json = Record<string, unknown>;
-
-// Deployed defaults (code defaults in streamableHttp.ts; wired in infra/mcp.ts).
+// Deployed defaults (code defaults in streamableHttp.ts; wired in the service's deployment configuration).
 const RESOURCE = "https://mcp.luneresearch.com";
+
 const RESOURCE_ORIGIN = "https://mcp.luneresearch.com";
+
 const AUTH_SERVER = "https://api.luneresearch.com";
+
 const METADATA_URL = `${RESOURCE_ORIGIN}/.well-known/oauth-protected-resource`;
+
 // The requests below hit the legacy `/mcp` alias; RFC 9728 §3.3 makes both the
 // challenge and the document it names path-aware, so they carry that suffix.
 const MCP_METADATA_URL = `${METADATA_URL}/mcp`;
+
 const SCOPE_CHALLENGE = 'scope="papers:read guidance:read account:read"';
 
 describe("oauth discovery", () => {
@@ -38,7 +48,7 @@ describe("oauth discovery", () => {
     const app = buildHttpApp();
     server = app.listen(0);
     await new Promise<void>((resolve) => server.once("listening", resolve));
-    port = (server.address() as AddressInfo).port;
+    port = portOf(server);
   });
 
   afterAll(async () => {
@@ -53,22 +63,24 @@ describe("oauth discovery", () => {
     expect(r.status).toBe(200);
     expect(r.headers.get("content-type")).toContain("application/json");
 
-    const body = (await r.json()) as Json;
+    const body = await fetchJsonObject(r);
 
     // `resource` MUST be the absolute MCP endpoint URL the token is bound to.
     expect(body.resource).toBe(RESOURCE);
-    expect(() => new URL(body.resource as string)).not.toThrow();
+    expect(() => new URL(jsonString(body.resource, "resource"))).not.toThrow();
 
     // `authorization_servers` MUST be a non-empty array of absolute AS URLs.
-    expect(Array.isArray(body.authorization_servers)).toBe(true);
-    const authServers = body.authorization_servers as string[];
+    const authServers = jsonStrings(
+      body.authorization_servers,
+      "authorization_servers",
+    );
+
     expect(authServers.length).toBeGreaterThan(0);
     expect(authServers).toEqual([AUTH_SERVER]);
-    expect(authServers[0]!).toMatch(/^https:\/\//);
+    expect(authServers.at(0)).toMatch(/^https:\/\//);
 
     // `scopes_supported` MUST advertise the read scopes (papers:read at least).
-    const scopes = body.scopes_supported as string[];
-    expect(Array.isArray(scopes)).toBe(true);
+    const scopes = jsonStrings(body.scopes_supported, "scopes_supported");
     expect(scopes).toContain("papers:read");
     expect(scopes).toContain("guidance:read");
 
@@ -84,22 +96,23 @@ describe("oauth discovery", () => {
       "/.well-known/oauth-protected-resource/mcp",
       "/.well-known/oauth-protected-resource/v1/mcp",
     ];
-    const bodies: Json[] = [];
+
+    const bodies = [];
+
     for (const path of paths) {
       const r = await fetch(`http://127.0.0.1:${port}${path}`);
       expect(r.status).toBe(200);
-      bodies.push((await r.json()) as Json);
+      bodies.push(await fetchJsonObject(r));
     }
 
-    const [root, mcp, v1] = bodies;
-    // RFC 9728 §3.3: `resource` MUST be identical to the identifier the
-    // well-known suffix was inserted into, so these documents differ in exactly
-    // that field. A client on the legacy URL therefore keeps binding the legacy
-    // identifier (no re-binding, no refresh churn) while a new client on the
-    // origin binds the canonical one.
-    expect(root!.resource).toBe(RESOURCE);
-    expect(mcp!.resource).toBe(`${RESOURCE}/mcp`);
-    expect(v1!.resource).toBe(`${RESOURCE}/v1/mcp`);
+    const root = jsonObject(bodies.at(0), "root metadata");
+    const mcp = jsonObject(bodies.at(1), "mcp metadata");
+    const v1 = jsonObject(bodies.at(2), "v1 metadata");
+    // RFC 9728 §3.3: `resource` MUST equal the identifier the well-known suffix
+    // was inserted into, so a legacy-URL client keeps binding the legacy one.
+    expect(root.resource).toBe(RESOURCE);
+    expect(mcp.resource).toBe(`${RESOURCE}/mcp`);
+    expect(v1.resource).toBe(`${RESOURCE}/v1/mcp`);
     expect({ ...mcp, resource: RESOURCE }).toEqual(root);
     expect({ ...v1, resource: RESOURCE }).toEqual(root);
   });
@@ -130,25 +143,25 @@ describe("oauth discovery", () => {
 
     // The JSON-RPC error body MUST echo that same header so a client that only
     // parses the body (not headers) can still discover the AS.
-    const body = (await r.json()) as Json;
+    const body = await fetchJsonObject(r);
     expect(body.jsonrpc).toBe("2.0");
     // `id` echoes the request id (here 1), per the 401 handler.
     expect(body.id).toBe(1);
-    const error = body.error as Json;
-    expect(error.code).toBe(-32001);
-    const data = error.data as Json;
-    const meta = data._meta as Json;
-    const echoed = meta["mcp/www_authenticate"];
+    const error = jsonObject(body.error, "error");
+    expect(jsonNumber(error.code, "error.code")).toBe(-32001);
+    const data = jsonObject(error.data, "error.data");
+    const meta = jsonObject(data._meta, "error.data._meta");
 
-    // The header and the body-echoed value MUST be the identical string (same
-    // value served in two places). Assert byte-for-byte equality directly, not
-    // just that each independently matches the expected literal: a regression
-    // that desynced the two (e.g. recomputing the URL differently) would slip
-    // past per-side literal checks but is caught here.
-    expect(typeof echoed).toBe("string");
+    const echoed = jsonString(
+      meta["mcp/www_authenticate"],
+      "mcp/www_authenticate",
+    );
+
+    // Header and body-echoed value MUST be the identical string: byte equality
+    // catches a desync that per-side literal checks would both still pass.
     expect(echoed).toBe(wwwAuth);
     expect(echoed).toStrictEqual(wwwAuth);
-    expect((echoed as string).length).toBe((wwwAuth as string).length);
+    expect(echoed.length).toBe(wwwAuth?.length);
     // And the shared value carries the absolute metadata URL.
     expect(echoed).toContain(`resource_metadata="${MCP_METADATA_URL}"`);
   });
@@ -172,7 +185,7 @@ describe("oauth discovery", () => {
     expect(r.headers.get("www-authenticate")).toBe(
       `Bearer resource_metadata="${METADATA_URL}/v1/mcp", ${SCOPE_CHALLENGE}`,
     );
-    const body = (await r.json()) as Json;
+    const body = await fetchJsonObject(r);
     expect(body.id).toBe(7);
   });
 });

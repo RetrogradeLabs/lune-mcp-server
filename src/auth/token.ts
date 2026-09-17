@@ -1,3 +1,5 @@
+import { runtimeSiteUrl } from "../runtime-config.js";
+
 /**
  * Token extraction for both transports.
  *
@@ -12,12 +14,14 @@
 
 export function extractTokenStdio(): string {
   const t = process.env.LUNE_API_KEY;
+
   if (!t || !t.trim()) {
     throw new Error(
       "LUNE_API_KEY env var is required for stdio MCP. Get a token at " +
-        "https://luneresearch.com/dashboard/settings/credentials.",
+        `${runtimeSiteUrl("/dashboard/settings/credentials")}.`,
     );
   }
+
   return t.trim();
 }
 
@@ -27,11 +31,16 @@ export function extractTokenHttp(
   // Express normalises header keys to lowercase; tolerate either form.
   const raw = headers.authorization ?? headers.Authorization;
   const value = Array.isArray(raw) ? raw[0] : raw;
+
   if (!value) throw new Error("missing Authorization header");
+
   if (!value.toLowerCase().startsWith("bearer ")) {
     throw new Error("expected Bearer scheme in Authorization header");
   }
+
   const token = value.slice(7).trim();
+
   if (!token) throw new Error("empty Bearer token");
+
   return token;
 }

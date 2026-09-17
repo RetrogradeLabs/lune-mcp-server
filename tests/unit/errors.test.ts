@@ -22,6 +22,7 @@ describe("mapHttpError", () => {
       error: "account_suspended",
       appeal_email: "appeal@luneresearch.com",
     });
+
     expect(e.message).toContain("suspended");
     expect(e.message).toContain("appeal@luneresearch.com");
     expect(e.message).not.toMatch(/lune login/i);
@@ -39,6 +40,7 @@ describe("mapHttpError", () => {
       retry_after_seconds: 60,
       upgrade_hint: "Upgrade to Pro for 5x quota.",
     });
+
     expect(e.message).toContain("Upgrade to Pro");
   });
 
@@ -47,6 +49,7 @@ describe("mapHttpError", () => {
       error: "insufficient_scope",
       required: ["papers:read"],
     });
+
     expect(e.code).toBe(LuneErrorCode.Forbidden);
     expect(e.data.required).toEqual(["papers:read"]);
     expect(e.message).toContain("papers:read");
@@ -54,8 +57,7 @@ describe("mapHttpError", () => {
 
   it("403 reads the scope list out of FastAPI's nested detail", () => {
     // `require_scope` raises HTTPException(403, detail={...}), so this is the
-    // shape production actually sends; reading only the flat body dropped the
-    // scope list and left the agent with an unactionable "lacks the scope".
+    // shape prod sends; the flat read dropped the scope list the agent needs.
     const e = mapHttpError(403, {
       detail: {
         error: "insufficient_scope",
@@ -63,6 +65,7 @@ describe("mapHttpError", () => {
         granted: ["papers:read"],
       },
     });
+
     expect(e.message).toContain("guidance:read");
     expect(e.data.required).toEqual(["guidance:read"]);
     expect(e.data.granted).toEqual(["papers:read"]);
@@ -92,6 +95,7 @@ describe("mapHttpError", () => {
       undefined,
       "extract_from_papers",
     );
+
     expect(e.code).toBe(LuneErrorCode.InvalidParams);
     expect(e.message).toContain(
       "fields.0.name: field name 'model_dump' is reserved",
@@ -104,6 +108,7 @@ describe("mapHttpError", () => {
       error: "out_of_credits",
       buy_credits_url: "https://x/billing",
     });
+
     expect(e.code).toBe(LuneErrorCode.QuotaExhausted);
     expect(e.message).toContain("Lune quota exhausted");
     expect(e.message).toContain("https://x/billing");
@@ -111,9 +116,8 @@ describe("mapHttpError", () => {
   });
 
   it("402 with no facts at all still hands the user a way out", () => {
-    // The body a reader could not parse, or an API that sent nothing but the
-    // code. This used to render "you ran out, stop calling Lune" and no way to
-    // fix it, which ends the user's session on a dead end.
+    // The body a reader could not parse, or an API that sent only the code.
+    // This used to render "you ran out, stop calling Lune" with no way out.
     const e = mapHttpError(402, { error: "out_of_credits" });
     expect(e.code).toBe(LuneErrorCode.QuotaExhausted);
     // Guidance is client-side, so it survives an API that sends no facts.
@@ -150,6 +154,7 @@ describe("mapHttpError", () => {
       upgrade_url: "https://lune/dashboard/settings/billing",
       buy_credits_url: "https://lune/dashboard/settings/billing",
     });
+
     expect(e.message).toContain(
       "Usage: 10/10 requests used in today's allowance (free plan), 0 prepaid credits left.",
     );
@@ -166,9 +171,8 @@ describe("mapHttpError", () => {
   });
 
   it("402 on the largest plan points at credits, never at an upgrade", () => {
-    // The API's hint is the only thing that knows whether a bigger plan exists
-    // for this org, so pairing it with our own "or move to a bigger plan" would
-    // contradict it in the same breath, on the one tier where that is a dead end.
+    // The API's hint is the only thing that knows whether a bigger plan exists,
+    // so pairing it with our own "move to a bigger plan" would contradict it.
     const e = mapHttpError(402, {
       error: "out_of_credits",
       reason: "out_of_capacity",
@@ -184,6 +188,7 @@ describe("mapHttpError", () => {
         "the only way to add capacity today.",
       buy_credits_url: "https://x/billing",
     });
+
     expect(e.message).toContain("prepaid credits are the only way");
     expect(e.message).not.toContain("bigger plan");
     expect(e.message).toContain("Send the user to https://x/billing");
@@ -191,8 +196,7 @@ describe("mapHttpError", () => {
 
   it("402 on an oversized batch asks for a retry that actually fits, and never says stop", () => {
     // 3 daily + 1 credit serves a batch of 3, NOT 4: a call is paid from one
-    // lane, all-or-nothing, so advertising the sum sent the agent into a second
-    // guaranteed 402. The API reports the servable size; we must not re-derive it.
+    // lane, all-or-nothing, so the API reports the servable size, not us.
     const e = mapHttpError(
       402,
       {
@@ -211,6 +215,7 @@ describe("mapHttpError", () => {
       undefined,
       "search_papers_many",
     );
+
     expect(e.message).toContain("the most Lune can serve right now is 3");
     expect(e.message).toContain("Retry with fewer `queries`");
     expect(e.message).toContain("needs 3 or fewer");
@@ -238,6 +243,7 @@ describe("mapHttpError", () => {
       max_units_now: 0,
       resets_at: "2026-08-16T00:00:00Z",
     });
+
     expect(e.message).toContain("so will retrying after the reset");
     expect(e.message).toContain("more than the whole 10/day allowance");
     expect(e.message).toContain("a call of 10 or fewer would fit");
@@ -251,9 +257,8 @@ describe("mapHttpError", () => {
   });
 
   it("402 whose numbers show capacity again asks for one verbatim retry", () => {
-    // The numbers are read AFTER the refusal, so a refund / top-up / UTC roll in
-    // that window leaves max_units_now >= units_required. Calling that "send a
-    // smaller batch" (or "you are out") are both lies.
+    // The numbers are read AFTER the refusal, so a refund / top-up / UTC roll
+    // leaves max_units_now >= units_required, and both usual sentences lie.
     const e = mapHttpError(402, {
       error: "out_of_credits",
       reason: "retry_now",
@@ -265,6 +270,7 @@ describe("mapHttpError", () => {
       credits_remaining: 30,
       max_units_now: 30,
     });
+
     expect(e.message).toContain("capacity is available again");
     expect(e.message).toContain("Retry the same call ONCE");
     expect(e.message).not.toMatch(/stop calling Lune tools/i);
@@ -281,12 +287,15 @@ describe("mapHttpError", () => {
       remaining_today: 30,
       credits_remaining: 0,
     });
+
     expect(future.data.quota_reason).toBe("retry_now");
+
     const legacy = mapHttpError(402, {
       units_required: 25,
       remaining_today: 3,
       credits_remaining: 1,
     });
+
     expect(legacy.data.quota_reason).toBe("batch_too_large");
     const bare = mapHttpError(402, { error: "out_of_credits" });
     expect(bare.data.quota_reason).toBe("no_capacity");
@@ -306,12 +315,15 @@ describe("mapHttpError", () => {
       undefined,
       "gather_evidence",
     );
+
     expect(e.message).toContain("max_total_queries");
+
     const unknownTool = mapHttpError(402, {
       reason: "call_larger_than_remaining",
       units_required: 25,
       max_units_now: 10,
     });
+
     expect(unknownTool.message).toContain("Retry with fewer items");
     // No hint and no URL in that body, so the capacity line falls back to the
     // canonical page: its lead-in colon always has something to introduce.
@@ -326,6 +338,7 @@ describe("mapHttpError", () => {
       remaining_today: 3,
       credits_remaining: 1,
     });
+
     expect(e.message).toContain("right now is 3");
     expect(e.data.max_units_now).toBe(3);
   });
@@ -335,6 +348,7 @@ describe("mapHttpError", () => {
       error: "out_of_credits",
       detail: "Out of Lune requests: the allowance resets at midnight UTC.",
     });
+
     expect(e.message).toContain(
       "Out of Lune requests: the allowance resets at midnight UTC.",
     );
@@ -373,8 +387,9 @@ describe("mapHttpError", () => {
 
   it("403 with a non-array required field does not crash the join", () => {
     const e = mapHttpError(403, {
-      required: "papers:read" as unknown as string[],
+      required: "papers:read",
     });
+
     // Non-array `required` → requiredStr is "" → generic message branch.
     expect(e.message).toMatch(/lacks the scope this tool needs/i);
   });
@@ -401,8 +416,9 @@ describe("mapHttpError", () => {
   it("429 with a non-string upgrade_hint omits the hint text", () => {
     const e = mapHttpError(429, {
       retry_after_seconds: 30,
-      upgrade_hint: 999 as unknown as string,
+      upgrade_hint: 999,
     });
+
     expect(e.message).toBe("Rate limited. Retry after 30s.");
   });
 
@@ -414,6 +430,7 @@ describe("mapHttpError", () => {
       retry_after_seconds: 1,
       detail: "Too many Lune requests in one second.",
     });
+
     expect(e.message).toContain("per-second burst guard");
     expect(e.message).toContain("not your daily allowance");
     expect(e.message).toContain("retry the same call");
@@ -442,9 +459,7 @@ describe("mapHttpError", () => {
 
 describe("toToolError", () => {
   // Per the MCP spec, upstream API failures are Tool Execution Errors:
-  // `{ isError: true }` results whose `content` text carries the actionable
-  // message (forwarded into the model's context), NOT JSON-RPC protocol
-  // errors (captured by the client and typically dropped).
+  // `{ isError: true }` results, NOT JSON-RPC protocol errors the client drops.
   it("renders a 429 as an isError result with retryable guidance", () => {
     const r = toToolError(mapHttpError(429, { retry_after_seconds: 5 }));
     expect(r.isError).toBe(true);
@@ -461,6 +476,7 @@ describe("toToolError", () => {
         resets_at: "2026-08-16T00:00:00Z",
       }),
     );
+
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toContain("Lune quota exhausted");
     expect(r.content[0]!.text).toContain("buy_credits_url=https://x/billing");
@@ -485,8 +501,7 @@ describe("toToolError", () => {
 
   it("returns the bare message when the mapped error carries no data fields", () => {
     // Defensive: a hand-built MappedError with empty `data` exercises the
-    // no-footer branch (`mapHttpError` always sets `status`, so this path is
-    // otherwise unreachable through it).
+    // no-footer branch (`mapHttpError` always sets `status`).
     const r = toToolError({ code: -32014, message: "boom", data: {} });
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toBe("boom");
@@ -508,6 +523,7 @@ describe("httpErrorToToolResult", () => {
         json: async () => ({ error: "rate_limited", retry_after_seconds: 1 }),
       },
     };
+
     const r = await httpErrorToToolResult(fake);
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toMatch(/rate limited/i);
@@ -525,6 +541,7 @@ describe("httpErrorToToolResult", () => {
         }),
       },
     };
+
     const r = await httpErrorToToolResult(fake);
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toContain("Lune quota exhausted");
@@ -543,6 +560,7 @@ describe("httpErrorToToolResult", () => {
         },
       },
     };
+
     const r = await httpErrorToToolResult(fake);
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toMatch(/server error/i);
@@ -552,6 +570,7 @@ describe("httpErrorToToolResult", () => {
     const timeout = Object.assign(new Error("Request timed out"), {
       name: "TimeoutError",
     });
+
     const r = await httpErrorToToolResult(timeout, "gather_evidence");
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toMatch(/timed out|connection dropped/i);
@@ -563,6 +582,7 @@ describe("httpErrorToToolResult", () => {
     const netErr = Object.assign(new Error("socket hang up"), {
       code: "ECONNRESET",
     });
+
     const r = await httpErrorToToolResult(netErr);
     expect(r.isError).toBe(true);
     expect(r.content[0]!.text).toMatch(/retry/i);
@@ -572,6 +592,7 @@ describe("httpErrorToToolResult", () => {
     const fetchFailed = Object.assign(new TypeError("fetch failed"), {
       cause: { code: "ECONNREFUSED" },
     });
+
     const r = await httpErrorToToolResult(fetchFailed);
     expect(r.isError).toBe(true);
   });
@@ -608,6 +629,7 @@ describe("mapHttpError header + steer", () => {
       undefined,
       "get_paper_fulltext",
     );
+
     expect(m.message).toContain("Paper not found");
     expect(m.message).toContain("call search_papers");
   });
@@ -620,6 +642,7 @@ describe("mapHttpError header + steer", () => {
       undefined,
       "get_conference_papers",
     );
+
     expect(conf.message).toContain("Conference 'xyz' not found");
     expect(conf.message).not.toContain("call search_papers");
     expect(conf.message).toContain("list_conferences");
@@ -633,6 +656,7 @@ describe("mapHttpError header + steer", () => {
       undefined,
       "get_research_guidance_doc",
     );
+
     expect(m.message).toContain("Guidance document not found");
     expect(m.message).not.toContain("call search_papers");
     expect(m.message).toContain("search_research_guidance");
@@ -646,6 +670,7 @@ describe("mapHttpError header + steer", () => {
       undefined,
       "search_papers",
     );
+
     expect(m.message).toBe("Nothing here");
   });
 });

@@ -5,6 +5,7 @@ import express, {
   type Response,
 } from "express";
 import type { Server as HttpServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { createHash } from "node:crypto";
 import {
   createMcpHandler,
@@ -13,6 +14,8 @@ import {
 } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { makeServer, SERVER_VERSION } from "../server.js";
+import { messageOf } from "../cause.js";
+import { isJsonString, type JsonObject, type JsonValue } from "../json.js";
 import { extractTokenHttp } from "../auth/token.js";
 import {
   inspectAccessToken,
@@ -28,6 +31,8 @@ import {
   type McpAnalyticsContext,
 } from "../analytics.js";
 import serverManifest from "../../server.json";
+import runtimeDefaults from "../runtime-defaults.json";
+import { runtimeSetting, runtimeSiteUrl } from "../runtime-config.js";
 import { requiredScopeForTool } from "../tools/index.js";
 
 const SESSION_HEADER = "mcp-session-id";
@@ -48,6 +53,28 @@ interface HttpAppOptions {
   credentialProbe?: AnalyticsCredentialProbeFn;
 }
 
+/** A ky failure that carries an upstream response, i.e. the API answered. */
+interface UpstreamHttpFailure {
+  response: { status: number };
+}
+
+/**
+ * True when the throwable is an upstream HTTP failure rather than a transport
+ * fault. Structural instead of `instanceof HTTPError` so a hand-built double
+ * (and any ky major that re-exports the class) still resolves to a status.
+ */
+function isUpstreamHttpFailure(cause: unknown): cause is UpstreamHttpFailure {
+  return (
+    typeof cause === "object" &&
+    cause !== null &&
+    "response" in cause &&
+    typeof cause.response === "object" &&
+    cause.response !== null &&
+    "status" in cause.response &&
+    typeof cause.response.status === "number"
+  );
+}
+
 async function probeCredential(
   token: string,
 ): Promise<AnalyticsCredentialProbe> {
@@ -61,25 +88,29 @@ async function probeCredential(
         analytics_suppressed?: boolean;
         analytics_capture_allowed?: boolean;
       }>();
+
+    const probe: AnalyticsCredentialProbe = { status: "valid" };
+
+    if (context.analytics_user_id) {
+      probe.identity = {
+        distinctId: context.analytics_user_id,
+        personless: context.analytics_personless === true,
+      };
+    }
+
+    probe.suppressAnalytics = context.analytics_suppressed === true;
+    probe.captureAllowed = context.analytics_capture_allowed === true;
+    probe.workspaceCredential = context.workspace === true;
+
+    return probe;
+  } catch (cause) {
+    // Only a 401 is authoritative. Anything else leaves the probe indeterminate,
+    // so an identity outage degrades analytics instead of blocking traffic.
     return {
-      status: "valid",
-      ...(context.analytics_user_id
-        ? {
-            identity: {
-              distinctId: context.analytics_user_id,
-              personless: context.analytics_personless === true,
-            },
-          }
-        : {}),
-      suppressAnalytics: context.analytics_suppressed === true,
-      captureAllowed: context.analytics_capture_allowed === true,
-      workspaceCredential: context.workspace === true,
-    };
-  } catch (error) {
-    const status = (error as { response?: { status?: number } }).response
-      ?.status;
-    return {
-      status: status === 401 ? "invalid" : "indeterminate",
+      status:
+        isUpstreamHttpFailure(cause) && cause.response.status === 401
+          ? "invalid"
+          : "indeterminate",
     };
   }
 }
@@ -98,19 +129,16 @@ async function probeCredential(
 function mcpHandler(): McpHttpHandler {
   return createMcpHandler(
     (ctx) => {
-      // `extractTokenHttp` takes Express-shaped headers and `ctx.requestInfo` is
-      // a web Request, so adapt rather than duplicating the parse. It throws on
-      // a missing or malformed header, but the POST gate in front has already
-      // rejected those, so a throw here is a real bug.
+      // `ctx.requestInfo` is a web Request, so adapt rather than reparse. The POST
+      // gate already rejected a bad header, so a throw here is a real bug.
       const token = extractTokenHttp({
         authorization:
           ctx.requestInfo?.headers.get("authorization") ?? undefined,
       });
+
       return makeServer(() => makeClient(token), {
-        // The Express layer entered the ALS scope before dispatching, so the
-        // per-request context reaches `captureMcp` through its own fallback
-        // read; this getter is what keeps `tools/list`'s workspace and capture
-        // gates reading the same object.
+        // Express entered the ALS scope before dispatch, so this getter keeps
+        // `tools/list`'s workspace and capture gates on the same object.
         analyticsContext: () => currentAnalyticsContext() ?? {},
       });
     },
@@ -125,6 +153,7 @@ export function analyticsIdentityOf(
   if (verifiedIdentity) {
     return { distinctId: verifiedIdentity.distinctId, personless: false };
   }
+
   return {
     distinctId: `credential:${createHash("sha256").update(token).digest("hex")}`,
     personless: true,
@@ -143,12 +172,22 @@ function headerValue(value: string | string[] | undefined): string | undefined {
  * conforming header-less modern client. A legacy `initialize` carries the
  * revision as a plain param; every other legacy request has only the header.
  */
+type ProtocolVersionEnvelope = {
+  params?: {
+    protocolVersion?: JsonValue;
+    _meta?: JsonObject;
+  };
+};
+
 function protocolVersionOf(req: Request): string | undefined {
-  const params = (req.body as { params?: unknown } | undefined)?.params as
-    { protocolVersion?: unknown; _meta?: Record<string, unknown> } | undefined;
+  const body: ProtocolVersionEnvelope | undefined = req.body;
+  const params = body?.params;
+
   const claimed =
     params?._meta?.[PROTOCOL_VERSION_META_KEY] ?? params?.protocolVersion;
-  if (typeof claimed === "string" && claimed) return claimed;
+
+  if (isJsonString(claimed) && claimed) return claimed;
+
   return headerValue(req.headers["mcp-protocol-version"]);
 }
 
@@ -182,51 +221,49 @@ function analyticsContextFor(
   const sessionId = readSessionId(req);
   const protocolVersion = protocolVersionOf(req);
   const clientUserAgent = headerValue(req.headers["user-agent"]);
-  return {
-    identity,
-    ...(sessionId
-      ? { sessionId: analyticsSessionIdOf(sessionId, identity.distinctId) }
-      : {}),
-    ...(protocolVersion ? { protocolVersion } : {}),
-    ...(clientUserAgent ? { clientUserAgent } : {}),
-  };
+  const context: McpAnalyticsContext = { identity };
+
+  if (sessionId) {
+    context.sessionId = analyticsSessionIdOf(sessionId, identity.distinctId);
+  }
+
+  if (protocolVersion) context.protocolVersion = protocolVersion;
+
+  if (clientUserAgent) context.clientUserAgent = clientUserAgent;
+
+  return context;
 }
 
-// MCP authorization (2025-06-18 spec, RFC 9728): the resource server publishes
-// its own protected-resource metadata and points at the authorization server.
-// Claude Desktop's remote-MCP connector hits POST /mcp anonymously, expects a
-// 401 carrying `WWW-Authenticate: Bearer resource_metadata="…"`, then follows
-// that URL to discover the AS. Without these two pieces, the connector reports
-// "Couldn't reach the MCP server" even though the HTTP transport is healthy.
-// The endpoint is mounted at the HOST ROOT (`MCP_PATHS`), so the resource
-// identifier is the origin: any path on `MCP_PUBLIC_URL` (a stale task
-// definition still passing `.../mcp`, a dev tunnel URL someone pasted with a
-// suffix) is dropped rather than advertised as an identifier we do not serve.
-// This also keeps the metadata URL and the resource on one origin by
-// construction, which RFC 9728 §3.3 requires them to agree on.
+// RFC 9728 requires resource and metadata on one origin, with host root as ID.
+// Strip any MCP_PUBLIC_URL path so stale `/mcp` values cannot advertise a bad ID.
 const RESOURCE_ORIGIN = new URL(
-  // `||`, not `??`: an EMPTY env var is meaningless here and would throw out of
-  // `new URL` at import, crash-looping the task.
-  process.env.MCP_PUBLIC_URL || "https://mcp.luneresearch.com",
+  runtimeSetting("MCP_PUBLIC_URL", runtimeDefaults.mcp_public_url),
 ).origin;
-const AUTH_SERVER_URL =
-  process.env.LUNE_AUTH_SERVER_URL?.replace(/\/+$/, "") ??
-  "https://api.luneresearch.com";
+
+const AUTH_SERVER_URL = runtimeSetting(
+  "LUNE_AUTH_SERVER_URL",
+  runtimeDefaults.api_public_url,
+).replace(/\/+$/, "");
+
 const SUPPORTED_SCOPES = ["papers:read", "guidance:read", "account:read"];
+
 const PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource";
-// The canonical JSON-RPC endpoint is the bare origin; `/mcp` (previous default)
-// and `/v1/mcp` (early docs + marketing hero) stay as aliases so existing
-// installs and cached docs keep working.
+
+// Bare origin is canonical; keep `/mcp` and `/v1/mcp` for existing installs.
 const MCP_PATHS = ["/", "/mcp", "/v1/mcp"];
-const DOCS_URL = "https://luneresearch.com/docs/mcp";
+
+const DOCS_URL = runtimeSetting("MCP_DOCS_URL", runtimeDefaults.docs_url);
+
+const FAVICON_URL = runtimeSiteUrl("/favicon.svg");
+
 const OPENAI_APPS_CHALLENGE_PATH = "/.well-known/openai-apps-challenge";
+
 const SERVER_MANIFEST_PATHS = ["/.well-known/mcp/server.json", "/server.json"];
-// Domain-ownership token issued by OpenAI's app directory; served verbatim
-// as plain text so the verifier can fetch and compare. Override with
-// `OPENAI_APPS_CHALLENGE_TOKEN` env var if rotated.
-const OPENAI_APPS_CHALLENGE_TOKEN =
-  process.env.OPENAI_APPS_CHALLENGE_TOKEN ??
-  "Y83F79AVjQF9SsYsNflnuFc95_3EuQP5aZIOir-x0rw";
+
+const OPENAI_APPS_CHALLENGE_TOKEN = runtimeSetting(
+  "OPENAI_APPS_CHALLENGE_TOKEN",
+  "local-development-token",
+);
 
 /**
  * The endpoint aliases, as RFC 9728 resource-identifier suffixes. `""` is the
@@ -244,6 +281,7 @@ type EndpointAlias = "" | "/mcp" | "/v1/mcp";
 
 function aliasOfPath(path: string): EndpointAlias {
   const p = path.replace(/\/+$/, "");
+
   return p === "/mcp" || p === "/v1/mcp" ? p : "";
 }
 
@@ -266,13 +304,8 @@ function sendProtectedResourceMetadata(res: Response, resource: string): void {
   });
 }
 
-// Build the `WWW-Authenticate: Bearer ...` challenge. With no `error` this is
-// the bare discovery challenge a NO-token request gets (RFC 6750 §3: omit the
-// error code when the request carried no credentials); the connector follows
-// `resource_metadata` to start OAuth. With `error="invalid_token"` it is the
-// RFC 6750 §3.1 signal that an access token was supplied but is expired/invalid,
-// which is what makes the MCP client refresh-then-retry instead of surfacing a
-// failure to the model.
+// Omit error for no-token discovery; invalid_token makes clients refresh.
+// Both challenges include resource metadata and scopes per RFC 6750/9728.
 function challenge(
   alias: EndpointAlias,
   error?: string,
@@ -281,29 +314,46 @@ function challenge(
 ): string {
   const metadata = `resource_metadata="${metadataUrlFor(alias)}"`;
   const scope = `scope="${scopes.join(" ")}"`;
+
   if (!error) return `Bearer ${metadata}, ${scope}`;
   const params = [`error="${error}"`];
+
   if (description) params.push(`error_description="${description}"`);
   params.push(metadata, scope);
+
   return `Bearer ${params.join(", ")}`;
 }
 
+/** The two fields the scope gate reads off one JSON-RPC message. */
+type ScopedRequestMessage = {
+  method?: JsonValue;
+  params?: { name?: JsonValue };
+};
+
+/**
+ * The JSON-RPC id to echo on an error response. Read straight off an
+ * unvalidated body, so any JSON value can arrive; `?? null` at each use site is
+ * what keeps a literal `0` while turning an absent id into the spec's `null`.
+ */
+type JsonRpcId = JsonValue | undefined;
+
 function requiredToolScopes(req: Request): string[] {
-  const body = req.body as
-    | { method?: unknown; params?: { name?: unknown } }
-    | Array<{ method?: unknown; params?: { name?: unknown } }>
-    | undefined;
+  const body: ScopedRequestMessage | ScopedRequestMessage[] | undefined =
+    req.body;
+
   const messages = Array.isArray(body) ? body : [body];
+
   return [
     ...new Set(
       messages.flatMap((message) => {
-        if (
-          message?.method !== "tools/call" ||
-          typeof message.params?.name !== "string"
-        ) {
+        const toolName = message?.params?.name;
+
+        if (message?.method !== "tools/call" || !isJsonString(toolName)) {
           return [];
         }
-        const scope = requiredScopeForTool(message.params.name);
+
+        const scope = requiredScopeForTool(toolName);
+
         return scope ? [scope] : [];
       }),
     ),
@@ -313,16 +363,18 @@ function requiredToolScopes(req: Request): string[] {
 function sendInsufficientScope(
   req: Request,
   res: Response,
-  id: unknown,
+  id: JsonRpcId,
   requiredScopes: readonly string[],
 ): void {
   const scopeLabel = requiredScopes.join(" ");
+
   const authenticate = challenge(
     aliasOfPath(req.path),
     "insufficient_scope",
     `The ${scopeLabel} scope is required for this request.`,
     requiredScopes,
   );
+
   res.set("WWW-Authenticate", authenticate);
   res.status(403).json({
     jsonrpc: "2.0",
@@ -335,14 +387,12 @@ function sendInsufficientScope(
   });
 }
 
-// Emit a transport-level 401 carrying the challenge in BOTH the `WWW-Authenticate`
-// header and the JSON-RPC error `data._meta` (per the MCP authorization spec), so
-// a client that parses either path can discover the AS / trigger refresh. `id`
-// echoes the request id; `?? null` preserves a literal `0` id.
+// Send the auth challenge in both HTTP and JSON-RPC paths for client compatibility.
+// Echo the request id with `??` so a literal `0` survives.
 function sendUnauthorized(
   req: Request,
   res: Response,
-  id: unknown,
+  id: JsonRpcId,
   message: string,
   opts?: { error?: string; description?: string },
 ): void {
@@ -353,6 +403,7 @@ function sendUnauthorized(
     opts?.error,
     opts?.description,
   );
+
   res.set("WWW-Authenticate", authenticate);
   res.status(401).json({
     jsonrpc: "2.0",
@@ -372,37 +423,42 @@ function sendUnauthorized(
  * unverified claim, so it never reaches PostHog raw: [[analyticsSessionIdOf]].
  */
 function readSessionId(req: Request): string | undefined {
-  // Node collapses duplicate non-cookie headers into a comma-joined string,
-  // so `req.headers['mcp-session-id']` is always `string | undefined` at
-  // runtime; the `string[]` branch in `IncomingHttpHeaders` is a defensive
-  // TS shape that never materialises here.
+  // Node collapses duplicate non-cookie headers into one comma-joined string, so
+  // `IncomingHttpHeaders`'s `string[]` branch never materialises here.
   const v = req.headers[SESSION_HEADER];
+
   /* v8 ignore next */
   if (Array.isArray(v)) return v[0];
+
   return v;
 }
 
-// Origins that browser-based MCP clients connect from. Must echo a specific
-// origin (not `*`) when `Access-Control-Allow-Credentials: true` is set;
-// without this, the connector's sign-in fetch is blocked by the browser
-// before it ever reaches the JSON-RPC handler.
-const ALLOWED_ORIGINS = new Set([
-  "https://claude.ai",
-  "https://claude.com",
-  "https://chatgpt.com",
-  "https://platform.openai.com",
-  "https://luneresearch.com",
-  "https://www.luneresearch.com",
-  "http://localhost:3000",
-  "http://localhost:1420",
-]);
+function allowedOrigins(): Set<string> {
+  const raw = runtimeSetting(
+    "MCP_ALLOWED_ORIGINS",
+    '["http://localhost:3000","http://localhost:1420"]',
+  );
 
-// Host allowlist for the JSON-RPC endpoints (DNS-rebinding / Host-spoofing
-// guard). The SDK transport ships with no Host/Origin validation, and the CORS
-// layer below only *sets* ACAO headers, it never *rejects*, so without this a
-// disallowed-Origin browser request (or a rebound Host) still executes a
-// state-changing tool call before the browser drops the response. Loopback is
-// always allowed for local dev and tests; extra hosts via MCP_ALLOWED_HOSTS.
+  const parsed: unknown = JSON.parse(raw);
+
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length === 0 ||
+    parsed.some((origin) => origin !== String(origin))
+  ) {
+    throw new Error(
+      "MCP_ALLOWED_ORIGINS must be a non-empty JSON string array",
+    );
+  }
+
+  return new Set(parsed);
+}
+
+// Credentialed browser requests require an echoed allowed origin; `*` is invalid.
+const ALLOWED_ORIGINS = allowedOrigins();
+
+// Reject spoofed Host values before tools run; CORS only controls response access.
+// Loopback supports dev/tests, and MCP_ALLOWED_HOSTS adds explicit deployments.
 const ALLOWED_HOSTS = new Set<string>([
   new URL(RESOURCE_ORIGIN).host,
   ...(process.env.MCP_ALLOWED_HOSTS?.split(",")
@@ -414,7 +470,9 @@ export function hostIsAllowed(hostHeader: string | undefined): boolean {
   if (!hostHeader) return false;
   const host = hostHeader.toLowerCase();
   const hostname = host.replace(/:\d+$/, "");
+
   if (ALLOWED_HOSTS.has(host) || ALLOWED_HOSTS.has(hostname)) return true;
+
   return (
     hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]"
   );
@@ -423,15 +481,17 @@ export function hostIsAllowed(hostHeader: string | undefined): boolean {
 export function originIsAllowed(
   origin: string | string[] | undefined,
 ): boolean {
-  // Absent Origin = a native/CLI MCP client or server-to-server call (no
-  // ambient browser credentials to abuse); allowed, and authenticated by the
-  // Bearer token. A present Origin must be on the allowlist; Node never arrays
-  // this header, so an array is treated as malformed and rejected.
+  // No Origin means a native or server-to-server client with no ambient browser
+  // credentials to abuse; a present one must be allowlisted, an array is bogus.
   if (origin === undefined) return true;
+
   if (Array.isArray(origin)) return false;
+
   if (ALLOWED_ORIGINS.has(origin)) return true;
+
   try {
     const url = new URL(origin);
+
     return (
       (url.protocol === "http:" || url.protocol === "https:") &&
       (url.hostname === "localhost" ||
@@ -443,13 +503,22 @@ export function originIsAllowed(
   }
 }
 
-// Longest JSON-RPC batch this endpoint will dispatch. Batching left the spec in
-// revision 2025-06-18 and the SDK refuses an array on the modern path, so the
-// only senders are 2025-03-26-era clients, whose real batches are a handful of
-// messages. 50 is far above any of those and ~340x below the 17,189 minimal
-// messages that fit inside the 1mb body limit; measured, a 50-message
-// `prompts/list` batch costs 129kb and 16ms, the 1mb one 44mb and 4.6s.
+// Only legacy clients batch; cap at 50 to bound one POST's dispatch and memory.
+// Modern SDK rejects arrays, and real legacy batches are far smaller.
 const MAX_BATCH_MESSAGES = 50;
+
+/** The one field of a body-parser failure the JSON error handler branches on. */
+interface BodyParserFailure {
+  status?: number;
+}
+
+/** `/health` response body. `build_id` is present only on deployed builds. */
+type HealthBody = {
+  status: "ok";
+  server: "lune-mcp";
+  version: string;
+  build_id?: string;
+};
 
 /** Build the express app without binding it to a port. Useful for tests. */
 export function buildHttpApp(options: HttpAppOptions = {}): Express {
@@ -458,7 +527,8 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
   // before they touch routes that require a body.
   app.use((req, res, next) => {
     const origin = req.headers.origin;
-    if (typeof origin === "string" && originIsAllowed(origin)) {
+
+    if (origin !== undefined && originIsAllowed(origin)) {
       res.setHeader("Access-Control-Allow-Origin", origin);
       res.setHeader("Vary", "Origin");
       res.setHeader("Access-Control-Allow-Credentials", "true");
@@ -466,11 +536,8 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
         "Access-Control-Allow-Methods",
         "GET, POST, DELETE, OPTIONS",
       );
-      // `mcp-method` is MANDATORY on a 2026-07-28 request and `mcp-name`
-      // accompanies a `tools/call`, so a browser MCP client without them in the
-      // allowlist fails every modern call at preflight while its legacy calls
-      // keep working. `mcp-session-id` stays: vestigial, but removing it would
-      // break a legacy browser client that still sends one.
+      // `mcp-method` is mandatory on a 2026-07-28 request, so a browser client
+      // without it fails every modern call. `mcp-session-id` stays for legacy.
       res.setHeader(
         "Access-Control-Allow-Headers",
         "Authorization, Content-Type, Accept, mcp-session-id, mcp-protocol-version, last-event-id, mcp-method, mcp-name",
@@ -481,19 +548,26 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
       );
       res.setHeader("Access-Control-Max-Age", "86400");
     }
+
     if (req.method === "OPTIONS") {
       res.status(204).end();
+
       return;
     }
+
     next();
   });
   app.use(express.json({ limit: "1mb" }));
+
   const jsonBodyError: ErrorRequestHandler = (error, _req, res, next) => {
-    const bodyError = error as { status?: number; type?: string };
+    const bodyError: BodyParserFailure = error;
+
     if (bodyError.status !== 400 && bodyError.status !== 413) {
       next(error);
+
       return;
     }
+
     const tooLarge = bodyError.status === 413;
     res.set({
       "Cache-Control": "no-store",
@@ -510,26 +584,30 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
       id: null,
     });
   };
+
   app.use(jsonBodyError);
   app.disable("x-powered-by");
 
   app.get("/health", (_req: Request, res: Response) => {
     const buildId = process.env.LUNE_BUILD_ID?.trim();
-    res.json({
+
+    const body: HealthBody = {
       status: "ok",
       server: "lune-mcp",
       version: SERVER_VERSION,
-      ...(buildId ? { build_id: buildId } : {}),
-    });
+    };
+
+    if (buildId) body.build_id = buildId;
+    res.json(body);
   });
 
-  // Public MCP Registry metadata. The body is the exact server.json validated
-  // and published by mcp-publisher, exposed at the well-known discovery path
-  // plus a root alias for crawlers that start from the MCP origin.
+  // The exact server.json that mcp-publisher validated and published, served at
+  // the well-known path plus a root alias for crawlers starting at the origin.
   app.get(SERVER_MANIFEST_PATHS, (_req: Request, res: Response) => {
     if (!res.hasHeader("Access-Control-Allow-Origin")) {
       res.set("Access-Control-Allow-Origin", "*");
     }
+
     res.set({
       "Cache-Control": "public, max-age=3600",
       "X-Content-Type-Options": "nosniff",
@@ -544,23 +622,18 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
     res.type("text/plain").send(OPENAI_APPS_CHALLENGE_TOKEN);
   });
 
-  // Favicon redirects so directory crawlers (Google s2 / Anthropic / OpenAI)
-  // resolve our brand mark when they probe the MCP host instead of the apex.
-  // The canonical asset lives at luneresearch.com/favicon.svg and is owned
-  // by the marketing site; mirroring it here would only invite drift.
+  // Directory crawlers probe the MCP host, not the apex, so point them at the
+  // marketing site's canonical mark; mirroring it here would only invite drift.
   app.get(
     ["/favicon.ico", "/favicon.svg", "/apple-touch-icon.png"],
     (_req: Request, res: Response) => {
       res.set("Cache-Control", "public, max-age=86400");
-      res.redirect(302, "https://luneresearch.com/favicon.svg");
+      res.redirect(302, FAVICON_URL);
     },
   );
 
-  // RFC 9728 protected-resource metadata. Public, no auth, cacheable. The
-  // `resource` claim binds tokens to this server's URL; `authorization_servers`
-  // points at the Lune API which exposes the full OAuth 2.1 + DCR machinery.
-  // Derived, not re-spelled: one alias set, so adding a fourth endpoint path
-  // cannot half-land by updating MCP_PATHS and forgetting the metadata routes.
+  // RFC 9728 metadata: public and cacheable. Derived from the one alias set, so
+  // adding a fourth endpoint path cannot half-land in MCP_PATHS alone.
   for (const alias of MCP_PATHS.map(aliasOfPath)) {
     app.get(
       `${PROTECTED_RESOURCE_PATH}${alias}`,
@@ -570,13 +643,8 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
     );
   }
 
-  // DNS-rebinding / CSRF guard, scoped to the JSON-RPC endpoints only: health,
-  // well-known and favicon stay open for ALB checks and directory crawlers.
-  // The ARRAY form matches exactly these three paths (plus sub-paths), it is NOT
-  // the prefix catch-all that a bare `app.use("/")` would be, so an unknown path
-  // still 404s without running the guard. Do not collapse MCP_PATHS to ["/"].
-  // Rejects a spoofed/rebound Host or a present-but-disallowed browser Origin
-  // BEFORE the request can execute a tool call.
+  // DNS-rebinding guard, scoped to the JSON-RPC paths so health and well-known
+  // stay open. The ARRAY form is exact, not a prefix: never collapse it to "/".
   app.use(MCP_PATHS, (req: Request, res: Response, next) => {
     if (!hostIsAllowed(req.headers.host)) {
       res.status(403).json({
@@ -584,64 +652,60 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
         error: { code: -32003, message: "Forbidden: host not allowed" },
         id: null,
       });
+
       return;
     }
+
     if (!originIsAllowed(req.headers.origin)) {
       res.status(403).json({
         jsonrpc: "2.0",
         error: { code: -32003, message: "Forbidden: origin not allowed" },
         id: null,
       });
+
       return;
     }
+
     next();
   });
 
-  // A person (or a crawler) opening the CANONICAL endpoint in a browser: send
-  // them to the docs instead of the transport's JSON-RPC error. Scoped to "/" on
-  // purpose: `/mcp` and `/v1/mcp` are registered URLs that directory probes and
-  // connector validators already hit, and they must keep their protocol response
-  // rather than start returning marketing HTML. MCP clients ask for
-  // `text/event-stream` on this verb, so they never take this branch.
+  // A browser opening the canonical endpoint gets the docs, not a JSON-RPC error.
+  // Scoped to "/": /mcp and /v1/mcp must keep answering registered probes.
   app.get("/", (req: Request, res: Response, next) => {
     if (req.accepts(["text/event-stream", "text/html"]) === "text/html") {
       res.redirect(302, DOCS_URL);
+
       return;
     }
+
     next();
   });
 
   const handler = mcpHandler();
   app.locals.mcpHandler = handler;
+
   const nodeHandler = toNodeHandler(handler, {
     onerror: (err) => console.error(`[mcp/http] adapter: ${err.message}`),
   });
 
-  // The handler owns the modern leg's in-flight exchanges, so its lifetime is
-  // the lifetime of the server serving them. Tying it to `listen` rather than to
-  // `startHttpServer` is what stops each standalone `buildHttpApp()` (the suite
-  // builds one per file) from leaving one behind with no way to reach it.
-  // `close()` is idempotent, so the drain path can still force it early.
+  // Handler lifetime follows the listening server so standalone test apps close it.
+  // SAFETY: The wrapper forwards typed listen calls unchanged, adding only cleanup.
   const bindAndListen = app.listen.bind(app) as (
     ...args: unknown[]
   ) => HttpServer;
-  app.listen = ((...args: unknown[]): HttpServer => {
+
+  app.listen = (...args: unknown[]): HttpServer => {
     const server = bindAndListen(...args);
     server.on("close", () => void handler.close().catch(() => undefined));
-    return server;
-  }) as typeof app.listen;
 
-  // POST is the only verb that can execute a tool, so it is the only one gated
-  // on a credential: GET and DELETE were 2025 session operations and the
-  // stateless handler answers both 405 without building a server instance.
+    return server;
+  };
+
+  // POST is the only verb that can execute a tool, so it is the only one gated on
+  // a credential; GET and DELETE answer 405 without building a server.
   app.post(MCP_PATHS, async (req: Request, res: Response) => {
-    // A batch is ONE POST (one credential probe, one API-side analytics claim)
-    // but N dispatches and N PostHog events, so uncapped it is both a 40x
-    // CPU/bandwidth amplifier and the one path where the API's per-request
-    // accounting under-counts per-event work; `prompts/list` needs no upstream
-    // call, so nothing else in the stack sees a flood (`.claude/rules/mcp.md`).
-    // Checked ahead of the auth work so an abusive body buys no upstream call.
-    // 400 + -32600 is the SDK's own answer to a malformed batch.
+    // A batch is one POST but N dispatches and N events, so uncapped it is a 40x
+    // amplifier. Checked before the auth work so an abusive body buys no call.
     if (Array.isArray(req.body) && req.body.length > MAX_BATCH_MESSAGES) {
       res.status(400).json({
         jsonrpc: "2.0",
@@ -651,32 +715,31 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
         },
         id: null,
       });
+
       return;
     }
 
     let token: string;
+
     try {
       token = extractTokenHttp(req.headers);
-    } catch (e) {
+    } catch (cause) {
       // RFC 6750 §3 + MCP authorization spec: the WWW-Authenticate header is
       // what triggers the connector's OAuth discovery + browser-based consent.
-      sendUnauthorized(req, res, req.body?.id, (e as Error).message);
+      sendUnauthorized(req, res, req.body?.id, messageOf(cause));
+
       return;
     }
 
-    // Resource-server token validation (RFC 9728): an expired/invalid Lune OAuth
-    // access token must yield a transport-level 401 + WWW-Authenticate so the
-    // client's MCP OAuth layer SILENTLY refreshes (it holds a 90-day refresh
-    // token) and retries, instead of the request reaching a tool, failing
-    // upstream with 401, and being mapped to a tool-execution error the model
-    // surfaces as "please reconnect" (errors.ts). Opaque PATs and JWKS-infra
-    // failures pass through; the API stays their authority. [[accessTokenNeedsReauth]]
+    // An expired Lune OAuth token must get a transport 401 + WWW-Authenticate so
+    // the client silently refreshes, rather than failing inside a tool call.
     const inspection = await inspectAccessToken(
       token,
       undefined,
       resourceFor(aliasOfPath(req.path)),
       protocolVersionOf(req) !== "2026-07-28",
     );
+
     if (inspection.needsReauth) {
       sendUnauthorized(
         req,
@@ -688,30 +751,38 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
           description: "The access token is expired or invalid.",
         },
       );
+
       return;
     }
+
     const requiredScopes = requiredToolScopes(req);
+
     const missingScopes = inspection.verifiedIdentity
       ? requiredScopes.filter(
           (scope) => !inspection.verifiedIdentity!.scopes.includes(scope),
         )
       : [];
+
     if (missingScopes.length > 0) {
       sendInsufficientScope(req, res, req.body?.id, missingScopes);
+
       return;
     }
+
     let analyticsProbe: AnalyticsCredentialProbe | undefined;
+
     const shouldProbeCredential =
       options.credentialProbe !== undefined ||
       analyticsEnabled() ||
       process.env.NODE_ENV !== "test";
+
     if (shouldProbeCredential) {
-      // Probed on EVERY request, never cached: a revoked credential has to
-      // stop passing on its next call, and a cache here would be exactly the
-      // cross-request state the stateless transport removed.
+      // Probed on every request, never cached: a revoked credential has to stop
+      // passing on its next call, and a cache is the state we just removed.
       analyticsProbe = await (options.credentialProbe ?? probeCredential)(
         token,
       );
+
       if (analyticsProbe.status === "invalid") {
         sendUnauthorized(
           req,
@@ -723,27 +794,24 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
             description: "The access token is invalid.",
           },
         );
+
         return;
       }
-      // An identity/capability probe outage cannot become a product outage.
-      // Tool endpoints still authorize the bearer themselves; the context
-      // assembled below fails closed only for analytics and workspace hints.
+      // A probe outage must not become a product outage: tools still authorize the
+      // bearer, and the context fails closed only for analytics and hints.
     }
-    // The probe's identity wins BEFORE the context is built, not after:
-    // `$session_id` is derived from the distinct id, so a context assembled
-    // against the locally-inferred identity and patched afterwards would group
-    // one client's events under two different session ids.
+
+    // The probe's identity must win before the context is built: `$session_id`
+    // derives from the distinct id, so patching later would split one client.
     const requestAnalyticsContext = analyticsContextFor(
       req,
       analyticsProbe?.identity ??
         analyticsIdentityOf(token, inspection.verifiedIdentity),
     );
+
     if (analyticsProbe) {
-      // The API reports the two reasons capture stops SEPARATELY, and they mean
-      // different things: `analytics_suppressed` is the principal's own opt-out,
-      // while `analytics_capture_allowed` also goes false when the shared daily
-      // event budget is spent. Keep them apart here, because only the opt-out is
-      // allowed to change the tool surface (`tools/index.ts`).
+      // `analytics_suppressed` is the opt-out; capture also stops when the shared
+      // budget is spent. Only the opt-out may reshape the tool surface.
       requestAnalyticsContext.captureOptOut =
         analyticsProbe.suppressAnalytics === true;
       requestAnalyticsContext.captureEnabled =
@@ -753,10 +821,8 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
         analyticsProbe.workspaceCredential === true;
     }
 
-    // Entering the ALS scope HERE is what carries the context through the node
-    // adapter into the per-request server instance: `createMcpHandler`'s factory
-    // never sees the Express request, so there is nothing to thread it through.
-    // Lune emits no mid-call notifications, so the response completes inside it.
+    // Entering the ALS scope here is what carries the context through the node
+    // adapter: the handler factory never sees the Express request.
     await withAnalyticsContext(requestAnalyticsContext, () =>
       nodeHandler(req, res, req.body),
     );
@@ -765,36 +831,36 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
   // Every other verb on the endpoint is the handler's own answer: 405 under the
   // stateless posture, never the 404 that would tell a client its session died.
   app.all(MCP_PATHS, (req: Request, res: Response) => {
-    // The parsed body MUST be passed as the third argument. Mounting
-    // `nodeHandler` directly would hand Express's `next` as that argument, which
-    // the adapter ignores rather than treating as a body, so it would then read
-    // the Node stream that `express.json()` has already drained.
+    // The parsed body must be the THIRD argument: mounted directly, Express's
+    // `next` lands there and the adapter re-reads a stream express.json() drained.
     void nodeHandler(req, res, req.body);
   });
 
   return app;
 }
 
+/** `address()` is a string for a pipe or unix socket, and null before binding. */
+function isBoundAddress(
+  address: string | AddressInfo | null,
+): address is AddressInfo {
+  return typeof address === "object" && address !== null;
+}
+
 /** Start the HTTP server bound to `port`. Pass `0` for an OS-assigned port. */
 export function startHttpServer(port: number): HttpServer {
   const app = buildHttpApp();
-  const handler = app.locals.mcpHandler as McpHttpHandler;
+  const handler: McpHttpHandler = app.locals.mcpHandler;
+
   const server = app.listen(port, () => {
     const addr = server.address();
-    const boundPort = typeof addr === "object" && addr ? addr.port : port;
+    const boundPort = isBoundAddress(addr) ? addr.port : port;
     console.log(`Lune MCP HTTP listening on :${boundPort}`);
   });
 
-  // Graceful drain on deploy / scale-in. ECS sends SIGTERM, then SIGKILL after
-  // the task stopTimeout (30s default). Node's default action exits immediately
-  // on SIGTERM, hard-cutting every in-flight tool call, and a heavy tool holds
-  // its connection for up to 120s with nothing resumable about it. The ALB
-  // deregisters the target first (300s drain, see `.claude/rules/mcp.md`), so
-  // this handler covers the tail: whatever is still open when SIGTERM finally
-  // lands, plus every local Ctrl-C. Stop accepting new connections and let
-  // in-flight requests finish; after a bounded grace (under the 30s
-  // stopTimeout) abort whatever is still streaming and exit.
+  // ECS sends SIGTERM then SIGKILL at stopTimeout, and Node's default exit would
+  // cut every in-flight tool call, so drain within that window instead.
   let draining = false;
+
   const drain = (signal: string): void => {
     if (draining) return;
     draining = true;
@@ -805,6 +871,7 @@ export function startHttpServer(port: number): HttpServer {
         process.exit(0);
       });
     });
+
     const force = setTimeout(() => {
       console.warn(
         "Lune MCP drain grace elapsed; aborting in-flight exchanges",
@@ -816,8 +883,10 @@ export function startHttpServer(port: number): HttpServer {
           () => void flushAnalytics(1000).finally(() => process.exit(0)),
         );
     }, 24_000);
+
     force.unref();
   };
+
   // Named handlers detached on close so repeated startHttpServer() calls (the
   // integration tests spin up many) don't leak process-level listeners.
   const onSigterm = (): void => drain("SIGTERM");

@@ -1,19 +1,15 @@
 import ky, { type KyInstance } from "ky";
+import runtimeDefaults from "../runtime-defaults.json";
+import { runtimeSetting } from "../runtime-config.js";
+import { MCP_VERSION } from "../version.js";
 
-/** Override for tests; production reads `LUNE_API_BASE_URL` or defaults to prod. */
+/** Override for tests; production requires an explicit API target. */
 export function getBaseUrl(): string {
-  return (
-    process.env.LUNE_API_BASE_URL ?? "https://api.luneresearch.com"
+  return runtimeSetting(
+    "LUNE_API_BASE_URL",
+    runtimeDefaults.api_public_url,
   ).replace(/\/$/, "");
 }
-
-// `__LUNE_MCP_VERSION__` is substituted by tsup `define` at build time (see
-// `tsup.config.ts`, same constant server.ts stamps). The fallback keeps tsx /
-// vitest happy in dev where it isn't substituted, and stops the User-Agent from
-// drifting to a hardcoded version that lies about the running build.
-declare const __LUNE_MCP_VERSION__: string | undefined;
-const VERSION =
-  typeof __LUNE_MCP_VERSION__ === "string" ? __LUNE_MCP_VERSION__ : "0.0.0-dev";
 
 /** Default per-call timeout, for the light read tools (search / fetch / list). */
 export const DEFAULT_TIMEOUT_MS = 30_000;
@@ -41,14 +37,12 @@ export function makeClient(token: string): KyInstance {
     prefix: `${getBaseUrl()}/api/v1/`,
     headers: {
       Authorization: `Bearer ${token}`,
-      "User-Agent": `lune-mcp/${VERSION}`,
+      "User-Agent": `lune-mcp/${MCP_VERSION}`,
       Accept: "application/json",
     },
     timeout: DEFAULT_TIMEOUT_MS,
-    // Retry idempotent GETs only (paper/conference/guidance reads): a transient
-    // 502/503/504 or a network drop during a long delegated sweep should not be
-    // a hard failure. POST /search is NOT retried (non-idempotent; MCP clients
-    // retry tool errors themselves).
+    // Retry only idempotent GETs on transient network or 5xx failures; MCP
+    // clients handle POST tool retries themselves.
     retry: {
       limit: 2,
       methods: ["get"],

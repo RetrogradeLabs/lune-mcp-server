@@ -121,12 +121,11 @@ describe("resolveConferenceShortName: exact + abbreviated matches", () => {
   });
 
   it("single-letter input is ambiguous when multiple short_names share the prefix", () => {
-    // 'S' is a prefix of 'S&P' (tokenises as ['s','p']) AND of 'USENIX
-    // Security' (whose 'security' token starts with 's'). Both short_names
-    // tokenise to size 2 → tied at the most-specific level → ambiguous.
-    // Better than silently picking one; the agent should be told.
+    // 'S' prefixes both 'S&P' and 'USENIX Security', and both tokenise to size
+    // 2, so they tie at the most-specific level. Better told than guessed.
     const result = resolveConferenceShortName("S", CONFERENCES);
     expect(result.kind).toBe("ambiguous");
+
     if (result.kind === "ambiguous") {
       expect(result.candidates.sort()).toEqual(["S&P", "USENIX Security"]);
     }
@@ -135,15 +134,16 @@ describe("resolveConferenceShortName: exact + abbreviated matches", () => {
 
 describe("resolveConferenceShortName: ambiguity", () => {
   it("flags ambiguity when two candidates share an input prefix in their short_name", () => {
-    // The exact case the user raised: introduce a USENIX Privacy alongside
-    // USENIX Security. `usenix` alone is consistent with both; silently
-    // picking one would route the agent's query to the wrong venue.
+    // The case the user raised: `usenix` alone is consistent with USENIX
+    // Security and USENIX Privacy; guessing routes the query to the wrong one.
     const corpus: ConferenceCandidate[] = [
       ...CONFERENCES,
       { short_name: "USENIX Privacy", full_name: "USENIX Privacy Conference" },
     ];
+
     const result = resolveConferenceShortName("usenix", corpus);
     expect(result.kind).toBe("ambiguous");
+
     if (result.kind === "ambiguous") {
       // Both must be reported. Order doesn't matter; agents render this
       // back to the user / chooses one.
@@ -155,10 +155,8 @@ describe("resolveConferenceShortName: ambiguity", () => {
   });
 
   it("ambiguity scope is limited to equally-specific candidates", () => {
-    // Three USENIX-prefixed venues with different specificities. The
-    // 2-token short_names ("USENIX Security", "USENIX Privacy") are tied
-    // at the most-specific level. Adding a 3-token candidate doesn't
-    // change the ambiguity (it's strictly less specific, not in the tie).
+    // The two 2-token short_names tie at the most-specific level; a 3-token
+    // candidate is strictly less specific, so it does not change the ambiguity.
     const corpus: ConferenceCandidate[] = [
       { short_name: "USENIX Security", full_name: "USENIX Security Symposium" },
       { short_name: "USENIX Privacy", full_name: "USENIX Privacy Conference" },
@@ -167,8 +165,10 @@ describe("resolveConferenceShortName: ambiguity", () => {
         full_name: "USENIX Annual Technical Conference HotOS",
       },
     ];
+
     const result = resolveConferenceShortName("usenix", corpus);
     expect(result.kind).toBe("ambiguous");
+
     if (result.kind === "ambiguous") {
       expect(result.candidates.sort()).toEqual([
         "USENIX Privacy",
@@ -182,6 +182,7 @@ describe("resolveConferenceShortName: ambiguity", () => {
       ...CONFERENCES,
       { short_name: "USENIX Privacy", full_name: "USENIX Privacy Conference" },
     ];
+
     expect(resolveConferenceShortName("USENIX SEC", corpus)).toEqual({
       kind: "match",
       short_name: "USENIX Security",
@@ -223,6 +224,7 @@ describe("resolveConferenceShortName: non-matches", () => {
       { short_name: "FOO", full_name: null },
       { short_name: "BAR" },
     ];
+
     expect(resolveConferenceShortName("foo", candidates)).toEqual({
       kind: "match",
       short_name: "FOO",
@@ -251,8 +253,10 @@ describe("resolveConferenceShortName: full_name exact match", () => {
       { short_name: "AAA", full_name: "Shared Long Name" },
       { short_name: "BBB", full_name: "Shared Long Name" },
     ];
+
     const result = resolveConferenceShortName("shared long name", corpus);
     expect(result.kind).toBe("ambiguous");
+
     if (result.kind === "ambiguous") {
       expect(result.candidates.sort()).toEqual(["AAA", "BBB"]);
     }
@@ -261,9 +265,8 @@ describe("resolveConferenceShortName: full_name exact match", () => {
 
 describe("resolveConferenceShortName: degenerate candidates", () => {
   it("skips a candidate whose short_name tokenises to nothing in stage 3a", () => {
-    // The input misses stages 1 + 2, so it reaches the prefix stage. The
-    // first candidate's short_name is pure punctuation → zero target
-    // tokens → `continue`d. The real prefix match still wins.
+    // The input misses stages 1 and 2, so it reaches the prefix stage, where
+    // a pure-punctuation short_name has zero target tokens and is skipped.
     const corpus: ConferenceCandidate[] = [
       { short_name: "!!!", full_name: "@@@" },
       {
@@ -271,6 +274,7 @@ describe("resolveConferenceShortName: degenerate candidates", () => {
         full_name: "International Conference on Machine Learning",
       },
     ];
+
     expect(resolveConferenceShortName("icm", corpus)).toEqual({
       kind: "match",
       short_name: "ICML",
@@ -278,9 +282,8 @@ describe("resolveConferenceShortName: degenerate candidates", () => {
   });
 
   it("widens to stage 3b and tolerates a null full_name in the combined selector", () => {
-    // `repres` matches no short_name token (stage 3a finds nothing), so
-    // stage 3b builds `${short_name} ${full_name ?? ""}` for each
-    // candidate. The `?? ""` arm fires for the null-full_name entry.
+    // `repres` matches no short_name token, so stage 3b builds
+    // `${short_name} ${full_name ?? ""}` and the `?? ""` arm fires here.
     const corpus: ConferenceCandidate[] = [
       { short_name: "ZZZ", full_name: null },
       {
@@ -288,6 +291,7 @@ describe("resolveConferenceShortName: degenerate candidates", () => {
         full_name: "International Conference on Learning Representations",
       },
     ];
+
     expect(resolveConferenceShortName("repres", corpus)).toEqual({
       kind: "match",
       short_name: "ICLR",
@@ -295,13 +299,13 @@ describe("resolveConferenceShortName: degenerate candidates", () => {
   });
 
   it("picks the most-specific candidate when a later match is smaller", () => {
-    // `lin` prefix-matches both "Computational Linguistics Workshop" (3
-    // tokens) and "Linguistics" (1 token). The smaller target wins, which
-    // forces the `m.targetSize < minSize` update on a later iteration.
+    // `lin` prefix-matches a 3-token and a 1-token short_name; the smaller
+    // target wins, which forces the `m.targetSize < minSize` update later.
     const corpus: ConferenceCandidate[] = [
       { short_name: "Computational Linguistics Workshop", full_name: "x" },
       { short_name: "Linguistics", full_name: "y" },
     ];
+
     expect(resolveConferenceShortName("lin", corpus)).toEqual({
       kind: "match",
       short_name: "Linguistics",

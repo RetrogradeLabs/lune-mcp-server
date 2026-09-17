@@ -3,7 +3,7 @@
  *
  * The endpoint is served at the bare origin AND at the legacy `/mcp` +
  * `/v1/mcp` paths, so the env var can legitimately carry any of those spellings
- * (infra/mcp.ts today, a dev tunnel tomorrow, a stale task definition during a
+ * (the service's deployment configuration today, a dev tunnel tomorrow, a stale task definition during a
  * rollout). What must be stable is the ORIGIN they all resolve to: the per-path
  * identifiers are built from it (`resourceFor`), and discovery is deliberately
  * path-aware, so this pins the prefix, NOT one `resource` for every path.
@@ -15,7 +15,8 @@
  * under a stubbed env rather than mutating it afterwards (a no-op).
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AddressInfo } from "node:net";
+import { fetchJsonObject, jsonString } from "../support/json.js";
+import { portOf } from "../support/net.js";
 
 const ORIGIN = "https://mcp.luneresearch.com";
 
@@ -26,14 +27,21 @@ async function advertisedResource(
   vi.stubEnv("MCP_PUBLIC_URL", publicUrl);
   const mod = await import("../../src/transport/streamableHttp.js");
   const server = mod.buildHttpApp().listen(0);
+
   try {
     await new Promise<void>((resolve) => server.once("listening", resolve));
-    const port = (server.address() as AddressInfo).port;
+    const port = portOf(server);
+
     const res = await fetch(
       `http://localhost:${port}/.well-known/oauth-protected-resource`,
     );
-    const body = (await res.json()) as { resource: string };
-    return { resource: body.resource, hostAllowed: mod.hostIsAllowed };
+
+    const body = await fetchJsonObject(res);
+
+    return {
+      resource: jsonString(body.resource, "resource"),
+      hostAllowed: mod.hostIsAllowed,
+    };
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
@@ -61,6 +69,7 @@ describe("advertised resource identifier", () => {
     const { resource, hostAllowed } = await advertisedResource(
       "https://demo.trycloudflare.com/mcp",
     );
+
     expect(resource).toBe("https://demo.trycloudflare.com");
     expect(hostAllowed("demo.trycloudflare.com")).toBe(true);
     expect(hostAllowed("attacker.example.com")).toBe(false);

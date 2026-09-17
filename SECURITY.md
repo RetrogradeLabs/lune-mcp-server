@@ -12,8 +12,8 @@ already fixed there.
 Do not open a public issue for a suspected vulnerability. Use the private
 [GitHub Security Advisory form](https://github.com/RetrogradeLabs/lune-mcp-server/security/advisories/new)
 for the public MCP package, or email `support@luneresearch.com` with the subject
-`Security report` for the monorepo, hosted service, API, OAuth flow, or account
-data.
+`Security report` for anything else: the hosted service, the API, the OAuth
+flow, or account data.
 
 Include the affected URL, package version or commit, reproduction steps, impact,
 and any proof-of-concept material needed to confirm the issue. Remove real user

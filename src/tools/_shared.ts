@@ -1,3 +1,4 @@
+import type { JsonObject, JsonValue } from "../json.js";
 import type { JSONValue } from "@modelcontextprotocol/server";
 import type { z } from "zod";
 
@@ -43,6 +44,15 @@ export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
   description: string;
   inputSchema: TInput;
   /**
+   * Schema served to credentials without workspace access. Set it on every tool
+   * whose input carries `source`, so the `source="workspace"` selector is not
+   * offered to a caller that cannot use it. Declared per tool rather than
+   * derived by reflection: reflection keys the projection on the literal string
+   * "source", so renaming that field would silently stop projecting and start
+   * advertising the selector to external credentials.
+   */
+  externalInputSchema?: z.ZodTypeAny;
+  /**
    * Optional JSON Schema 2020-12 output contract. MCP 2026-07-28 permits any
    * JSON value and requires successful `structuredContent` to match this
    * schema. ChatGPT's connector UI also surfaces a recommendation banner when
@@ -57,7 +67,7 @@ export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
    * an entry tool from Claude Code's tool-search deferral so its full schema
    * (and the trigger in its description) is in context from session start.
    */
-  meta?: Record<string, unknown>;
+  meta?: JsonObject;
 }
 
 /**
@@ -67,11 +77,24 @@ export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
  * each always-loaded tool spends context, and Claude Code truncates server
  * `instructions` at 2KB, so an entry tool's own description (which carries the
  * "use this for research, not web_search" trigger) being present upfront is what
- * makes Lune reliably selected without a `ToolSearch` hop. See `.claude/rules/mcp.md`.
+ * makes Lune reliably selected without a `ToolSearch` hop. See the MCP server design notes.
  */
-export const ALWAYS_LOAD_META: Record<string, unknown> = {
-  "anthropic/alwaysLoad": true,
+/**
+ * The annotation set every corpus retrieval tool carries. Shared rather than
+ * re-declared per family: these four hints are a property of "reads our own
+ * index of third-party papers", not of one file. `openWorldHint` is true
+ * because the papers and figures returned are third-party works we index.
+ */
+export const READ_ONLY_OPEN: ToolAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  openWorldHint: true,
+  idempotentHint: true,
 };
+
+export const ALWAYS_LOAD_META = {
+  "anthropic/alwaysLoad": true,
+} satisfies JsonObject;
 
 /**
  * Emit the same JSON in `content` (text) AND `structuredContent` so clients
@@ -79,12 +102,13 @@ export const ALWAYS_LOAD_META: Record<string, unknown> = {
  * legacy clients still parse the text. Use this for any tool with an
  * `outputSchema` declared.
  */
-export function structuredJson(value: unknown): ToolCallResult {
+export function structuredJson(value: JsonValue): ToolCallResult {
   return {
-    // No pretty-print: the canonical channel is `structuredContent` (parsed by
-    // schema-aware clients); the text mirror is a legacy fallback, so the
-    // 2-space indent only inflated its token cost.
+    // structuredContent is canonical; minified text is a low-token legacy
+    // fallback.
     content: [{ type: "text", text: JSON.stringify(value) }],
+    // SAFETY: both types encode the same JSON; stringify drops our allowed
+    // undefined-valued keys.
     structuredContent: value as JSONValue,
   };
 }
