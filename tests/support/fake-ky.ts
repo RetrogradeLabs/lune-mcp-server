@@ -25,7 +25,14 @@ import {
   type JsonValue,
 } from "../../src/json.js";
 
-export type KyVerb = "get" | "post" | "put" | "patch" | "delete" | "head";
+export type KyVerb =
+  | "get"
+  | "post"
+  | "put"
+  | "patch"
+  | "delete"
+  | "head"
+  | "query";
 
 export type RecordedCall = {
   method: KyVerb;
@@ -209,6 +216,7 @@ type KyMembers = Pick<
   | "patch"
   | "delete"
   | "head"
+  | "query"
   | "create"
   | "extend"
   | "stop"
@@ -253,6 +261,7 @@ export function createFakeKy(
       patch: verb("patch"),
       delete: verb("delete"),
       head: verb("head"),
+      query: verb("query"),
       create: () => build(),
       extend: (defaults) => {
         if (isOptionsBag(defaults)) extensions.push(defaults);
