@@ -3,7 +3,7 @@
   "name": "com.luneresearch/lune",
   "title": "Lune Research",
   "description": "Search peer-reviewed papers and research methodology guidance from your AI agent.",
-  "version": "2.2.0",
+  "version": "3.0.0",
   "websiteUrl": "https://luneresearch.com",
   "icons": [
     {
@@ -21,7 +21,7 @@
     {
       "registryType": "npm",
       "identifier": "@retrograde-labs/lune-mcp-server",
-      "version": "2.2.0",
+      "version": "3.0.0",
       "transport": {
         "type": "stdio"
       },
