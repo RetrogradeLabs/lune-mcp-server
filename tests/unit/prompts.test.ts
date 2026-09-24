@@ -4,6 +4,7 @@
  * that each prompt actually orchestrates the Lune tools its workflow needs
  * (a non-vacuous guard so a prompt can't silently drift into empty guidance).
  */
+import { ProtocolError } from "@modelcontextprotocol/server";
 import { describe, expect, it } from "vitest";
 import { messageOf } from "../../src/cause.js";
 import {
@@ -16,13 +17,21 @@ import {
   listPrompts,
   registerPrompts,
 } from "../../src/prompts.js";
+import {
+  answeredView,
+  fixedReleases,
+  UNANSWERED_VIEW,
+  type ReleaseView,
+} from "../../src/releases.js";
 
 const text = (name: string, args: Record<string, string>) =>
   getPromptResult(name, args).messages[0]!.content.text;
 
+const FIGURES_RELEASED = { figures: true };
+
 describe("listPrompts", () => {
   it("projects every prompt with name, title, description, and arguments", () => {
-    const { prompts } = listPrompts();
+    const { prompts } = listPrompts(FIGURES_RELEASED);
     expect(prompts).toHaveLength(PROMPTS.length);
 
     for (const p of prompts) {
@@ -33,7 +42,7 @@ describe("listPrompts", () => {
     }
   });
 
-  it("exposes exactly the seven research workflows", () => {
+  it("exposes exactly the six public research workflows", () => {
     expect(
       listPrompts()
         .prompts.map((p) => p.name)
@@ -41,7 +50,6 @@ describe("listPrompts", () => {
     ).toEqual(
       [
         "compare_papers",
-        "design_figure",
         "find_related_work",
         "literature_review",
         "research_methodology",
@@ -49,6 +57,18 @@ describe("listPrompts", () => {
         "verify_draft",
       ].sort(),
     );
+  });
+
+  it("adds design_figure, first, only for a credential Figures was released to", () => {
+    expect(listPrompts(FIGURES_RELEASED).prompts.map((p) => p.name)).toEqual([
+      "design_figure",
+      "literature_review",
+      "find_related_work",
+      "compare_papers",
+      "verify_draft",
+      "trace_citations",
+      "research_methodology",
+    ]);
   });
 });
 
@@ -109,6 +129,32 @@ describe("getPromptResult validation", () => {
       expect(error).toMatchObject({ code: -32602 });
       expect(messageOf(error)).toMatch(/unknown prompt/i);
     }
+  });
+
+  it("answers an unreleased prompt exactly like an unknown one", () => {
+    const failureOf = (name: string): ProtocolError => {
+      try {
+        getPromptResult(name, { figure: "a three-stage pipeline" });
+      } catch (error) {
+        if (error instanceof ProtocolError) return error;
+      }
+
+      throw new Error(`expected ${name} to be refused as unknown`);
+    };
+
+    const unreleased = failureOf("design_figure");
+    const unknown = failureOf("does_not_exist");
+    expect(unreleased.code).toBe(unknown.code);
+    expect(unreleased.message).toBe("Unknown prompt: design_figure");
+    expect(unknown.message).toBe("Unknown prompt: does_not_exist");
+
+    expect(
+      getPromptResult(
+        "design_figure",
+        { figure: "a three-stage pipeline" },
+        FIGURES_RELEASED,
+      ).messages[0]!.content.text,
+    ).toContain("search_figure_references");
   });
 
   it("throws when a required argument is missing or blank", () => {
@@ -172,6 +218,47 @@ describe("registerPrompts", () => {
     ).rejects.toMatchObject({
       code: -32602,
       message: "Missing required argument: question",
+    });
+  });
+
+  it("serves the prompt set of the releases it was registered with", async () => {
+    const listed = async (view?: ReleaseView) => {
+      const server = createRecordingServer();
+      registerPrompts(server, undefined, view && fixedReleases(view));
+
+      const res = await server.handler("prompts/list")(
+        { method: "prompts/list" },
+        createServerContext({ method: "prompts/list" }),
+      );
+
+      return res.prompts.map((prompt) => prompt.name);
+    };
+
+    expect(await listed()).not.toContain("design_figure");
+    expect(await listed(answeredView(FIGURES_RELEASED))).toContain(
+      "design_figure",
+    );
+    // No API gate stands behind a prompt, so one the API could not confirm
+    // stays unlisted.
+    expect(await listed(UNANSWERED_VIEW)).not.toContain("design_figure");
+
+    const server = createRecordingServer();
+    registerPrompts(server);
+
+    await expect(
+      server.handler("prompts/get")(
+        {
+          method: "prompts/get",
+          params: {
+            name: "design_figure",
+            arguments: { figure: "a three-stage pipeline" },
+          },
+        },
+        createServerContext({ method: "prompts/get" }),
+      ),
+    ).rejects.toMatchObject({
+      code: -32602,
+      message: "Unknown prompt: design_figure",
     });
   });
 });

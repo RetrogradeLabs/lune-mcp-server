@@ -91,6 +91,8 @@ function decodeTool(
   return decoded;
 }
 
+// The API below is a dead port, so the release probe fails and the credential
+// gets the public catalog, exactly as it would when the API is unreachable.
 const EXPECTED_TOOLS = [
   "get_conference_papers",
   "get_paper_citations",
@@ -104,9 +106,18 @@ const EXPECTED_TOOLS = [
   "gather_evidence",
   "search_related_papers",
   "search_research_guidance",
-  "search_figure_references",
-  "get_paper_figures",
 ].sort();
+
+// Every setting only the hosted server must inject. The API target stays set, to
+// the dead port above, so no case ever leaves the machine.
+const HOSTED_ONLY_SETTINGS = [
+  "LUNE_AUTH_SERVER_URL",
+  "LUNE_SITE_ORIGIN",
+  "MCP_PUBLIC_URL",
+  "MCP_DOCS_URL",
+  "MCP_ALLOWED_ORIGINS",
+  "OPENAI_APPS_CHALLENGE_TOKEN",
+];
 
 /**
  * Drive the published binary over real stdio: write every message, then wait for
@@ -116,9 +127,15 @@ const EXPECTED_TOOLS = [
 async function driveStdio(
   messages: readonly JsonValue[],
   awaitIds: number[],
+  extraEnv: NodeJS.ProcessEnv = {},
 ): Promise<Map<number, JsonRpcResponse>> {
   const proc = spawn("node", [CLI_PATH], {
-    env: { ...process.env, LUNE_API_KEY: "lune_fake_token_for_init_only" },
+    env: {
+      ...process.env,
+      LUNE_API_KEY: "lune_fake_token_for_init_only",
+      LUNE_API_BASE_URL: "http://127.0.0.1:9",
+      ...extraEnv,
+    },
     cwd: PKG_ROOT,
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -233,5 +250,35 @@ describe("stdio E2E", () => {
     expect(tools.find((t) => t.name === "search_papers")?._meta).toMatchObject({
       "anthropic/alwaysLoad": true,
     });
+  }, 30_000);
+
+  it("serves stdio under NODE_ENV=production with no hosted configuration", async () => {
+    // A shell that exports NODE_ENV=production for its own apps once made
+    // `npx` die at startup on the hosted server's configuration check.
+    const unset = Object.fromEntries(
+      HOSTED_ONLY_SETTINGS.map((name) => [name, undefined]),
+    );
+
+    const seen = await driveStdio(
+      [
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-06-18",
+            capabilities: {},
+            clientInfo: { name: "test", version: "0.0.0" },
+          },
+        },
+        { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
+        { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+      ],
+      [2],
+      { ...unset, NODE_ENV: "production" },
+    );
+
+    const tools = seen.get(2)?.result?.tools ?? [];
+    expect(tools.map((t) => t.name).sort()).toEqual(EXPECTED_TOOLS);
   }, 30_000);
 });

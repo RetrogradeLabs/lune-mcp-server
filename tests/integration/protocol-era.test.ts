@@ -233,27 +233,34 @@ describe("2026-07-28 cache hints", () => {
 
   it("marks tools/list private, because it varies by credential", async () => {
     const { ttlMs, cacheScope } = await cacheHintOf("tools/list", 20);
-    // tools/list branches on isWorkspaceCredential, so no MCP-aware cache may
-    // hold it across principals. Nothing generic acts on the hint today.
+    // It branches on the workspace probe and the credential's releases, so no
+    // MCP-aware cache may hold it across principals (none acts on it today).
     expect(cacheScope).toBe("private");
     // The non-zero TTL is the other half: it stops a client re-paying the
-    // workspace probe every session, and is bounded because both axes can flip.
+    // workspace probe every session, and is bounded because every axis can flip.
     expect(ttlMs).toBeGreaterThan(0);
     expect(ttlMs).toBeLessThanOrEqual(60_000);
   });
 
   it.each([
     ["prompts/list", 21],
-    ["resources/list", 22],
     ["server/discover", 23],
   ])(
-    "marks %s public, because it is identical for every caller",
+    "marks %s private, because a per-credential release shapes it",
     async (method, id) => {
+      // A released credential gets the figure prompt and the instructions that
+      // name the figure tools; an unreleased one gets neither.
       const { ttlMs, cacheScope } = await cacheHintOf(method, id);
-      expect(cacheScope).toBe("public");
+      expect(cacheScope).toBe("private");
       expect(ttlMs).toBeGreaterThan(0);
     },
   );
+
+  it("marks resources/list public, because it is identical for every caller", async () => {
+    const { ttlMs, cacheScope } = await cacheHintOf("resources/list", 22);
+    expect(cacheScope).toBe("public");
+    expect(ttlMs).toBeGreaterThan(0);
+  });
 
   it("advertises no resource for as long as resources/list is cached public", async () => {
     // `public` is sound ONLY while the handler is the empty `{resources: []}`

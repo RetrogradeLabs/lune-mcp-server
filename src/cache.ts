@@ -6,9 +6,9 @@
  *   • {@link InProcessTTLCache}: LRU + TTL inside the Node process.
  *     Used by default; correct for stdio MCP (one process per agent client).
  *   • {@link RedisCache}: auto-selected when ``REDIS_URL`` is set.
- *     Backed by AWS ElastiCache Serverless in production. Lets the
- *     ``mcp.luneresearch.com`` HTTP fleet share a single cache so two MCP
- *     tasks fetching the same paper hit the same cached body.
+ *     Backed by a managed Redis-compatible cache in the hosted deployment,
+ *     so the ``mcp.luneresearch.com`` fleet shares one cache and two
+ *     instances fetching the same paper hit the same cached body.
  *
  * Why an interface despite Redis: a Redis blip degrades to misses, not
  * errors. ``RedisCache`` swallows network failures and returns
@@ -111,7 +111,7 @@ export class InProcessTTLCache implements Cache {
 const NAMESPACE_PREFIX = process.env.LUNE_CACHE_NAMESPACE ?? "v2";
 
 /**
- * ElastiCache Serverless-backed cache. Connects lazily on first use, retries
+ * Redis-backed cache. Connects lazily on first use, retries
  * with exponential backoff up to a generous cap, and degrades to silent
  * misses on protocol-level errors. We keep node-redis's reconnection logic
  * (`socket.reconnectStrategy`) on so a transient AZ failover or rolling

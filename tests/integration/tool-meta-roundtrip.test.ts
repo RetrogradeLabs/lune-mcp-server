@@ -24,6 +24,12 @@ import {
   createMcpHandler,
   specTypeSchemas,
 } from "@modelcontextprotocol/server";
+import {
+  ALL_RELEASES,
+  answeredView,
+  PUBLIC_VIEW,
+  type ReleaseView,
+} from "../../src/releases.js";
 import { makeServer } from "../../src/server.js";
 import { createFakeKy } from "../support/fake-ky.js";
 import { jsonRpcObject } from "../support/http.js";
@@ -35,9 +41,15 @@ const ENTRY_TOOLS = [
 ];
 
 /** Serve one `tools/list` and parse it the way a conformant client would. */
-async function listTools(era: "modern" | "legacy") {
+async function listTools(
+  era: "modern" | "legacy",
+  releases: ReleaseView = PUBLIC_VIEW,
+) {
   const upstream = createFakeKy();
-  const handler = createMcpHandler(() => makeServer(() => upstream.ky));
+
+  const handler = createMcpHandler(() =>
+    makeServer(() => upstream.ky, { releases }),
+  );
 
   try {
     const headers = new Headers({
@@ -101,8 +113,8 @@ describe.each(["modern", "legacy"] as const)(
   (era) => {
     it("the SDK's result validator keeps _meta['anthropic/alwaysLoad'] on exactly the entry tools", async () => {
       const tools = await listTools(era);
-      // The full catalog parses (no tool rejected over the added _meta).
-      expect(tools.length).toBe(14);
+      // The public catalog parses (no tool rejected over the added _meta).
+      expect(tools.length).toBe(12);
 
       const flagged = tools
         .filter((t) => t._meta?.["anthropic/alwaysLoad"] === true)
@@ -115,6 +127,11 @@ describe.each(["modern", "legacy"] as const)(
       for (const t of tools) {
         if (!ENTRY_TOOLS.includes(t.name)) expect(t._meta).toBeUndefined();
       }
+    });
+
+    it("the SDK's result validator accepts every tool a released credential lists", async () => {
+      const tools = await listTools(era, answeredView(ALL_RELEASES));
+      expect(tools.length).toBe(14);
     });
   },
 );

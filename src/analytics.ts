@@ -5,7 +5,7 @@
  * npm-published local binary. This emitter is ky-only (already a dep) and is
  * DOUBLE-GATED to the remote deployment: `initAnalytics()` is called only from
  * the `--http` entrypoint, and it no-ops unless `LUNE_POSTHOG_KEY` is set
- * (only the ECS task definition sets it). Local stdio installs therefore run
+ * (only the hosted deployment sets it). Local stdio installs therefore run
  * zero telemetry; their usage is observed server-side at the Lune API.
  *
  * Identity comes from the API's authoritative `/account/mcp-context` probe.
@@ -31,6 +31,8 @@ import {
 } from "@modelcontextprotocol/server";
 import ky from "ky";
 import { AsyncLocalStorage } from "node:async_hooks";
+
+import type { ReleaseView } from "./releases.js";
 
 let posthogKey: string | null = null;
 
@@ -159,6 +161,8 @@ export interface McpAnalyticsContext {
    */
   captureOptOut?: boolean;
   workspaceCredential?: boolean;
+  /** Read once, when the request's server instance is built. */
+  releases?: ReleaseView;
   sessionId?: string;
   protocolVersion?: string;
   clientUserAgent?: string;
@@ -340,8 +344,8 @@ export function clientHeaderFor(server: AnalyticsServer): string {
 
 /**
  * Per-task backstop, NOT the real ceiling. The binding cap is the API's
- * `claim_mcp_analytics_budget`, which is DynamoDB-backed and shared across
- * tasks and restarts; it reaches us as `captureEnabled: false` on the probe.
+ * `claim_mcp_analytics_budget`, which is shared across instances and
+ * restarts; it reaches us as `captureEnabled: false` on the probe.
  * These counters are per process, so they multiply with the task count
  * (the service's deployment configuration runs 2 to 6). That is safe only because the shared cap
  * still binds globally: the most a fleet can overshoot is what it emits
@@ -585,7 +589,7 @@ export function captureMcp(
   }
 }
 
-/** Wait for already-enqueued HTTP events, bounded below the ECS stop grace. */
+/** Wait for already-enqueued HTTP events, bounded below the shutdown grace period. */
 export async function flushAnalytics(timeoutMs = 2000): Promise<void> {
   const deliveries = [...pendingDeliveries];
 

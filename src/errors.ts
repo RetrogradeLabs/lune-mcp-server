@@ -739,7 +739,14 @@ const RETRYABLE_NET_CODES = new Set([
  * surfaced to the agent as an opaque "protocol error" it could not act on.
  */
 function isRetryableTransportError(cause: unknown): boolean {
-  if (hasErrorName(cause) && cause.name === "TimeoutError") return true;
+  // ky 2 wraps a refused connection, a DNS failure or an offline host in its own
+  // `NetworkError`, which carries neither a code nor the undici message itself.
+  if (
+    hasErrorName(cause) &&
+    (cause.name === "TimeoutError" || cause.name === "NetworkError")
+  ) {
+    return true;
+  }
 
   const code = hasErrorCode(cause)
     ? cause.code

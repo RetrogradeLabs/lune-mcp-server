@@ -1,3 +1,4 @@
+import ky from "ky";
 import { describe, it, expect } from "vitest";
 import {
   httpErrorToToolResult,
@@ -595,6 +596,24 @@ describe("httpErrorToToolResult", () => {
 
     const r = await httpErrorToToolResult(fetchFailed);
     expect(r.isError).toBe(true);
+  });
+
+  it("maps ky's own NetworkError for a refused connection to a retryable isError result", async () => {
+    // What a real ky 2 client throws against a dead API: the undici failure is
+    // two causes deep, under an error that carries no code of its own.
+    let refused: Error | undefined;
+
+    try {
+      await ky.get("http://127.0.0.1:9/", { retry: 0 }).json();
+    } catch (error) {
+      if (error instanceof Error) refused = error;
+    }
+
+    expect(refused).toMatchObject({ name: "NetworkError" });
+
+    const r = await httpErrorToToolResult(refused, "search_papers");
+    expect(r.isError).toBe(true);
+    expect(r.content[0]!.text).toMatch(/retry/i);
   });
 });
 

@@ -1,4 +1,4 @@
-# Builds this repository on its own, without the monorepo it is mirrored from.
+# Builds this repository on its own.
 FROM node:24-alpine AS build
 WORKDIR /app
 COPY package.json ./

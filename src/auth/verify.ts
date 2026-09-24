@@ -23,7 +23,6 @@ import {
 import type { JWTPayload, JWTVerifyGetKey } from "jose";
 
 import { isJsonNumber, isJsonString, type JsonObject } from "../json.js";
-import runtimeDefaults from "../runtime-defaults.json";
 import { runtimeSetting } from "../runtime-config.js";
 
 // Allow 30 seconds of clock skew without forcing reauth on a one-hour token.
@@ -41,16 +40,11 @@ const TOKEN_ERROR_CODES = new Set<string>([
 ]);
 
 function authServerOrigin(): string {
-  return runtimeSetting(
-    "LUNE_AUTH_SERVER_URL",
-    runtimeDefaults.api_public_url,
-  ).replace(/\/+$/, "");
+  return runtimeSetting("LUNE_AUTH_SERVER_URL").replace(/\/+$/, "");
 }
 
 function resourceServerOrigin(): string {
-  return new URL(
-    runtimeSetting("MCP_PUBLIC_URL", runtimeDefaults.mcp_public_url),
-  ).origin;
+  return new URL(runtimeSetting("MCP_PUBLIC_URL")).origin;
 }
 
 const MCP_RESOURCE_PATHS = new Set(["/", "/mcp", "/v1/mcp"]);
@@ -132,8 +126,8 @@ function remoteJwks(): ReturnType<typeof createRemoteJWKSet> {
   if (!jwksRef || jwksRef.origin !== origin) {
     jwksRef = {
       origin,
-      // 3s timeoutDuration so a hanging JWKS fails open; 5s cooldownDuration
-      // bounds the post-rotation kid miss. Why 5s: the MCP server design notes.
+      // A hanging JWKS fails open after 3s. A 5s cooldown, not jose's 30s, limits
+      // how long a new key is refused; forged kids still cannot force a fetch.
       resolve: createRemoteJWKSet(new URL(`${origin}/.well-known/jwks.json`), {
         timeoutDuration: 3000,
         cooldownDuration: 5_000,

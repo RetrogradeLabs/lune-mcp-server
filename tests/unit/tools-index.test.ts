@@ -25,7 +25,14 @@ import {
   getAllToolDefinitions,
   listToolsResponse,
   registerAllTools,
+  requiredScopeForTool,
 } from "../../src/tools/index.js";
+import {
+  answeredView,
+  fixedReleases,
+  PUBLIC_RELEASES,
+  UNANSWERED_VIEW,
+} from "../../src/releases.js";
 import { registerResources } from "../../src/resources.js";
 import { TOOL_RESPONSE_CACHE } from "../../src/cache.js";
 import { GatherEvidenceOutput } from "../../src/tools/_outputs.js";
@@ -43,6 +50,23 @@ function fakeKy(response: JsonValue = {}): KyInstance {
 function erroringKy(status: number, body: JsonValue): KyInstance {
   return createFakeKy(() => httpErrorReply(status, body)).ky;
 }
+
+const FIGURES_RELEASED = { figures: true };
+
+const PUBLIC_TOOL_ORDER = [
+  "search_papers",
+  "search_papers_many",
+  "get_paper_fulltext",
+  "get_paper_citations",
+  "list_conferences",
+  "get_conference_papers",
+  "search_related_papers",
+  "extract_from_papers",
+  "verify_claims",
+  "gather_evidence",
+  "search_research_guidance",
+  "get_research_guidance_doc",
+];
 
 describe("getAllToolDefinitions", () => {
   it("returns the union of paper, figure and guidance tools", () => {
@@ -213,10 +237,18 @@ describe("alwaysLoad entry tools (tool-selection: get picked over web_search)", 
 });
 
 describe("deterministic tools/list ordering", () => {
-  it("returns tools in a deterministic order across calls", () => {
+  it("returns the public tools in a deterministic order across calls", () => {
     // 2026-07-28 SHOULD: a stable order lets clients cache the catalogue and is
     // the precondition for the `tools/list` hint, so pin the order itself.
-    expect(listToolsResponse(true).tools.map((t) => t.name)).toEqual([
+    expect(listToolsResponse(true).tools.map((t) => t.name)).toEqual(
+      PUBLIC_TOOL_ORDER,
+    );
+  });
+
+  it("slots the figure tools in before guidance once Figures is released", () => {
+    expect(
+      listToolsResponse(true, FIGURES_RELEASED).tools.map((t) => t.name),
+    ).toEqual([
       "search_papers",
       "search_papers_many",
       "get_paper_fulltext",
@@ -232,6 +264,61 @@ describe("deterministic tools/list ordering", () => {
       "search_research_guidance",
       "get_research_guidance_doc",
     ]);
+  });
+});
+
+describe("per-credential releases", () => {
+  it("hides an unreleased tool from the scope gate, as it would an unknown one", () => {
+    expect(
+      requiredScopeForTool("search_figure_references", PUBLIC_RELEASES),
+    ).toBeUndefined();
+    expect(requiredScopeForTool("definitely_not_a_tool", PUBLIC_RELEASES)).toBe(
+      undefined,
+    );
+    expect(
+      requiredScopeForTool("search_figure_references", FIGURES_RELEASED),
+    ).toBe("papers:read");
+    expect(requiredScopeForTool("search_papers", PUBLIC_RELEASES)).toBe(
+      "papers:read",
+    );
+  });
+
+  it.each(["search_figure_references", "get_paper_figures"])(
+    "refuses unreleased %s exactly like an unknown tool, before any upstream call",
+    async (name) => {
+      const upstream = createFakeKy(() => jsonReply({}));
+
+      await expect(
+        dispatchToolCall(upstream.ky, name, { query: "x", paper_id: "p" }),
+      ).rejects.toMatchObject({
+        code: -32602,
+        message: `Unknown tool: ${name}`,
+      });
+      expect(upstream.calls).toEqual([]);
+    },
+  );
+
+  it("dispatches a figure tool once Figures is released", async () => {
+    const upstream = createFakeKy(() =>
+      jsonReply({ query: "pipeline", total: 0, results: [] }),
+    );
+
+    const result = await dispatchToolCall(
+      upstream.ky,
+      "search_figure_references",
+      { query: "pipeline" },
+      true,
+      FIGURES_RELEASED,
+    );
+
+    expect(upstream.calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      "post figures/search",
+    ]);
+    expect(result.structuredContent).toEqual({
+      query: "pipeline",
+      total: 0,
+      results: [],
+    });
   });
 });
 
@@ -399,7 +486,7 @@ describe("registerAllTools", () => {
     expect(added.sort()).toEqual(["tools/call", "tools/list"]);
   });
 
-  it("the tools/list handler returns the full tool catalog", async () => {
+  it("the tools/list handler returns the public catalog by default", async () => {
     const server = createRecordingServer();
     registerAllTools(server, () => fakeKy());
 
@@ -408,24 +495,94 @@ describe("registerAllTools", () => {
       createServerContext({ method: "tools/list" }),
     );
 
-    expect(res.tools.map((t) => t.name).sort()).toEqual(
-      [
-        "get_conference_papers",
-        "get_paper_citations",
-        "get_paper_fulltext",
-        "get_research_guidance_doc",
-        "list_conferences",
-        "search_papers",
-        "search_papers_many",
-        "extract_from_papers",
-        "verify_claims",
-        "gather_evidence",
-        "search_related_papers",
-        "search_research_guidance",
-        "search_figure_references",
-        "get_paper_figures",
-      ].sort(),
+    expect(res.tools.map((t) => t.name)).toEqual(PUBLIC_TOOL_ORDER);
+  });
+
+  it("the tools/list handler adds the figure tools for a released credential", async () => {
+    const server = createRecordingServer();
+    registerAllTools(
+      server,
+      () => fakeKy(),
+      undefined,
+      fixedReleases(answeredView(FIGURES_RELEASED)),
     );
+
+    const res = await server.handler("tools/list")(
+      { method: "tools/list" },
+      createServerContext({ method: "tools/list" }),
+    );
+
+    expect(res.tools).toHaveLength(14);
+    expect(res.tools.map((t) => t.name)).toEqual(
+      expect.arrayContaining(["search_figure_references", "get_paper_figures"]),
+    );
+  });
+
+  it("the tools/call handler refuses an unreleased figure tool as unknown", async () => {
+    const server = createRecordingServer();
+
+    const upstream = createFakeKy(() =>
+      jsonReply({ query: "x", total: 0, results: [] }),
+    );
+
+    registerAllTools(server, () => upstream.ky);
+
+    await expect(
+      server.handler("tools/call")(
+        {
+          method: "tools/call",
+          params: {
+            name: "search_figure_references",
+            arguments: { query: "x" },
+          },
+        },
+        createServerContext(),
+      ),
+    ).rejects.toMatchObject({
+      code: -32602,
+      message: "Unknown tool: search_figure_references",
+    });
+    expect(upstream.calls).toEqual([]);
+  });
+
+  it("the handlers list the public surface but let a figure call reach the API while the API cannot be asked", async () => {
+    const server = createRecordingServer();
+
+    const upstream = createFakeKy(() =>
+      jsonReply({ query: "x", total: 0, results: [] }),
+    );
+
+    registerAllTools(
+      server,
+      () => upstream.ky,
+      () => ({ workspaceCredential: false }),
+      fixedReleases(UNANSWERED_VIEW),
+    );
+
+    const listed = await server.handler("tools/list")(
+      { method: "tools/list" },
+      createServerContext({ method: "tools/list" }),
+    );
+
+    expect(listed.tools.map((t) => t.name)).toEqual(PUBLIC_TOOL_ORDER);
+
+    const called = callResult(
+      await server.handler("tools/call")(
+        {
+          method: "tools/call",
+          params: {
+            name: "search_figure_references",
+            arguments: { query: "a three-stage pipeline" },
+          },
+        },
+        createServerContext(),
+      ),
+    );
+
+    expect(called.isError).not.toBe(true);
+    expect(upstream.calls.map((c) => `${c.method} ${c.url}`)).toEqual([
+      "post figures/search",
+    ]);
   });
 
   it("the tools/call handler builds a client per request and dispatches", async () => {

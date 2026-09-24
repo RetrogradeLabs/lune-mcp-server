@@ -1,14 +1,9 @@
 import ky, { type KyInstance } from "ky";
-import runtimeDefaults from "../runtime-defaults.json";
 import { runtimeSetting } from "../runtime-config.js";
 import { MCP_VERSION } from "../version.js";
 
-/** Override for tests; production requires an explicit API target. */
 export function getBaseUrl(): string {
-  return runtimeSetting(
-    "LUNE_API_BASE_URL",
-    runtimeDefaults.api_public_url,
-  ).replace(/\/$/, "");
+  return runtimeSetting("LUNE_API_BASE_URL").replace(/\/$/, "");
 }
 
 /** Default per-call timeout, for the light read tools (search / fetch / list). */

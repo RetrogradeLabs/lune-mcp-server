@@ -2,7 +2,7 @@ import { parseArgs } from "node:util";
 
 import { initAnalytics, setTransportMode } from "./analytics.js";
 import { messageOf } from "./cause.js";
-import { runtimeSiteUrl } from "./runtime-config.js";
+import { assertHostedConfiguration, runtimeSiteUrl } from "./runtime-config.js";
 import { runStdio } from "./transport/stdio.js";
 import { startHttpServer } from "./transport/streamableHttp.js";
 
@@ -20,6 +20,7 @@ function carriesValue(value: CliOptionValue): value is string {
 
 export interface CliPorts {
   runStdio(): Promise<void>;
+  assertHostedConfiguration(): void;
   startHttpServer(port: number): void;
   initAnalytics(): void;
   setTransportMode(mode: "http"): void;
@@ -31,6 +32,7 @@ export interface CliPorts {
 
 export const nodeCliPorts: CliPorts = {
   runStdio,
+  assertHostedConfiguration,
   startHttpServer,
   initAnalytics,
   setTransportMode,
@@ -97,6 +99,7 @@ async function executeCli(
   }
 
   if (parsed.http) {
+    ports.assertHostedConfiguration();
     ports.setTransportMode("http");
     ports.initAnalytics();
     ports.startHttpServer(parsed.port);

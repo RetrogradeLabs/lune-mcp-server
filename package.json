@@ -2,7 +2,7 @@
   "name": "@retrograde-labs/lune-mcp-server",
   "version": "2.2.0",
   "mcpName": "com.luneresearch/lune",
-  "description": "Lune Research MCP server (stdio + Streamable HTTP) proxying api.luneresearch.com",
+  "description": "Lune Research MCP server, stdio and Streamable HTTP",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -11,7 +11,8 @@
   "main": "dist/cli.js",
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "homepage": "https://luneresearch.com",
   "repository": {
@@ -58,6 +59,6 @@
     "vitest": "5.0.1"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   }
 }

@@ -28,7 +28,7 @@
       "environmentVariables": [
         {
           "name": "LUNE_API_KEY",
-          "description": "Lune personal access token. Generate one at https://luneresearch.com/dashboard/settings/credentials.",
+          "description": "Lune access key (lune_...). Create one at https://luneresearch.com/dashboard/settings/credentials.",
           "isRequired": true,
           "isSecret": true,
           "format": "string"
@@ -43,14 +43,14 @@
       "headers": [
         {
           "name": "Authorization",
-          "description": "Bearer token. Create a Lune PAT at https://luneresearch.com/dashboard/settings/credentials, or let an OAuth-capable MCP client sign in through server discovery.",
-          "isRequired": true,
+          "description": "Optional. An OAuth-capable MCP client leaves this unset and signs in through the browser via https://api.luneresearch.com, the authorization server for MCP connectors. Other clients send a Lune access key from https://luneresearch.com/dashboard/settings/credentials.",
+          "isRequired": false,
           "isSecret": true,
           "value": "Bearer {api_key}",
           "variables": {
             "api_key": {
-              "description": "Lune personal access token (lune_...).",
-              "isRequired": true,
+              "description": "Lune access key (lune_...). Leave it empty when your client signs in with OAuth.",
+              "isRequired": false,
               "isSecret": true,
               "format": "string"
             }

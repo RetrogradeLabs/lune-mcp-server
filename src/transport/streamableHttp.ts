@@ -23,6 +23,13 @@ import {
 } from "../auth/verify.js";
 import { makeClient } from "../api/client.js";
 import {
+  factsOf,
+  fetchMcpContext,
+  refusesCredential,
+  RememberedAnswers,
+  viewOf,
+} from "../api/mcp-context.js";
+import {
   analyticsEnabled,
   currentAnalyticsContext,
   flushAnalytics,
@@ -31,7 +38,13 @@ import {
   type McpAnalyticsContext,
 } from "../analytics.js";
 import serverManifest from "../../server.json";
-import runtimeDefaults from "../runtime-defaults.json";
+import {
+  answeredView,
+  PUBLIC_RELEASES,
+  PUBLIC_VIEW,
+  type Releases,
+  type ReleaseView,
+} from "../releases.js";
 import { runtimeSetting, runtimeSiteUrl } from "../runtime-config.js";
 import { requiredScopeForTool } from "../tools/index.js";
 
@@ -43,6 +56,7 @@ export interface AnalyticsCredentialProbe {
   suppressAnalytics?: boolean;
   captureAllowed?: boolean;
   workspaceCredential?: boolean;
+  releases?: Releases;
 }
 
 type AnalyticsCredentialProbeFn = (
@@ -53,42 +67,11 @@ interface HttpAppOptions {
   credentialProbe?: AnalyticsCredentialProbeFn;
 }
 
-/** A ky failure that carries an upstream response, i.e. the API answered. */
-interface UpstreamHttpFailure {
-  response: { status: number };
-}
-
-/**
- * True when the throwable is an upstream HTTP failure rather than a transport
- * fault. Structural instead of `instanceof HTTPError` so a hand-built double
- * (and any ky major that re-exports the class) still resolves to a status.
- */
-function isUpstreamHttpFailure(cause: unknown): cause is UpstreamHttpFailure {
-  return (
-    typeof cause === "object" &&
-    cause !== null &&
-    "response" in cause &&
-    typeof cause.response === "object" &&
-    cause.response !== null &&
-    "status" in cause.response &&
-    typeof cause.response.status === "number"
-  );
-}
-
 async function probeCredential(
   token: string,
 ): Promise<AnalyticsCredentialProbe> {
   try {
-    const context = await makeClient(token)
-      .get("account/mcp-context", { timeout: 2500, retry: 0 })
-      .json<{
-        workspace?: boolean;
-        analytics_user_id?: string | null;
-        analytics_personless?: boolean;
-        analytics_suppressed?: boolean;
-        analytics_capture_allowed?: boolean;
-      }>();
-
+    const context = await fetchMcpContext(makeClient(token));
     const probe: AnalyticsCredentialProbe = { status: "valid" };
 
     if (context.analytics_user_id) {
@@ -98,21 +81,39 @@ async function probeCredential(
       };
     }
 
+    const facts = factsOf(context);
     probe.suppressAnalytics = context.analytics_suppressed === true;
     probe.captureAllowed = context.analytics_capture_allowed === true;
-    probe.workspaceCredential = context.workspace === true;
+    probe.workspaceCredential = facts.workspace;
+    probe.releases = facts.releases;
 
     return probe;
   } catch (cause) {
-    // Only a 401 is authoritative. Anything else leaves the probe indeterminate,
-    // so an identity outage degrades analytics instead of blocking traffic.
-    return {
-      status:
-        isUpstreamHttpFailure(cause) && cause.response.status === 401
-          ? "invalid"
-          : "indeterminate",
-    };
+    // Anything but a refusal leaves the probe indeterminate, so an identity
+    // outage degrades analytics instead of blocking traffic.
+    return { status: refusesCredential(cause) ? "invalid" : "indeterminate" };
   }
+}
+
+/**
+ * The per-request probe, or `undefined` where none runs (a test app built with
+ * no injected probe). Asked on every request, never cached: a revoked credential
+ * has to stop passing on its next call. Only an `invalid` answer refuses the
+ * request; an outage degrades analytics to off and the tool surface to the last
+ * answer the API gave (`credentialView`) instead of becoming a product outage.
+ */
+async function probeRequestCredential(
+  options: HttpAppOptions,
+  token: string,
+): Promise<AnalyticsCredentialProbe | undefined> {
+  const shouldProbe =
+    options.credentialProbe !== undefined ||
+    analyticsEnabled() ||
+    process.env.NODE_ENV !== "test";
+
+  if (!shouldProbe) return undefined;
+
+  return (options.credentialProbe ?? probeCredential)(token);
 }
 
 /**
@@ -140,6 +141,7 @@ function mcpHandler(): McpHttpHandler {
         // Express entered the ALS scope before dispatch, so this getter keeps
         // `tools/list`'s workspace and capture gates on the same object.
         analyticsContext: () => currentAnalyticsContext() ?? {},
+        releases: currentAnalyticsContext()?.releases ?? PUBLIC_VIEW,
       });
     },
     { onerror: (err) => console.error(`[mcp/http] ${err.message}`) },
@@ -236,14 +238,12 @@ function analyticsContextFor(
 
 // RFC 9728 requires resource and metadata on one origin, with host root as ID.
 // Strip any MCP_PUBLIC_URL path so stale `/mcp` values cannot advertise a bad ID.
-const RESOURCE_ORIGIN = new URL(
-  runtimeSetting("MCP_PUBLIC_URL", runtimeDefaults.mcp_public_url),
-).origin;
+const RESOURCE_ORIGIN = new URL(runtimeSetting("MCP_PUBLIC_URL")).origin;
 
-const AUTH_SERVER_URL = runtimeSetting(
-  "LUNE_AUTH_SERVER_URL",
-  runtimeDefaults.api_public_url,
-).replace(/\/+$/, "");
+const AUTH_SERVER_URL = runtimeSetting("LUNE_AUTH_SERVER_URL").replace(
+  /\/+$/,
+  "",
+);
 
 const SUPPORTED_SCOPES = ["papers:read", "guidance:read", "account:read"];
 
@@ -252,7 +252,7 @@ const PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource";
 // Bare origin is canonical; keep `/mcp` and `/v1/mcp` for existing installs.
 const MCP_PATHS = ["/", "/mcp", "/v1/mcp"];
 
-const DOCS_URL = runtimeSetting("MCP_DOCS_URL", runtimeDefaults.docs_url);
+const DOCS_URL = runtimeSetting("MCP_DOCS_URL");
 
 const FAVICON_URL = runtimeSiteUrl("/favicon.svg");
 
@@ -262,7 +262,6 @@ const SERVER_MANIFEST_PATHS = ["/.well-known/mcp/server.json", "/server.json"];
 
 const OPENAI_APPS_CHALLENGE_TOKEN = runtimeSetting(
   "OPENAI_APPS_CHALLENGE_TOKEN",
-  "local-development-token",
 );
 
 /**
@@ -337,7 +336,7 @@ type ScopedRequestMessage = {
  */
 type JsonRpcId = JsonValue | undefined;
 
-function requiredToolScopes(req: Request): string[] {
+function requiredToolScopes(req: Request, releases: Releases): string[] {
   const body: ScopedRequestMessage | ScopedRequestMessage[] | undefined =
     req.body;
 
@@ -352,7 +351,7 @@ function requiredToolScopes(req: Request): string[] {
           return [];
         }
 
-        const scope = requiredScopeForTool(toolName);
+        const scope = requiredScopeForTool(toolName, releases);
 
         return scope ? [scope] : [];
       }),
@@ -434,10 +433,7 @@ function readSessionId(req: Request): string | undefined {
 }
 
 function allowedOrigins(): Set<string> {
-  const raw = runtimeSetting(
-    "MCP_ALLOWED_ORIGINS",
-    '["http://localhost:3000","http://localhost:1420"]',
-  );
+  const raw = runtimeSetting("MCP_ALLOWED_ORIGINS");
 
   const parsed: unknown = JSON.parse(raw);
 
@@ -521,8 +517,48 @@ type HealthBody = {
 };
 
 /** Build the express app without binding it to a port. Useful for tests. */
+/** Credentials whose last answer a task keeps; far above one task's active set. */
+const REMEMBERED_CREDENTIALS = 10_000;
+
+interface CredentialView {
+  view: ReleaseView;
+  /** Undefined where no probe ran, so `tools/list` asks for itself. */
+  workspace: boolean | undefined;
+}
+
+/**
+ * What this request may rely on about its credential: the probe's answer, which
+ * is remembered, or while the API cannot be asked the last answer it gave for
+ * this credential. With neither, only the public surface is listed and a call
+ * to a released tool goes on to the API, whose gate decides it: a released
+ * user's already-listed tool must not turn unknown because one probe failed.
+ */
+function credentialView(
+  token: string,
+  probe: AnalyticsCredentialProbe | undefined,
+  remembered: RememberedAnswers,
+): CredentialView {
+  if (probe === undefined) return { view: PUBLIC_VIEW, workspace: undefined };
+
+  if (probe.status === "valid") {
+    const facts = {
+      releases: probe.releases ?? PUBLIC_RELEASES,
+      workspace: probe.workspaceCredential === true,
+    };
+
+    remembered.remember(token, facts);
+
+    return { view: answeredView(facts.releases), workspace: facts.workspace };
+  }
+
+  const recalled = remembered.recall(token);
+
+  return { view: viewOf(recalled), workspace: recalled?.workspace === true };
+}
+
 export function buildHttpApp(options: HttpAppOptions = {}): Express {
   const app = express();
+  const remembered = new RememberedAnswers(REMEMBERED_CREDENTIALS);
   // CORS must run before JSON parsing so OPTIONS preflights short-circuit
   // before they touch routes that require a body.
   app.use((req, res, next) => {
@@ -755,7 +791,27 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
       return;
     }
 
-    const requiredScopes = requiredToolScopes(req);
+    const analyticsProbe = await probeRequestCredential(options, token);
+
+    if (analyticsProbe?.status === "invalid") {
+      sendUnauthorized(
+        req,
+        res,
+        req.body?.id,
+        "Access token is invalid; re-authenticate to continue.",
+        {
+          error: "invalid_token",
+          description: "The access token is invalid.",
+        },
+      );
+
+      return;
+    }
+
+    // Resolved before the scope gate so an unlisted tool fails it exactly as an
+    // unknown one does, instead of demanding a scope for a tool not listed.
+    const credential = credentialView(token, analyticsProbe, remembered);
+    const requiredScopes = requiredToolScopes(req, credential.view.listed);
 
     const missingScopes = inspection.verifiedIdentity
       ? requiredScopes.filter(
@@ -767,38 +823,6 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
       sendInsufficientScope(req, res, req.body?.id, missingScopes);
 
       return;
-    }
-
-    let analyticsProbe: AnalyticsCredentialProbe | undefined;
-
-    const shouldProbeCredential =
-      options.credentialProbe !== undefined ||
-      analyticsEnabled() ||
-      process.env.NODE_ENV !== "test";
-
-    if (shouldProbeCredential) {
-      // Probed on every request, never cached: a revoked credential has to stop
-      // passing on its next call, and a cache is the state we just removed.
-      analyticsProbe = await (options.credentialProbe ?? probeCredential)(
-        token,
-      );
-
-      if (analyticsProbe.status === "invalid") {
-        sendUnauthorized(
-          req,
-          res,
-          req.body?.id,
-          "Access token is invalid; re-authenticate to continue.",
-          {
-            error: "invalid_token",
-            description: "The access token is invalid.",
-          },
-        );
-
-        return;
-      }
-      // A probe outage must not become a product outage: tools still authorize the
-      // bearer, and the context fails closed only for analytics and hints.
     }
 
     // The probe's identity must win before the context is built: `$session_id`
@@ -817,9 +841,13 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
       requestAnalyticsContext.captureEnabled =
         analyticsProbe.suppressAnalytics !== true &&
         analyticsProbe.captureAllowed === true;
-      requestAnalyticsContext.workspaceCredential =
-        analyticsProbe.workspaceCredential === true;
     }
+
+    if (credential.workspace !== undefined) {
+      requestAnalyticsContext.workspaceCredential = credential.workspace;
+    }
+
+    requestAnalyticsContext.releases = credential.view;
 
     // Entering the ALS scope here is what carries the context through the node
     // adapter: the handler factory never sees the Express request.
@@ -857,8 +885,8 @@ export function startHttpServer(port: number): HttpServer {
     console.log(`Lune MCP HTTP listening on :${boundPort}`);
   });
 
-  // ECS sends SIGTERM then SIGKILL at stopTimeout, and Node's default exit would
-  // cut every in-flight tool call, so drain within that window instead.
+  // The orchestrator sends SIGTERM, then SIGKILL after its stop timeout; Node's
+  // default exit would cut every in-flight tool call, so drain in that window.
   let draining = false;
 
   const drain = (signal: string): void => {

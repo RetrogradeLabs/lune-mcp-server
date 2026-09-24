@@ -2,6 +2,7 @@ import type { JsonObject, JsonValue } from "../json.js";
 import type { JSONValue } from "@modelcontextprotocol/server";
 import type { z } from "zod";
 
+import type { ReleaseName } from "../releases.js";
 import type { ToolCallResult } from "../tool-result.js";
 
 export type { ToolCallResult } from "../tool-result.js";
@@ -39,6 +40,8 @@ export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
   name: string;
   /** OAuth scope enforced by the relay before dispatch; absent for public tools. */
   requiredScope?: "papers:read" | "guidance:read";
+  /** Listed and callable only for a credential this release reaches. */
+  release?: ReleaseName;
   /** Human-readable display name shown in ChatGPT's tool drawer. */
   title: string;
   description: string;

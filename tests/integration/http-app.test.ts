@@ -6,14 +6,22 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Server as HttpServer } from "node:http";
 import { initAnalytics, resetAnalyticsForTests } from "../../src/analytics.js";
+import type { JsonObject } from "../../src/json.js";
 import {
   buildHttpApp,
   startHttpServer,
   hostIsAllowed,
   originIsAllowed,
+  type AnalyticsCredentialProbe,
 } from "../../src/transport/streamableHttp.js";
-import { rawRequest } from "../support/http.js";
-import { fetchJsonObject, parseJsonObject } from "../support/json.js";
+import { jsonRpcObject, rawRequest } from "../support/http.js";
+import {
+  fetchJsonObject,
+  jsonObject,
+  jsonObjects,
+  jsonString,
+  parseJsonObject,
+} from "../support/json.js";
 import { portOf } from "../support/net.js";
 
 describe("buildHttpApp standalone", () => {
@@ -456,5 +464,294 @@ describe("host/origin allowlist", () => {
     expect(originIsAllowed("https://claude.ai")).toBe(true);
     expect(originIsAllowed("https://evil.example.com")).toBe(false);
     expect(originIsAllowed(["https://claude.ai", "x"])).toBe(false);
+  });
+});
+
+describe("per-credential releases on the hosted transport", () => {
+  const RELEASED: AnalyticsCredentialProbe = {
+    status: "valid",
+    workspaceCredential: false,
+    releases: { figures: true },
+  };
+
+  const UNRELEASED: AnalyticsCredentialProbe = {
+    status: "valid",
+    workspaceCredential: false,
+  };
+
+  const INDETERMINATE: AnalyticsCredentialProbe = { status: "indeterminate" };
+
+  /** A 2026-07-28 request names its era in `_meta` and its method in a header. */
+  const MODERN = {
+    params: {
+      _meta: {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {
+          name: "release-test",
+          version: "1.0.0",
+        },
+        "io.modelcontextprotocol/clientCapabilities": {},
+      },
+    },
+    headers: {
+      "mcp-method": "server/discover",
+      "mcp-protocol-version": "2026-07-28",
+    },
+  };
+
+  /** Every name only a released credential may learn. */
+  const RELEASED_ONLY =
+    /search_figure_references|get_paper_figures|design_figure/;
+
+  interface HostedApp {
+    ask(
+      method: string,
+      params?: JsonObject,
+      options?: { headers?: Record<string, string>; token?: string },
+    ): Promise<JsonObject>;
+    close(): Promise<void>;
+  }
+
+  /**
+   * One app whose probe gives `probes` in order, the last one repeating, so a
+   * test can follow one credential across requests on the same task.
+   */
+  async function hostedApp(
+    ...probes: AnalyticsCredentialProbe[]
+  ): Promise<HostedApp> {
+    // A released tool call must reach the upstream fetch and fail there, fast,
+    // rather than leave the machine.
+    vi.stubEnv("LUNE_API_BASE_URL", "http://127.0.0.1:9");
+    let answered = 0;
+
+    const app = buildHttpApp({
+      credentialProbe: async () => {
+        const probe = probes[Math.min(answered, probes.length - 1)]!;
+        answered += 1;
+
+        return probe;
+      },
+    });
+
+    const server = app.listen(0);
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+
+    return {
+      async ask(method, params = {}, options = {}) {
+        const response = await rawRequest(
+          portOf(server),
+          "POST",
+          "/mcp",
+          {
+            accept: "application/json, text/event-stream",
+            authorization: `Bearer ${options.token ?? "lune_release_probe_token"}`,
+            ...options.headers,
+          },
+          { jsonrpc: "2.0", id: 1, method, params },
+        );
+
+        expect(response.status).toBe(200);
+
+        return jsonRpcObject(response.body);
+      },
+      async close() {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        vi.unstubAllEnvs();
+      },
+    };
+  }
+
+  /** One JSON-RPC exchange against an app whose probe answers `probe`. */
+  async function exchange(
+    probe: AnalyticsCredentialProbe,
+    method: string,
+    params: JsonObject = {},
+    headers: Record<string, string> = {},
+  ): Promise<JsonObject> {
+    const hosted = await hostedApp(probe);
+
+    try {
+      return await hosted.ask(method, params, { headers });
+    } finally {
+      await hosted.close();
+    }
+  }
+
+  /** The tool names one answer lists. */
+  function toolNames(answer: JsonObject): string[] {
+    const result = jsonObject(answer.result, "tools/list result");
+
+    return jsonObjects(result.tools, "tools").map((tool) =>
+      jsonString(tool.name, "tools[].name"),
+    );
+  }
+
+  async function names(
+    probe: AnalyticsCredentialProbe,
+    method: "tools/list" | "prompts/list",
+  ): Promise<string[]> {
+    const result = jsonObject((await exchange(probe, method)).result, method);
+    const key = method === "tools/list" ? "tools" : "prompts";
+
+    return jsonObjects(result[key], key).map((item) =>
+      jsonString(item.name, `${key}[].name`),
+    );
+  }
+
+  /** What each era opens with: a 2025 `initialize` and a 2026 `server/discover`. */
+  async function openings(probe: AnalyticsCredentialProbe) {
+    const initialize = jsonObject(
+      (
+        await exchange(probe, "initialize", {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "release-test", version: "1.0.0" },
+        })
+      ).result,
+      "initialize result",
+    );
+
+    const discover = jsonObject(
+      (await exchange(probe, "server/discover", MODERN.params, MODERN.headers))
+        .result,
+      "server/discover result",
+    );
+
+    return [initialize, discover];
+  }
+
+  async function instructions(probe: AnalyticsCredentialProbe) {
+    return (await openings(probe)).map((opening) =>
+      jsonString(opening.instructions, "instructions"),
+    );
+  }
+
+  it("gives a released credential the figure tools, prompt and workflow", async () => {
+    const tools = await names(RELEASED, "tools/list");
+    expect(tools).toHaveLength(14);
+    expect(tools).toEqual(
+      expect.arrayContaining(["search_figure_references", "get_paper_figures"]),
+    );
+
+    const prompts = await names(RELEASED, "prompts/list");
+    expect(prompts).toHaveLength(7);
+    expect(prompts).toContain("design_figure");
+
+    for (const text of await instructions(RELEASED)) {
+      expect(text).toContain("search_figure_references");
+    }
+  });
+
+  it.each<[string, AnalyticsCredentialProbe]>([
+    ["an unreleased credential", UNRELEASED],
+    ["a credential whose probe failed", INDETERMINATE],
+  ])(
+    "gives %s the public surface with no figure wording",
+    async (_label, probe) => {
+      const tools = await names(probe, "tools/list");
+      expect(tools).toHaveLength(12);
+      expect(tools.join(" ")).not.toMatch(/figure/);
+
+      const prompts = await names(probe, "prompts/list");
+      expect(prompts).toHaveLength(6);
+      expect(prompts).not.toContain("design_figure");
+
+      const texts = await instructions(probe);
+      expect(texts).toHaveLength(2);
+
+      for (const text of texts) expect(text).not.toMatch(/figure/i);
+    },
+  );
+
+  it.each<[string, AnalyticsCredentialProbe]>([
+    ["an unreleased credential", UNRELEASED],
+    ["a credential whose probe failed", INDETERMINATE],
+  ])("names nothing released anywhere %s can read", async (_label, probe) => {
+    const everything = JSON.stringify([
+      await exchange(probe, "tools/list"),
+      await exchange(probe, "prompts/list"),
+      ...(await openings(probe)),
+    ]);
+
+    expect(everything).toContain("search_papers");
+    expect(everything).not.toMatch(RELEASED_ONLY);
+  });
+
+  it("answers a figure call from an unreleased credential exactly as an unknown tool", async () => {
+    const call = (name: string) =>
+      exchange(UNRELEASED, "tools/call", {
+        name,
+        arguments: { query: "a three-stage pipeline" },
+      });
+
+    const unreleased = await call("search_figure_references");
+    const unknown = await call("definitely_not_a_tool");
+
+    expect(unreleased.result).toBeUndefined();
+    expect(unreleased.error).toMatchObject({
+      code: -32602,
+      message: "Unknown tool: search_figure_references",
+    });
+    // Byte for byte the unknown-tool answer, bar the name the caller sent.
+    expect(
+      JSON.stringify(unreleased.error).replace("search_figure_references", "_"),
+    ).toBe(JSON.stringify(unknown.error).replace("definitely_not_a_tool", "_"));
+
+    const prompt = await exchange(UNRELEASED, "prompts/get", {
+      name: "design_figure",
+      arguments: { figure: "a three-stage pipeline" },
+    });
+
+    expect(prompt.error).toMatchObject({
+      code: -32602,
+      message: "Unknown prompt: design_figure",
+    });
+  });
+
+  it("lets a figure call reach the API while the probe cannot answer and nothing is remembered", async () => {
+    const response = await exchange(INDETERMINATE, "tools/call", {
+      name: "search_figure_references",
+      arguments: { query: "a three-stage pipeline" },
+    });
+
+    // Not the unknown-tool refusal: the API's own gate decides, and the dead
+    // upstream here makes that an ordinary tool error.
+    expect(response.error).toBeUndefined();
+    expect(jsonObject(response.result, "tools/call result").isError).toBe(true);
+  });
+
+  it("stands on a credential's last answer for a few minutes while the API cannot be asked", async () => {
+    const hosted = await hostedApp(RELEASED, INDETERMINATE);
+    vi.useFakeTimers({ toFake: ["Date"] });
+
+    try {
+      expect(toolNames(await hosted.ask("tools/list"))).toHaveLength(14);
+      expect(toolNames(await hosted.ask("tools/list"))).toHaveLength(14);
+
+      // Another credential on the same task inherits nothing.
+      expect(
+        toolNames(
+          await hosted.ask("tools/list", {}, { token: "lune_someone_else" }),
+        ),
+      ).toHaveLength(12);
+
+      vi.setSystemTime(Date.now() + 5 * 60_000);
+      expect(toolNames(await hosted.ask("tools/list"))).toHaveLength(12);
+    } finally {
+      vi.useRealTimers();
+      await hosted.close();
+    }
+  });
+
+  it("dispatches the same call for a released credential", async () => {
+    const response = await exchange(RELEASED, "tools/call", {
+      name: "search_figure_references",
+      arguments: { query: "a three-stage pipeline" },
+    });
+
+    // The dead upstream makes it a tool error, which is the point: the call got
+    // past the release gate to the API.
+    expect(response.error).toBeUndefined();
+    expect(jsonObject(response.result, "tools/call result").isError).toBe(true);
   });
 });

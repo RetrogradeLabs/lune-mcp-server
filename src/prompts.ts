@@ -10,6 +10,15 @@ import {
   type McpAnalyticsContext,
   type McpServerLike,
 } from "./analytics.js";
+import {
+  fixedReleases,
+  isReleased,
+  PUBLIC_RELEASES,
+  PUBLIC_VIEW,
+  type ReleaseName,
+  type ReleaseSource,
+  type Releases,
+} from "./releases.js";
 
 /**
  * MCP Prompts: reusable, user-invokable research workflows (surfaced as slash
@@ -34,6 +43,8 @@ interface PromptDef {
   title: string;
   description: string;
   arguments: PromptArg[];
+  /** Listed and renderable only for a credential this release reaches. */
+  release?: ReleaseName;
   build: (args: Record<string, string>) => string;
 }
 
@@ -49,6 +60,7 @@ const CITE_RULE =
 export const PROMPTS: PromptDef[] = [
   {
     name: "design_figure",
+    release: "figures",
     title: "Design a paper figure",
     description:
       "Design a figure for a paper (teaser, system overview, method pipeline, " +
@@ -372,28 +384,38 @@ type PromptGetResult = {
   messages: { role: "user"; content: { type: "text"; text: string } }[];
 };
 
+function releasedPrompts(releases: Releases): PromptDef[] {
+  return PROMPTS.filter((prompt) => isReleased(prompt.release, releases));
+}
+
 /** Project the prompt set for `prompts/list` (drops the `build` closure). */
-export function listPrompts(): PromptListResult {
+export function listPrompts(
+  releases: Releases = PUBLIC_RELEASES,
+): PromptListResult {
   return {
-    prompts: PROMPTS.map(({ name, title, description, arguments: args }) => ({
-      name,
-      title,
-      description,
-      arguments: args,
-    })),
+    prompts: releasedPrompts(releases).map(
+      ({ name, title, description, arguments: args }) => ({
+        name,
+        title,
+        description,
+        arguments: args,
+      }),
+    ),
   };
 }
 
 /**
  * Resolve `prompts/get`: validate required arguments, then render the workflow
  * message. Throws (a JSON-RPC error to the client) on an unknown prompt name or
- * a missing required argument, matching how unknown tools are surfaced.
+ * a missing required argument, matching how unknown tools are surfaced. A
+ * prompt the credential was not released is unknown.
  */
 export function getPromptResult(
   name: string,
   args: Record<string, string>,
+  releases: Releases = PUBLIC_RELEASES,
 ): PromptGetResult {
-  const def = PROMPTS.find((p) => p.name === name);
+  const def = releasedPrompts(releases).find((p) => p.name === name);
 
   if (!def) {
     throw new ProtocolError(
@@ -426,6 +448,7 @@ export function getPromptResult(
 export function registerPrompts(
   server: McpServerLike,
   analyticsContext?: () => McpAnalyticsContext,
+  releases: ReleaseSource = fixedReleases(PUBLIC_VIEW),
 ): void {
   // These two make no upstream API call, so the request envelope is their ONLY
   // source of client identity now that the initialize handshake is gone.
@@ -436,7 +459,7 @@ export function registerPrompts(
       captureMcp("$mcp_prompts_list", server, analyticsContext?.(), {});
     }
 
-    return listPrompts();
+    return listPrompts((await releases()).listed);
   });
   server.setRequestHandler(
     "prompts/get",
@@ -457,7 +480,12 @@ export function registerPrompts(
         });
       }
 
-      return getPromptResult(req.params.name, req.params.arguments ?? {});
+      // A prompt is served from the listed half: no API gate stands behind it.
+      return getPromptResult(
+        req.params.name,
+        req.params.arguments ?? {},
+        (await releases()).listed,
+      );
     },
   );
 }

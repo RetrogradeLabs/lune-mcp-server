@@ -14,10 +14,12 @@ const pkg: PackageManifest = JSON.parse(
 export default defineConfig({
   entry: ["src/cli.ts"],
   format: ["esm"],
-  target: "node20",
+  // Matches `engines.node`.
+  target: "node22",
   clean: true,
   shims: true,
-  sourcemap: true,
+  // `files` publishes dist/, and a map would ship every source file inlined.
+  sourcemap: false,
   // Source-level shebang in src/cli.ts is preserved.
   banner: { js: "#!/usr/bin/env node" },
   // Make the bin executable.

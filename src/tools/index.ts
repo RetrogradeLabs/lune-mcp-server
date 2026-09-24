@@ -18,12 +18,21 @@ import {
   type McpAnalyticsContext,
   type McpServerLike,
 } from "../analytics.js";
+import { fetchMcpContext } from "../api/mcp-context.js";
 import {
   isJsonObject,
   isJsonString,
   type JsonObject,
   type JsonValue,
 } from "../json.js";
+import {
+  fixedReleases,
+  isReleased,
+  PUBLIC_RELEASES,
+  PUBLIC_VIEW,
+  type ReleaseSource,
+  type Releases,
+} from "../releases.js";
 import { PAPER_TOOLS, callPaperTool } from "./papers.js";
 import { GUIDANCE_TOOLS, callGuidanceTool } from "./guidance.js";
 import { FIGURE_TOOLS, callFigureTool } from "./figures.js";
@@ -156,8 +165,16 @@ export function getAllToolDefinitions(): readonly ToolDef[] {
   return ALL_TOOLS;
 }
 
-export function requiredScopeForTool(name: string): ToolDef["requiredScope"] {
-  return TOOLS_BY_NAME.get(name)?.requiredScope;
+/** A tool this credential was not released has no scope to demand: it is unknown. */
+export function requiredScopeForTool(
+  name: string,
+  releases: Releases,
+): ToolDef["requiredScope"] {
+  const tool = TOOLS_BY_NAME.get(name);
+
+  return tool && isReleased(tool.release, releases)
+    ? tool.requiredScope
+    : undefined;
 }
 
 /**
@@ -171,39 +188,52 @@ export function requiredScopeForTool(name: string): ToolDef["requiredScope"] {
  * cosmetic / discovery gate, the API independently enforces workspace access
  * server-side (`require_active_workspace`), so a hand-crafted source="workspace"
  * from a non-workspace credential still 400/403s.
+ *
+ * `releases` drops every tool whose release the credential lacks. Unlike the
+ * workspace selector this is an access decision: `dispatchToolCall` refuses the
+ * same tools, and the API refuses their routes.
  */
-export function listToolsResponse(includeWorkspace = true) {
+export function listToolsResponse(
+  includeWorkspace = true,
+  releases: Releases = PUBLIC_RELEASES,
+) {
   return {
-    tools: ALL_TOOLS.map((t) => {
-      const schema = projectedInputSchema(t, includeWorkspace);
-      // The MCP spec mandates JSON Schema 2020-12 here: draft-7 makes strict
-      // clients (Claude Desktop) drop the whole list as "no tools available".
-      const inputSchema = jsonSchema(schema);
-
-      const outputSchema = t.outputSchema
-        ? outputJsonSchema(t.outputSchema)
-        : undefined;
-
-      // Assigned in declaration order, not spread: the serialized entry stays
-      // byte-identical and optional keys stay absent, not undefined-valued.
-      const entry: ToolListEntry = {
-        name: t.name,
-        // MCP 2025-06-18 spec + OpenAI Apps SDK: human-readable display name
-        // and behavioral hints required for App-directory submission.
-        title: t.title,
-        description: t.description,
-        inputSchema,
-      };
-
-      if (outputSchema) entry.outputSchema = outputSchema;
-      entry.annotations = t.annotations;
-
-      // `_meta` passthrough (e.g. `anthropic/alwaysLoad` on entry tools).
-      if (t.meta) entry._meta = t.meta;
-
-      return entry;
-    }),
+    tools: ALL_TOOLS.flatMap((t) =>
+      isReleased(t.release, releases)
+        ? [toolListEntry(t, includeWorkspace)]
+        : [],
+    ),
   };
+}
+
+function toolListEntry(t: ToolDef, includeWorkspace: boolean): ToolListEntry {
+  const schema = projectedInputSchema(t, includeWorkspace);
+  // The MCP spec mandates JSON Schema 2020-12 here: draft-7 makes strict
+  // clients (Claude Desktop) drop the whole list as "no tools available".
+  const inputSchema = jsonSchema(schema);
+
+  const outputSchema = t.outputSchema
+    ? outputJsonSchema(t.outputSchema)
+    : undefined;
+
+  // Assigned in declaration order, not spread: the serialized entry stays
+  // byte-identical and optional keys stay absent, not undefined-valued.
+  const entry: ToolListEntry = {
+    name: t.name,
+    // MCP 2025-06-18 spec + OpenAI Apps SDK: human-readable display name
+    // and behavioral hints required for App-directory submission.
+    title: t.title,
+    description: t.description,
+    inputSchema,
+  };
+
+  if (outputSchema) entry.outputSchema = outputSchema;
+  entry.annotations = t.annotations;
+
+  // `_meta` passthrough (e.g. `anthropic/alwaysLoad` on entry tools).
+  if (t.meta) entry._meta = t.meta;
+
+  return entry;
 }
 
 /** One `tools/list` entry. Optional keys are absent, never undefined, because the
@@ -223,10 +253,11 @@ async function dispatchToolCall(
   name: string,
   args: JsonValue,
   includeWorkspace = true,
+  releases: Releases = PUBLIC_RELEASES,
 ): Promise<ToolCallResult> {
   const definition = TOOLS_BY_NAME.get(name);
 
-  if (!definition) {
+  if (!definition || !isReleased(definition.release, releases)) {
     throw new ProtocolError(
       ProtocolErrorCode.InvalidParams,
       `Unknown tool: ${name}`,
@@ -382,25 +413,17 @@ function errorFacts(result: ToolCallResult): ErrorFacts {
 
 /**
  * Whether the caller's credential is workspace-scoped (the managed Lune
- * Workspace session PAT, which carries an active workspace). Reads the cheap,
- * DB-free `/account/mcp-context` endpoint with the request's bearer. Any failure
+ * Workspace session PAT, which carries an active workspace). Any failure
  * (anonymous discovery, a non-workspace credential's 401/403, or an API hiccup)
  * resolves to false, so the workspace surface is hidden by default and never
- * leaked. Called once per `tools/list` (session start), so a SHORT timeout + no
- * retry bounds it: the default client's 30s timeout (and its 2x 5xx retry, ~90s)
- * on this cosmetic gate would otherwise stall tool discovery for every client if
- * the account endpoint hangs. Failing closed here just hides the workspace
- * option; the API enforces workspace access regardless.
+ * leaked. Failing closed here just hides the workspace option; the API enforces
+ * workspace access regardless.
  */
 async function isWorkspaceCredential(
   makeClient: () => KyInstance,
 ): Promise<boolean> {
   try {
-    const r = await makeClient()
-      .get("account/mcp-context", { timeout: 2500, retry: 0 })
-      .json<{ workspace?: boolean }>();
-
-    return r?.workspace === true;
+    return (await fetchMcpContext(makeClient())).workspace === true;
   } catch {
     return false;
   }
@@ -417,6 +440,7 @@ export function registerAllTools(
   server: McpServerLike,
   makeClient: () => KyInstance,
   analyticsContext?: () => McpAnalyticsContext,
+  releases: ReleaseSource = fixedReleases(PUBLIC_VIEW),
 ): void {
   // X-Lune-Client is how API-side analytics tells claude-code from cursor from
   // the CLI; unconditional, because an absent header reads as `api_direct`.
@@ -445,11 +469,14 @@ export function registerAllTools(
     // workspace-scoped credential; external clients never see that option.
     async (_req, ctx) => {
       attributeFromEnvelope(server, ctx);
+      // Asked first: on stdio it may refresh the answer the context reads below.
+      const { listed } = await releases();
       const contextWorkspace = analyticsContext?.()?.workspaceCredential;
 
       const response = listToolsResponse(
         contextWorkspace ??
           (await isWorkspaceCredential(() => taggedClient(ctx))),
+        listed,
       );
 
       // Gated on the principal's opt-out, never on `captureEnabled`: that also
@@ -546,6 +573,7 @@ export function registerAllTools(
       const started = Date.now();
 
       try {
+        const { callable } = await releases();
         const sourceWasSupplied = Object.hasOwn(args, "source");
 
         const includeWorkspace = sourceWasSupplied
@@ -558,6 +586,7 @@ export function registerAllTools(
           name,
           args,
           includeWorkspace,
+          callable,
         );
 
         if (analyticsEnabled()) {

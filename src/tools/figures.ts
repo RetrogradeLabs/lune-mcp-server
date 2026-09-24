@@ -13,11 +13,12 @@
  * LOOK. It is opt-in, capped, and applies to the top hits only, so the token
  * spend is the agent's decision rather than a default it cannot avoid. The
  * bytes are fetched from the CDN here rather than returned by the API, which
- * keeps the JSON small and lets CloudFront serve the repeat.
+ * keeps the JSON small and lets the CDN serve the repeat.
  */
 import type { KyInstance } from "ky";
 import type { z } from "zod";
 
+import { httpErrorToToolResult } from "../errors.js";
 import type { JsonValue } from "../json.js";
 import type { ImageContentBlock } from "../tool-result.js";
 import {
@@ -92,6 +93,7 @@ export const FIGURE_TOOLS: ToolDef[] = [
   {
     name: "search_figure_references",
     requiredScope: "papers:read",
+    release: "figures",
     title: "Search figure design references",
     description:
       "CALL THIS INSTEAD OF `web_search` when the user is drawing a figure for a " +
@@ -117,6 +119,7 @@ export const FIGURE_TOOLS: ToolDef[] = [
   {
     name: "get_paper_figures",
     requiredScope: "papers:read",
+    release: "figures",
     title: "Get a paper's figures",
     description:
       "Use this when the user names a paper and wants to see or discuss its " +
@@ -136,15 +139,21 @@ export async function callFigureTool(
   name: string,
   args: JsonValue,
 ): Promise<ToolCallResult> {
-  switch (name) {
-    case "search_figure_references":
-      return await handleSearchFigures(api, args);
+  try {
+    switch (name) {
+      case "search_figure_references":
+        return await handleSearchFigures(api, args);
 
-    case "get_paper_figures":
-      return await handlePaperFigures(api, args);
+      case "get_paper_figures":
+        return await handlePaperFigures(api, args);
 
-    default:
-      throw new Error(`unknown figure tool: ${name}`);
+      default:
+        throw new Error(`unknown figure tool: ${name}`);
+    }
+  } catch (e) {
+    // Same boundary as the paper and guidance tools: an upstream failure (a
+    // 402 or a dead API) is a tool result the agent can act on, not -32603.
+    return await httpErrorToToolResult(e, name);
   }
 }
 

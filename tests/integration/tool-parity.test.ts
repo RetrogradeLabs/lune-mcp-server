@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { listToolsResponse } from "../../src/tools/index.js";
 import { jsonObject } from "../support/json.js";
 
-const EXPECTED_TOOL_NAMES = [
+const PUBLIC_TOOL_NAMES = [
   "get_conference_papers",
   "get_paper_citations",
   "get_paper_fulltext",
@@ -15,19 +15,33 @@ const EXPECTED_TOOL_NAMES = [
   "gather_evidence",
   "search_related_papers",
   "search_research_guidance",
-  "search_figure_references",
-  "get_paper_figures",
 ];
 
+const FIGURES_RELEASED = { figures: true };
+
 describe("tool catalog parity", () => {
-  it("exposes the 14 documented tools with stable names", () => {
+  it("exposes the 12 public tools with stable names", () => {
     const r = listToolsResponse();
     const names = r.tools.map((t) => t.name).sort();
-    expect(names).toEqual([...EXPECTED_TOOL_NAMES].sort());
+    expect(names).toEqual([...PUBLIC_TOOL_NAMES].sort());
+  });
+
+  it("adds the two figure tools, 14 in all, only where Figures is released", () => {
+    const names = listToolsResponse(true, FIGURES_RELEASED)
+      .tools.map((t) => t.name)
+      .sort();
+
+    expect(names).toEqual(
+      [
+        ...PUBLIC_TOOL_NAMES,
+        "search_figure_references",
+        "get_paper_figures",
+      ].sort(),
+    );
   });
 
   it("every tool has a JSON schema with type=object", () => {
-    const r = listToolsResponse();
+    const r = listToolsResponse(true, FIGURES_RELEASED);
 
     for (const t of r.tools) {
       const schema = jsonObject(t.inputSchema, `${t.name} input schema`);
@@ -80,11 +94,11 @@ describe("tool catalog parity", () => {
       .tools.map((t) => t.name)
       .sort();
 
-    expect(names).toEqual([...EXPECTED_TOOL_NAMES].sort());
+    expect(names).toEqual([...PUBLIC_TOOL_NAMES].sort());
   });
 
   it("every result-bearing tool advertises an outputSchema (MCP 2025-06-18)", () => {
-    const r = listToolsResponse();
+    const r = listToolsResponse(true, FIGURES_RELEASED);
     // get_paper_fulltext is the only tool whose response shape varies by input
     // (markdown vs JSON sections); every other tool MUST declare outputSchema.
     const exempt = new Set(["get_paper_fulltext"]);

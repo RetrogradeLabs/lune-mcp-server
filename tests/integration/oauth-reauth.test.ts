@@ -128,10 +128,11 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
   function mint(
     expSecondsFromNow: number,
     audience = "https://mcp.luneresearch.com/mcp",
+    scopes = ["papers:read"],
   ) {
     const now = Math.floor(Date.now() / 1000);
 
-    return new SignJWT({ org_id: "org-1", scopes: ["papers:read"] })
+    return new SignJWT({ org_id: "org-1", scopes })
       .setProtectedHeader({ alg: "RS256", kid: KID })
       .setIssuer(issuer)
       .setAudience(audience)
@@ -233,6 +234,60 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
     expect(challenge).toContain('error="insufficient_scope"');
     expect(challenge).toContain('scope="guidance:read"');
     expect(challenge).not.toContain("papers:read");
+  });
+
+  it("answers an unreleased tool as unknown instead of asking for its scope", async () => {
+    // A step-up challenge naming papers:read would tell the caller the tool
+    // exists; a credential the release did not reach must see an unknown tool.
+    const guidanceOnly = await mint(3600, undefined, ["guidance:read"]);
+
+    const figureCall = {
+      jsonrpc: "2.0",
+      id: 7,
+      method: "tools/call",
+      params: {
+        name: "search_figure_references",
+        arguments: { query: "a three-stage pipeline" },
+      },
+    };
+
+    const unreleased = await post(
+      port,
+      { authorization: `Bearer ${guidanceOnly}` },
+      figureCall,
+    );
+
+    expect(unreleased.status).toBe(200);
+    expect(unreleased.headers.get("www-authenticate")).toBeNull();
+    expect(await unreleased.text()).toContain(
+      "Unknown tool: search_figure_references",
+    );
+
+    const releasedApp = buildHttpApp({
+      credentialProbe: async () => ({
+        status: "valid",
+        releases: { figures: true },
+      }),
+    }).listen(0);
+
+    await new Promise<void>((resolve) =>
+      releasedApp.once("listening", resolve),
+    );
+
+    try {
+      const released = await post(
+        portOf(releasedApp),
+        { authorization: `Bearer ${guidanceOnly}` },
+        figureCall,
+      );
+
+      expect(released.status).toBe(403);
+      expect(requiredHeader(released, "www-authenticate")).toContain(
+        'scope="papers:read"',
+      );
+    } finally {
+      await new Promise<void>((resolve) => releasedApp.close(() => resolve()));
+    }
   });
 
   it("applies scope step-up to tools/call inside a JSON-RPC batch", async () => {
