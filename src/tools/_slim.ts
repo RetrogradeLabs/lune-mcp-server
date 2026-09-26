@@ -480,6 +480,11 @@ export function slimRelated(rows: JsonInput) {
   };
 }
 
+interface RawCitationContext {
+  section?: string | null;
+  text?: string | null;
+}
+
 interface RawCitedPaper {
   id?: string | null;
   title?: string | null;
@@ -488,6 +493,18 @@ interface RawCitedPaper {
   doi?: string | null;
   venue?: string | null;
   citation_count?: number | null;
+  contexts?: (RawCitationContext | null)[] | null;
+}
+
+function slimCitationContexts(
+  contexts: (RawCitationContext | null)[] | null | undefined,
+) {
+  if (!Array.isArray(contexts)) return undefined;
+
+  return contexts.filter(hasText).map((context) => ({
+    section: isJsonString(context.section) ? context.section : "",
+    text: context.text,
+  }));
 }
 
 interface RawCitationsResponse {
@@ -519,6 +536,7 @@ export function slimCitations(r: JsonInput) {
       doi: c.doi ?? undefined,
       venue: c.venue ?? undefined,
       citation_count: c.citation_count ?? undefined,
+      contexts: slimCitationContexts(c.contexts),
     })),
   };
 }

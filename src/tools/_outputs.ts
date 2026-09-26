@@ -63,6 +63,15 @@ const CitationOut = z.object({
   doi: z.string().optional(),
   venue: z.string().optional(),
   citation_count: z.number().int().optional(),
+  contexts: z
+    .array(z.object({ section: z.string(), text: z.string() }))
+    .optional()
+    .describe(
+      "The citing paper's own sentences that cite the other paper, each with " +
+        "its section, so you can see how the work is used without fetching " +
+        "full text. Absent when the edge predates sentence extraction; empty " +
+        "when the paper lists the work without citing it in its text.",
+    ),
 });
 
 const GuidanceHitOut = z.object({

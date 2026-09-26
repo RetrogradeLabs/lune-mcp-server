@@ -187,7 +187,9 @@ export const PAPER_TOOLS: ToolDef[] = [
       "this”, traces influence chains, asks for follow-up work, or wants the lineage of " +
       "an idea. `direction=cited_by` returns indexed papers that cite this one; " +
       "`direction=cites` returns this paper's parsed references (which may or may not be " +
-      "in the corpus). Page with `limit` / `offset`; the response reports `total` and " +
+      "in the corpus). Each edge carries `contexts`, the citing sentences with their " +
+      "section, which show HOW a work is used (baseline, method borrowed, result " +
+      "disputed). Page with `limit` / `offset`; the response reports `total` and " +
       "`has_more` so you can walk a large citation set.",
     inputSchema: CitationsInput,
     outputSchema: GetCitationsOutput,

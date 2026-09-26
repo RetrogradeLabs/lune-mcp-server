@@ -18,6 +18,7 @@ import {
   slimRelated,
   slimSearchResponse,
 } from "../../src/tools/_slim.js";
+import { GetCitationsOutput } from "../../src/tools/_outputs.js";
 
 /**
  * A projected search hit, and the two shapes `detail` picks between. The union
@@ -440,6 +441,39 @@ describe("slimCitations", () => {
     const without = slimCitations({ direction: "cites", papers: [] });
     expect(without.total).toBeUndefined();
     expect(without.has_more).toBeUndefined();
+  });
+
+  it("carries the citing sentences, and keeps an unextracted edge absent rather than empty", () => {
+    const out = slimCitations({
+      direction: "cites",
+      papers: [
+        {
+          id: "a",
+          title: "Cited",
+          contexts: [
+            { section: "Intro", text: "We build on [3]." },
+            { section: null, text: "Unlike [3], ours converges." },
+            { section: "Intro", text: "" },
+            null,
+            { section: 4, text: "As in [3]." },
+            { section: "Intro", text: 7 },
+          ],
+        },
+        { id: null, title: "Listed only", contexts: [] },
+        { id: null, title: "Parsed before sentences", contexts: null },
+      ],
+    });
+
+    expect(out.citations.map((c) => c.contexts)).toEqual([
+      [
+        { section: "Intro", text: "We build on [3]." },
+        { section: "", text: "Unlike [3], ours converges." },
+        { section: "", text: "As in [3]." },
+      ],
+      [],
+      undefined,
+    ]);
+    expect(() => GetCitationsOutput.parse(out)).not.toThrow();
   });
 });
 
