@@ -2,7 +2,7 @@
   "name": "@retrograde-labs/lune-mcp-server",
   "version": "3.0.0",
   "mcpName": "com.luneresearch/lune",
-  "description": "Lune Research MCP server, stdio and Streamable HTTP",
+  "description": "Search peer-reviewed papers and research methodology guidance from your AI agent: the Lune Research MCP server, over stdio or Streamable HTTP.",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -27,7 +27,14 @@
     "model-context-protocol",
     "lune",
     "research",
-    "academic-papers"
+    "academic-papers",
+    "ai-agents",
+    "claude-code",
+    "cursor",
+    "codex",
+    "literature-review",
+    "citations",
+    "scientific-research"
   ],
   "scripts": {
     "build": "tsup",
