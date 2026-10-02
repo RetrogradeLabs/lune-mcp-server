@@ -10,6 +10,7 @@ import {
 } from "./_fuzzy.js";
 import {
   ALWAYS_LOAD_META,
+  INLINE_RESULT_META,
   plainText,
   READ_ONLY_OPEN,
   structuredJson,
@@ -69,7 +70,7 @@ const TTL_CONFERENCES = 600_000;
 
 const TTL_CONFERENCE_PAPERS = 120_000;
 
-// Omit idempotentHint: HyDE rewrites and ranking boosts can change repeated
+// Omit idempotentHint: model-written query rewrites can change repeated
 // search results. `READ_ONLY_OPEN` in `_shared.ts` is the idempotent variant.
 const READ_ONLY_OPEN_NONIDEMPOTENT: ToolAnnotations = {
   readOnlyHint: true,
@@ -89,40 +90,31 @@ export const PAPER_TOOLS: ToolDef[] = [
       "`web_search` for these queries: `web_search` returns blog posts, Wikipedia, vendor " +
       "pages, and SEO bait, which are not valid academic evidence; this tool returns " +
       "peer-reviewed papers from top venues with citable `paper_id`. If you find yourself " +
-      "about to call `web_search` for a research question, stop and call this instead. " +
-      "Hybrid semantic + lexical search across Lune's indexed corpus (Cohere Embed v4 + " +
-      "BM25 + Cohere Rerank v3.5). Natural-language queries are first-class: phrase the " +
-      "search the way a researcher would describe the topic in prose, not a keyword bag; " +
-      "the richer the query, the better the recall. " +
-      "Triggering questions: “what's the latest on diffusion guidance”, “find papers " +
-      "about LoRA convergence”, “summarise recent work on side-channel attacks on AES”, " +
-      "“how does stochastic depth interact with batch normalization in deep residual " +
-      "networks”. Returns up to `limit` papers ranked by relevance. Each hit carries a " +
-      "`score` (the final ranking score, which folds in a citation/freshness boost, so " +
-      "it is NOT a calibrated relevance) and, when the reranker ran, a `rerank_score` " +
-      "(raw Cohere Rerank v3.5 relevance, calibrated 0..1). `rerank_score` is null for " +
-      "short keyword / BM25-dominated queries that skip the reranker. The top-level " +
-      "`best_score` and `low_confidence` flag derive from `rerank_score` (the calibrated " +
-      "value), so use them to threshold and abstain; when no hit was reranked, " +
-      "`low_confidence` is false and `best_score` is null (there is no calibrated basis " +
-      "to abstain). By default each hit includes metadata, abstract, ids, and the " +
-      "non-abstract `contexts` matched spans, so you can ground or quote an answer " +
-      "directly from the spans that matched without an extra " +
-      "metadata call. Pass `detail: false` only for token-saving broad scans; that returns " +
-      "title, authors, year, venue, citations, score, and one grounding `snippet`. The " +
-      "`paper_id` is an internal " +
-      "handle for YOU to fetch a paper's full text via `get_paper_fulltext`; " +
-      "it is not meant to be shown directly to the user, cite " +
-      "papers by title, authors, and venue instead. " +
-      "Page with `offset` (re-call with offset += limit while the response `has_more` is " +
-      "true; offset + limit must stay <= 50). Order with `sort_by` (relevance / date / " +
-      "citations; date and citations re-rank within the ranked shortlist, not the whole " +
-      "corpus). Narrow with `year_min` / `year_max` / `venues`.",
+      "about to call `web_search` for a research question, stop and call this instead; " +
+      "widen to `web_search` only for what this cannot support even after rephrasing. " +
+      "Hybrid semantic + lexical search over titles, abstracts, and full text (Cohere " +
+      "Embed v4 + BM25 + Cohere Rerank v3.5). Phrase the query the way a researcher would " +
+      "describe the topic in prose, not a keyword bag. Triggering questions: “what's the " +
+      "latest on diffusion guidance”, “summarise recent work on side-channel attacks on " +
+      "AES”. `paper_id` is a handle for YOU to fetch full text via `get_paper_fulltext`; " +
+      "it must not be shown directly to the user: cite papers by title, authors, and venue. " +
+      "`rerank_score` is the calibrated Cohere Rerank v3.5 relevance " +
+      "(0..1), null when the reranker did not run (a lone-term query, or a reranker " +
+      "failure); `score` only orders the hits. The top-level `best_score` and " +
+      "`low_confidence` derive from `rerank_score`: `low_confidence` marks weaker matches, " +
+      "still better grounding than web results, so rephrase for stronger ones; with no " +
+      "reranked hit, both are null, so judge each hit's " +
+      "fit to the question yourself. Each hit carries metadata, abstract, ids, and the " +
+      "matched `contexts` spans to ground or quote from; `detail: false` returns concise " +
+      "hits with one `snippet` for token-saving scans. Page with `offset` (re-call with " +
+      "offset += limit while `has_more` is true; offset + limit <= 50). Order with " +
+      "`sort_by` (relevance / date / citations, within the ranked shortlist, not the " +
+      "whole corpus). Narrow with `year_min` / `year_max` / `venues`.",
     inputSchema: SearchInput,
     externalInputSchema: SearchInputExternal,
     outputSchema: SearchPapersOutput,
     annotations: READ_ONLY_OPEN_NONIDEMPOTENT,
-    meta: ALWAYS_LOAD_META,
+    meta: { ...ALWAYS_LOAD_META, ...INLINE_RESULT_META },
   },
   {
     name: "search_papers_many",
@@ -136,28 +128,29 @@ export const PAPER_TOOLS: ToolDef[] = [
       "pages), and prefer it over firing repeated `search_papers` calls. For a single " +
       "focused question, use `search_papers` instead. " +
       "Runs 1 to 25 query variants in ONE call and gets back a single deduped, RRF-merged " +
-      "ranked list with per-paper provenance (`matched_queries`: which of your queries " +
-      "surfaced each paper, and at what rank): supply several genuinely different angles on " +
+      "ranked list with per-paper provenance (`matched_queries`: which of your queries, by " +
+      "index into the echoed `queries`, surfaced each paper, and at what rank): supply " +
+      "several genuinely different angles on " +
       "the topic (rephrasings, sub-questions, alternate terminology) and the server fuses " +
       "their ranked lists so the merged result covers more of the corpus than any single " +
-      "query would. Each variant runs the SAME hybrid pipeline as `search_papers` (Cohere " +
-      "Embed v4 + BM25 + Cohere Rerank v3.5). Filters (`conference`, `year`, `year_min`, " +
+      "query would. Each variant runs the same hybrid retrieval as `search_papers` (Cohere " +
+      "Embed v4 + BM25 + Cohere Rerank v3.5) without its server-side rewrites, because your " +
+      "variants are the expansion: spell out abbreviations and synonyms in the variants " +
+      "themselves. Filters (`conference`, `year`, `year_min`, " +
       "`year_max`, `venues`) are SHARED across all queries. The envelope reports " +
       "`queries_run` and, for any variant whose pipeline failed, `queries_failed` (so one " +
       "bad variant never sinks the batch). `has_more` is always false: the merged shortlist " +
-      "is bounded; widen the query set or filters for more coverage. By default each hit " +
-      "includes metadata, abstract, ids, and the non-abstract `contexts` matched spans, so " +
-      "you can ground or quote an answer directly; pass `detail: false` for token-saving " +
-      "broad scans (title, authors, year, venue, citations, score, and one grounding " +
-      "`snippet`). `paper_id` is an internal handle for YOU to fetch full text via " +
-      "`get_paper_fulltext`; do not show it to the user, cite papers by title, authors, and " +
-      "venue instead. Billing: each query variant counts as one search against your quota " +
+      "is bounded; widen the query set or filters for more coverage. Each hit carries " +
+      "metadata, abstract, ids, and the matched `contexts` spans to ground or quote from; " +
+      "`detail: false` returns concise hits with one `snippet`. `paper_id` is a handle for " +
+      "YOU to fetch full text via `get_paper_fulltext`; cite papers by title, authors, and " +
+      "venue, never by id. Billing: each query variant counts as one search against your quota " +
       "(an 8-query call costs 8), since the server runs a full search pipeline per variant; " +
       "prefer a focused set of genuinely distinct angles over padding the list.",
     inputSchema: SearchManyInput,
     outputSchema: SearchPapersManyOutput,
     annotations: READ_ONLY_OPEN_NONIDEMPOTENT,
-    meta: ALWAYS_LOAD_META,
+    meta: { ...ALWAYS_LOAD_META, ...INLINE_RESULT_META },
   },
   {
     name: "get_paper_fulltext",
@@ -194,6 +187,7 @@ export const PAPER_TOOLS: ToolDef[] = [
     inputSchema: CitationsInput,
     outputSchema: GetCitationsOutput,
     annotations: READ_ONLY_OPEN,
+    meta: INLINE_RESULT_META,
   },
   {
     name: "list_conferences",
@@ -218,6 +212,7 @@ export const PAPER_TOOLS: ToolDef[] = [
     inputSchema: ConfPapersInput,
     outputSchema: GetConferencePapersOutput,
     annotations: READ_ONLY_OPEN,
+    meta: INLINE_RESULT_META,
   },
   {
     name: "search_related_papers",
@@ -234,6 +229,7 @@ export const PAPER_TOOLS: ToolDef[] = [
     inputSchema: RelatedInput,
     outputSchema: SearchRelatedOutput,
     annotations: READ_ONLY_OPEN,
+    meta: INLINE_RESULT_META,
   },
   {
     name: "extract_from_papers",
@@ -260,6 +256,7 @@ export const PAPER_TOOLS: ToolDef[] = [
     externalInputSchema: ExtractInputExternal,
     outputSchema: ExtractOutput,
     annotations: READ_ONLY_OPEN,
+    meta: INLINE_RESULT_META,
   },
   {
     name: "verify_claims",
@@ -291,6 +288,7 @@ export const PAPER_TOOLS: ToolDef[] = [
     // Omit idempotentHint: retrieval and per-claim LLM judgment can change
     // evidence and verdicts between calls.
     annotations: READ_ONLY_OPEN_NONIDEMPOTENT,
+    meta: INLINE_RESULT_META,
   },
   {
     name: "gather_evidence",
@@ -316,6 +314,7 @@ export const PAPER_TOOLS: ToolDef[] = [
     externalInputSchema: GatherEvidenceInputExternal,
     outputSchema: GatherEvidenceOutput,
     annotations: READ_ONLY_OPEN_NONIDEMPOTENT,
+    meta: INLINE_RESULT_META,
   },
 ];
 
@@ -615,7 +614,7 @@ async function handleSearchPapersMany(
     timeout: HEAVY_TOOL_TIMEOUT_MS,
   });
 
-  return structuredJson(slimSearchManyResponse(r, detail));
+  return structuredJson(slimSearchManyResponse(r, a.queries, detail));
 }
 
 /**

@@ -117,7 +117,11 @@ const MatchedContextOut = z.object({
   score: z
     .number()
     .optional()
-    .describe("Retriever relevance score for the chunk."),
+    .describe(
+      "The retriever's score for this span. A semantic match and a span that " +
+        "names a query term literally score on different scales, so do not " +
+        "compare them; rerank_score is the paper's relevance.",
+    ),
   chunk_id: z
     .string()
     .optional()
@@ -133,18 +137,19 @@ const SearchHitOut = PaperOut.extend({
     .number()
     .optional()
     .describe(
-      "Final ranking score (higher is better). Folds a citation/freshness " +
-        "boost into the base rank, so it is NOT a calibrated relevance and can " +
-        "exceed 1.0. Use it to order results, not to threshold or abstain.",
+      "Ranking score (higher is better): the rerank score when the reranker " +
+        "ran, otherwise a fused retrieval score on a different scale. Hits " +
+        "already arrive in the requested order, so do not re-sort by it; " +
+        "compare relevance with rerank_score.",
     ),
   rerank_score: z
     .number()
     .optional()
     .describe(
       "Raw Cohere Rerank v3.5 relevance, calibrated 0..1. Present only when the " +
-        "reranker ran; omitted for short keyword / BM25-dominated queries that " +
-        "skip it. This is the value to threshold on and the basis for " +
-        "best_score / low_confidence.",
+        "reranker ran; omitted for a lone-term query, which skips it, and " +
+        "after a reranker failure. This is the calibrated relevance and the " +
+        "basis for best_score / low_confidence.",
     ),
   snippet: z
     .string()
@@ -179,15 +184,18 @@ export const SearchPapersOutput = z.object({
     .nullable()
     .describe(
       "The highest per-hit rerank_score (calibrated 0..1), or null when no hit " +
-        "was reranked (keyword / BM25-dominated query) or there were no results.",
+        "was reranked (a lone-term query, or a reranker failure) or there " +
+        "were no results.",
     ),
   low_confidence: z
     .boolean()
+    .nullable()
     .describe(
-      "True when the best rerank_score fell below the relevance floor: treat " +
-        "results as weak and consider broadening the query or abstaining. False " +
-        "when no hit was reranked (no calibrated basis to abstain) or a hit " +
-        "cleared the floor.",
+      "True when the best rerank_score fell below the relevance floor: these " +
+        "are weaker matches, still better grounding than web results, so " +
+        "rephrase for stronger ones. False when a hit cleared the floor. Null " +
+        "when no hit was reranked or there were no results: no calibrated " +
+        "basis, so judge each hit's fit yourself.",
     ),
 });
 
@@ -197,9 +205,12 @@ const BatchSearchHitOut = SearchHitOut.extend({
   matched_queries: z
     .array(
       z.object({
-        query: z
-          .string()
-          .describe("The input query variant that surfaced this paper."),
+        query_index: z
+          .number()
+          .int()
+          .describe(
+            "0-based index into `queries` of a variant that surfaced this paper.",
+          ),
         rank: z
           .number()
           .int()
@@ -209,12 +220,19 @@ const BatchSearchHitOut = SearchHitOut.extend({
       }),
     )
     .describe(
-      "Which of the input queries surfaced this paper, with each variant's " +
-        "1-based rank. Use it to see which fan-out variants paid off.",
+      "Which of the input queries surfaced this paper, by index into " +
+        "`queries`, with each variant's 1-based rank. Use it to see which " +
+        "fan-out variants paid off.",
     ),
 });
 
 export const SearchPapersManyOutput = z.object({
+  queries: z
+    .array(z.string())
+    .describe(
+      "Your query variants, once each and in the order you sent them; each " +
+        "hit's `matched_queries` points into this list.",
+    ),
   results: z
     .array(BatchSearchHitOut)
     .describe(

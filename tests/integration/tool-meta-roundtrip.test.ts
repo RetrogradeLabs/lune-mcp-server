@@ -1,5 +1,6 @@
 /**
- * End-to-end: the `anthropic/alwaysLoad` hint on the entry tools must survive a
+ * End-to-end: the `anthropic/alwaysLoad` hint on the entry tools (and the
+ * `anthropic/maxResultSizeChars` hint on the large-result tools) must survive a
  * real serve-then-parse round-trip (server encode -> JSON-RPC over HTTP -> the
  * SDK's own `ListToolsResult` validator), not just our local
  * `listToolsResponse()`. The hint is what keeps `search_papers` /
@@ -39,6 +40,22 @@ const ENTRY_TOOLS = [
   "search_papers_many",
   "search_research_guidance",
 ];
+
+const INLINE_TOOLS = [
+  "extract_from_papers",
+  "gather_evidence",
+  "get_conference_papers",
+  "get_paper_citations",
+  "search_papers",
+  "search_papers_many",
+  "search_related_papers",
+  "verify_claims",
+];
+
+const KNOWN_META = new Set([
+  "anthropic/alwaysLoad",
+  "anthropic/maxResultSizeChars",
+]);
 
 /** Serve one `tools/list` and parse it the way a conformant client would. */
 async function listTools(
@@ -123,9 +140,18 @@ describe.each(["modern", "legacy"] as const)(
 
       expect(flagged).toEqual([...ENTRY_TOOLS].sort());
 
-      // And nothing else leaks a _meta.
+      // The inline-result hint survives the trip too, and nothing else leaks.
+      const inline = tools
+        .filter((t) => t._meta?.["anthropic/maxResultSizeChars"] === 500_000)
+        .map((t) => t.name)
+        .sort();
+
+      expect(inline).toEqual(INLINE_TOOLS);
+
       for (const t of tools) {
-        if (!ENTRY_TOOLS.includes(t.name)) expect(t._meta).toBeUndefined();
+        expect(
+          Object.keys(t._meta ?? {}).filter((key) => !KNOWN_META.has(key)),
+        ).toEqual([]);
       }
     });
 

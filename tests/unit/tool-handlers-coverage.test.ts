@@ -35,13 +35,13 @@ import type { JsonObject, JsonValue } from "../../src/json.js";
 interface SearchPayload {
   results: Array<JsonObject & { authors: string[] }>;
   best_score: number;
-  low_confidence: boolean;
+  low_confidence: boolean | null;
   has_more: boolean;
 }
 
 interface ScorePayload {
   best_score: number;
-  low_confidence: boolean;
+  low_confidence: boolean | null;
 }
 
 interface FulltextPayload {
@@ -200,7 +200,7 @@ describe("search_papers", () => {
     expect(hit.title).toBe("Attention Is All You Need");
     expect(hit.conference).toBe("NeurIPS");
     expect(hit.citation_count).toBe(99999);
-    // The boosted ranking `score` and the calibrated `rerank_score` are distinct.
+    // The ranking `score` and the calibrated `rerank_score` are distinct.
     expect(hit.score).toBe(1.05);
     expect(hit.rerank_score).toBe(0.91);
     // Default mode keeps full metadata and filters abstract chunks out of contexts.
@@ -208,7 +208,7 @@ describe("search_papers", () => {
     expect("et_al_count" in hit).toBe(false);
     expect("snippet" in hit).toBe(false);
     expect(hit.contexts).toEqual([]);
-    // best_score / low_confidence derive from rerank_score, not the boosted score.
+    // best_score / low_confidence derive from rerank_score, not the ranking score.
     expect(sc.best_score).toBe(0.91);
     expect(sc.low_confidence).toBe(false);
     expect(sc.has_more).toBe(false);

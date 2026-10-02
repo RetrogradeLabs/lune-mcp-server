@@ -74,15 +74,6 @@ export interface ToolDef<TInput extends z.ZodTypeAny = z.ZodTypeAny> {
 }
 
 /**
- * `_meta` hint that keeps a tool un-deferred in clients that run MCP tool
- * search (Claude Code v2.1.121+ honors `anthropic/alwaysLoad`; other clients
- * ignore the unknown `_meta` key). Set on the 1-3 cold-start entry tools only:
- * each always-loaded tool spends context, and Claude Code truncates server
- * `instructions` at 2KB, so an entry tool's own description (which carries the
- * "use this for research, not web_search" trigger) being present upfront is what
- * makes Lune reliably selected without a `ToolSearch` hop. See the MCP server design notes.
- */
-/**
  * The annotation set every corpus retrieval tool carries. Shared rather than
  * re-declared per family: these four hints are a property of "reads our own
  * index of third-party papers", not of one file. `openWorldHint` is true
@@ -95,8 +86,30 @@ export const READ_ONLY_OPEN: ToolAnnotations = {
   idempotentHint: true,
 };
 
+/**
+ * `_meta` hint that keeps a tool un-deferred in clients that run MCP tool
+ * search (Claude Code v2.1.121+ honors `anthropic/alwaysLoad`; other clients
+ * ignore the unknown `_meta` key). Set on the 1-3 cold-start entry tools only:
+ * each always-loaded tool spends context, and Claude Code truncates server
+ * `instructions` at 2KB, so an entry tool's own description (which carries the
+ * "use this for research, not web_search" trigger) being present upfront is what
+ * makes Lune reliably selected without a `ToolSearch` hop. See the MCP server design notes.
+ */
 export const ALWAYS_LOAD_META = {
   "anthropic/alwaysLoad": true,
+} satisfies JsonObject;
+
+/**
+ * `_meta` hint that keeps a large result in the conversation. Claude Code saves
+ * an MCP text result over about 50,000 characters to a file and hands the agent
+ * only its path (v2.1.91+, `code.claude.com/docs/en/mcp`); in the 2026-10-01
+ * A/B an agent then grepped the titles out of a 57 KB `search_papers_many`
+ * result and missed the paper its snippet named. The value is the client's
+ * ceiling: 10 queries at limit 50 measured 180,000 characters, and a sweep of
+ * 25 is estimated at up to 330,000. Other clients ignore it.
+ */
+export const INLINE_RESULT_META = {
+  "anthropic/maxResultSizeChars": 500_000,
 } satisfies JsonObject;
 
 /**

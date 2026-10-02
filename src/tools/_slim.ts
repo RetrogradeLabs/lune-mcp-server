@@ -178,12 +178,18 @@ interface RawSearchResponse {
   has_more?: boolean;
 }
 
-// Abstain only on calibrated rerank_score, never boosted score; without
-// reranking there is no calibrated basis for the floor.
-const LOW_CONFIDENCE_THRESHOLD = 0.3;
+/**
+ * Flag low confidence only on calibrated rerank_score, never the ranking score;
+ * without reranking there is no calibrated basis for the floor. Graded on
+ * 2026-10-01 (48 queries, GLM-4.7 grades): a hit under 0.4 directly addressed
+ * the request in at most 12% of cases, and every query with no directly
+ * relevant top-3 hit (off-corpus topics, a fabricated paper at 0.34) scored
+ * under 0.4 while none with one did. the MCP server design notes has the table.
+ */
+const LOW_CONFIDENCE_THRESHOLD = 0.4;
 
-// Build the search-envelope abstention tail: best of the numeric `rerank_score`s
-// (null when none reranked), `low_confidence` when it falls below the floor.
+// Best numeric `rerank_score` and `low_confidence` below the floor, both null
+// when nothing was reranked, because false there would read as confidence.
 function withAbstention<T extends { rerank_score?: number | null | undefined }>(
   results: T[],
   hasMore: boolean,
@@ -200,7 +206,8 @@ function withAbstention<T extends { rerank_score?: number | null | undefined }>(
     results,
     has_more: hasMore,
     best_score: bestScore,
-    low_confidence: bestScore !== null && bestScore < LOW_CONFIDENCE_THRESHOLD,
+    low_confidence:
+      bestScore === null ? null : bestScore < LOW_CONFIDENCE_THRESHOLD,
   };
 }
 
@@ -223,7 +230,7 @@ function bestSnippet(p: RawPaper): string | undefined {
     : abstract;
 }
 
-// Preserve boosted score and optional rerank_score; detail:false drops heavy
+// Preserve the ranking score and optional rerank_score; detail:false drops heavy
 // fields, trims authors, and adds one snippet.
 function projectHit(p: RawPaper, detail: boolean) {
   const base = slimPaper(p);
@@ -261,8 +268,8 @@ function projectHit(p: RawPaper, detail: boolean) {
 /**
  * Slim the hybrid-search response. The envelope's `best_score` / `low_confidence`
  * derive from `rerank_score` ONLY (Cohere Rerank v3.5, calibrated 0..1), never the
- * boosted `score`; when no hit was reranked (keyword / BM25 queries) `best_score`
- * is null and `low_confidence` false (no calibrated basis to abstain). Per-hit
+ * ranking `score`; when no hit was reranked (a lone-term query) `best_score`
+ * and `low_confidence` are null (no calibrated basis to judge). Per-hit
  * shape is `projectHit` (enriched default vs `detail: false` concise).
  */
 export function slimSearchResponse(r: JsonInput, detail = true) {
@@ -402,14 +409,40 @@ interface RawBatchSearchResponse {
  * per-hit `projectHit` projector as single search (so `detail: false` drops the
  * heavy abstract / ids and attaches one grounding `snippet`), then ALWAYS keeps
  * its `matched_queries` provenance (which input variants surfaced it, each with
- * a 1-based rank). The envelope keeps `queries_run`, `queries_failed`, and
- * `has_more` regardless of detail. Unlike single search there is no
- * `best_score` / `low_confidence`: the API fuses N ranked lists by RRF, so a
- * single calibrated rerank floor across the merge is not meaningful.
+ * a 1-based rank). `queries` names each variant once, in the order `sent`, and
+ * provenance points into it by index: repeating every variant's text in every
+ * hit took 25 variants of 400 characters at limit 50 to 533,547 characters
+ * before any abstract, past the client's 500,000 inline ceiling. The envelope
+ * keeps `queries_run`, `queries_failed`, and `has_more` regardless of detail.
+ * Unlike single search there is no `best_score` / `low_confidence`: the API
+ * fuses N ranked lists by RRF, so a single calibrated rerank floor across the
+ * merge is not meaningful.
  */
-export function slimSearchManyResponse(r: JsonInput, detail = true) {
+export function slimSearchManyResponse(
+  r: JsonInput,
+  sent: readonly string[],
+  detail = true,
+) {
   const obj = optimisticView<RawBatchSearchResponse>(r);
   const results: RawBatchHit[] = Array.isArray(obj.results) ? obj.results : [];
+
+  // The API strips each variant, so its provenance names the stripped text.
+  const queries = sent.map((query) => query.trim());
+  const indexOf = new Map<string, number>();
+  queries.forEach((query, index) => {
+    if (!indexOf.has(query)) indexOf.set(query, index);
+  });
+
+  const queryIndex = (query: string): number => {
+    const known = indexOf.get(query);
+
+    if (known !== undefined) return known;
+
+    queries.push(query);
+    indexOf.set(query, queries.length - 1);
+
+    return queries.length - 1;
+  };
 
   const projected = results.map((p) => ({
     ...projectHit(p, detail),
@@ -417,9 +450,9 @@ export function slimSearchManyResponse(r: JsonInput, detail = true) {
       ? p.matched_queries
           // Drop malformed provenance rather than fabricate a rank: `rank` is a
           // 1-based position, so a missing one has no meaningful default.
-          .flatMap((query) =>
-            hasQueryAndRank(query)
-              ? [{ query: query.query, rank: query.rank }]
+          .flatMap((match) =>
+            hasQueryAndRank(match)
+              ? [{ query_index: queryIndex(match.query), rank: match.rank }]
               : [],
           )
       : [],
@@ -430,6 +463,7 @@ export function slimSearchManyResponse(r: JsonInput, detail = true) {
     : [];
 
   return {
+    queries,
     results: projected,
     queries_run: isJsonNumber(obj.queries_run) ? obj.queries_run : 0,
     queries_failed: failed.flatMap((failure) =>

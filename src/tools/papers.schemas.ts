@@ -33,11 +33,13 @@ export const SearchInput = z.object({
     .max(500)
     .describe(
       "Full natural-language research query; phrase it the way you would ask " +
-        "a human research assistant. Long, descriptive questions outperform " +
-        "short keyword bags: the server detects conceptual / natural-language " +
-        "intent and automatically rewrites the query into a hypothetical " +
-        "abstract (HyDE) plus paraphrases before vector retrieval, so the " +
-        "richer the input, the better the recall. " +
+        "a human research assistant. On the paper corpus the server drops " +
+        'request wording ("find me papers on"), adds the standard names of what ' +
+        "the query describes and a hypothetical abstract (HyDE), and expands an " +
+        "abbreviation only when the rest of the query fixes its meaning, so " +
+        'give context ("MPC for drone control", not "MPC"); a lone term is ' +
+        "searched as typed, without expansion, HyDE or rerank. The richer the " +
+        "input, the better the recall. " +
         'Good: "methods for retrieval-augmented generation that reduce ' +
         'hallucination on long-form QA". ' +
         'Less optimal: "RAG hallucination".',

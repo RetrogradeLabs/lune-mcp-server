@@ -93,7 +93,7 @@ describe("paper tools", () => {
       ],
       has_more: false,
       best_score: null,
-      low_confidence: false,
+      low_confidence: null,
     };
 
     expect(JSON.parse(r.content[0]!.text)).toEqual(expected);
@@ -383,9 +383,10 @@ describe("search_papers_many tool", () => {
       limit: 5,
     });
 
-    // Enriched by default: the hit keeps its abstract + contexts AND its
-    // matched_queries provenance; the envelope keeps run/failed/has_more.
+    // Enriched by default: abstract + contexts, provenance as indexes into the
+    // variants named once, and the run/failed/has_more envelope.
     const expected = {
+      queries: ["x methods", "x training", "x broken"],
       results: [
         {
           paper_id: "p1",
@@ -395,8 +396,8 @@ describe("search_papers_many tool", () => {
           abstract: "We study X.",
           contexts: [{ section: "Methods", text: "we trained", score: 0.9 }],
           matched_queries: [
-            { query: "x methods", rank: 1 },
-            { query: "x training", rank: 3 },
+            { query_index: 0, rank: 1 },
+            { query_index: 1, rank: 3 },
           ],
         },
       ],
@@ -456,7 +457,32 @@ describe("search_papers_many tool", () => {
     const hit = many.results[0]!;
     expect(hit.snippet).toBe("we trained");
     expect("contexts" in hit).toBe(false);
-    expect(hit.matched_queries).toEqual([{ query: "x", rank: 1 }]);
+    expect(hit.matched_queries).toEqual([{ query_index: 0, rank: 1 }]);
+  });
+
+  it("points provenance at the variant as sent after the API strips it", async () => {
+    const { ky, setResponse } = fakeKy();
+    setResponse({
+      results: [
+        {
+          id: "p1",
+          title: "Foo",
+          matched_queries: [{ query: "x training", rank: 2 }],
+        },
+      ],
+      queries_run: 2,
+      queries_failed: [],
+      has_more: false,
+    });
+
+    const r = await callPaperTool(ky, "search_papers_many", {
+      queries: ["x methods", "  x training  "],
+    });
+
+    expect(r.structuredContent).toMatchObject({
+      queries: ["x methods", "x training"],
+      results: [{ matched_queries: [{ query_index: 1, rank: 2 }] }],
+    });
   });
 
   it("rejects an empty queries array via zod (thrown protocol error)", async () => {

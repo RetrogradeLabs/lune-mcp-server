@@ -265,7 +265,7 @@ describe("slimSearchResponse", () => {
       ],
     });
 
-    // The boosted ranking score and the calibrated rerank score are both surfaced.
+    // The ranking score and the calibrated rerank score are both surfaced.
     expect(r.results[0]!.score).toBe(1.1);
     expect(r.results[0]!.rerank_score).toBe(0.82);
     // best_score / low_confidence key on rerank_score (the calibrated value).
@@ -283,20 +283,34 @@ describe("slimSearchResponse", () => {
     expect(r.low_confidence).toBe(true);
   });
 
-  it("does not abstain when a hit has only a boosted score and no rerank_score", () => {
-    // Keyword / BM25-dominated path: the reranker was skipped, so there is no
-    // calibrated basis to abstain even though the boosted score is present.
+  it("flags a best rerank_score under the calibrated 0.4 floor", () => {
+    // Graded on 2026-10-01: a fabricated paper's best hit scored 0.34, the
+    // e-graph security request's, a direct match, 0.50.
+    const fabricated = slimSearchResponse({
+      results: [{ id: "p1", score: 0.4, rerank_score: 0.34 }],
+    });
+
+    const direct = slimSearchResponse({
+      results: [{ id: "p1", score: 0.6, rerank_score: 0.5 }],
+    });
+
+    expect(fabricated.low_confidence).toBe(true);
+    expect(direct.low_confidence).toBe(false);
+  });
+
+  it("reports no confidence either way when no hit was reranked", () => {
+    // Lone-term path: the reranker was skipped, so false would read as a
+    // confident match the fused ranking score cannot vouch for.
     const r = slimSearchResponse({ results: [{ id: "p1", score: 1.5 }] });
     expect(r.results[0]!.score).toBe(1.5);
     expect(r.best_score).toBeNull();
-    expect(r.low_confidence).toBe(false);
+    expect(r.low_confidence).toBeNull();
   });
 
-  it("reports null best_score and low_confidence false for an empty result set", () => {
-    // No hits => no calibrated rerank score => no basis to abstain.
+  it("reports null best_score and low_confidence for an empty result set", () => {
     const r = slimSearchResponse({ results: [] });
     expect(r.best_score).toBeNull();
-    expect(r.low_confidence).toBe(false);
+    expect(r.low_confidence).toBeNull();
   });
 
   it("carries has_more from the response and defaults it to false when absent", () => {

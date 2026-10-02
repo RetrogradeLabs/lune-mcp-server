@@ -215,10 +215,40 @@ describe("alwaysLoad entry tools (tool-selection: get picked over web_search)", 
       .sort();
 
     expect(flagged).toEqual([...ENTRY_TOOLS].sort());
+  });
 
-    // Non-entry tools must not emit `_meta` at all (no accidental spread).
+  it("keeps every result an agent grounds on inline, and nothing else", () => {
+    // Claude Code saves a larger result to a file and the agent may only grep
+    // it: why the threshold exists is in `INLINE_RESULT_META`'s comment.
+    const INLINE = [
+      "extract_from_papers",
+      "gather_evidence",
+      "get_conference_papers",
+      "get_paper_citations",
+      "search_papers",
+      "search_papers_many",
+      "search_related_papers",
+      "verify_claims",
+    ];
+
+    const known = new Set([
+      "anthropic/alwaysLoad",
+      "anthropic/maxResultSizeChars",
+    ]);
+
+    const { tools } = listToolsResponse();
+
+    const raised = tools
+      .filter((t) => t._meta?.["anthropic/maxResultSizeChars"] === 500_000)
+      .map((t) => t.name)
+      .sort();
+
+    expect(raised).toEqual(INLINE);
+
     for (const t of tools) {
-      if (!ENTRY_TOOLS.includes(t.name)) expect(t._meta).toBeUndefined();
+      expect(
+        Object.keys(t._meta ?? {}).filter((key) => !known.has(key)),
+      ).toEqual([]);
     }
   });
 

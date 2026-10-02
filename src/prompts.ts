@@ -55,7 +55,8 @@ function present(value: string | undefined): value is string {
 
 const CITE_RULE =
   "Cite every paper by title, authors, and venue/year (a paper_id is only your " +
-  "fetch handle, never show it to me). Use Lune's tools, not web search.";
+  "fetch handle, never show it to me). Use Lune's tools, not web search, and " +
+  "widen to the web only for what Lune cannot support even after rephrasing.";
 
 export const PROMPTS: PromptDef[] = [
   {
@@ -171,7 +172,8 @@ export const PROMPTS: PromptDef[] = [
           "year scope above as the `venues` / `year_min` filters on that call (they are " +
           "shared across all variants), not only in prose.",
         "2. Triage the merged hits; for the handful of most relevant or most-cited papers, " +
-          "call get_paper_fulltext to read the methods and results.",
+          "call get_paper_fulltext to read the methods and results, and " +
+          "get_paper_citations with direction=cites for the foundational work they build on.",
         "3. Synthesise into: (a) the main themes and lines of work, (b) the foundational " +
           "papers and the recent advances, (c) open problems and gaps, (d) how the leading " +
           "approaches differ and trade off.",
