@@ -72,9 +72,7 @@ describe("tool catalog parity", () => {
     expect(search.description).toMatch(/detail: false/i);
     // Hint 2: paper_id is for fetching full text, not for showing to the user.
     expect(search.description).toMatch(/get_paper_fulltext/);
-    expect(search.description).toMatch(
-      /not (meant to be|be) shown directly to the user/i,
-    );
+    expect(search.description).toMatch(/never show it to the user/i);
 
     // The `detail` knob is exposed on the input schema as a boolean.
     const schema = jsonObject(search.inputSchema, "search_papers input schema");

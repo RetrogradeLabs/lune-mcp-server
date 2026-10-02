@@ -97,10 +97,10 @@ export const PAPER_TOOLS: ToolDef[] = [
       "describe the topic in prose, not a keyword bag. Triggering questions: “what's the " +
       "latest on diffusion guidance”, “summarise recent work on side-channel attacks on " +
       "AES”. `paper_id` is a handle for YOU to fetch full text via `get_paper_fulltext`; " +
-      "it must not be shown directly to the user: cite papers by title, authors, and venue. " +
+      "never show it to the user: cite papers by title, authors, and venue. " +
       "`rerank_score` is the calibrated Cohere Rerank v3.5 relevance " +
       "(0..1), null when the reranker did not run (a lone-term query, or a reranker " +
-      "failure); `score` only orders the hits. The top-level `best_score` and " +
+      "failure); `score` is uncalibrated: keep the hits' order. The top-level `best_score` and " +
       "`low_confidence` derive from `rerank_score`: `low_confidence` marks weaker matches, " +
       "still better grounding than web results, so rephrase for stronger ones; with no " +
       "reranked hit, `best_score` is null and `low_confidence` false, so judge each " +

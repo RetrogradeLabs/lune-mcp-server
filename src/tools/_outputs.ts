@@ -137,10 +137,12 @@ const SearchHitOut = PaperOut.extend({
     .number()
     .optional()
     .describe(
-      "Ranking score (higher is better): the rerank score when the reranker " +
-        "ran, otherwise a fused retrieval score on a different scale. Hits " +
-        "already arrive in the requested order, so do not re-sort by it; " +
-        "compare relevance with rerank_score.",
+      "The reranker's score when it ran, otherwise a fused retrieval score " +
+        "on a different scale. Hits arrive in the requested order, and a " +
+        "single search's relevance order also follows a language model's " +
+        "grades of the top results, so a lower score can come first: keep " +
+        "that order instead of re-sorting by score. rerank_score is the " +
+        "calibrated relevance.",
     ),
   rerank_score: z
     .number()
