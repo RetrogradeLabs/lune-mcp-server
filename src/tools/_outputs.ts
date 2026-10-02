@@ -189,13 +189,13 @@ export const SearchPapersOutput = z.object({
     ),
   low_confidence: z
     .boolean()
-    .nullable()
     .describe(
       "True when the best rerank_score fell below the relevance floor: these " +
         "are weaker matches, still better grounding than web results, so " +
-        "rephrase for stronger ones. False when a hit cleared the floor. Null " +
-        "when no hit was reranked or there were no results: no calibrated " +
-        "basis, so judge each hit's fit yourself.",
+        "rephrase for stronger ones. False when a hit cleared the floor, and " +
+        "also when no hit was reranked or there were no results: best_score " +
+        "is then null, so there is no calibrated basis and you judge each " +
+        "hit's fit yourself.",
     ),
 });
 
@@ -205,12 +205,13 @@ const BatchSearchHitOut = SearchHitOut.extend({
   matched_queries: z
     .array(
       z.object({
+        query: z
+          .string()
+          .describe("The input query variant that surfaced this paper."),
         query_index: z
           .number()
           .int()
-          .describe(
-            "0-based index into `queries` of a variant that surfaced this paper.",
-          ),
+          .describe("That variant's 0-based index into `queries`."),
         rank: z
           .number()
           .int()
@@ -220,9 +221,8 @@ const BatchSearchHitOut = SearchHitOut.extend({
       }),
     )
     .describe(
-      "Which of the input queries surfaced this paper, by index into " +
-        "`queries`, with each variant's 1-based rank. Use it to see which " +
-        "fan-out variants paid off.",
+      "Which of the input queries surfaced this paper, with each variant's " +
+        "1-based rank. Use it to see which fan-out variants paid off.",
     ),
 });
 

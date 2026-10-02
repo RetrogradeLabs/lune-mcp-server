@@ -298,19 +298,19 @@ describe("slimSearchResponse", () => {
     expect(direct.low_confidence).toBe(false);
   });
 
-  it("reports no confidence either way when no hit was reranked", () => {
-    // Lone-term path: the reranker was skipped, so false would read as a
-    // confident match the fused ranking score cannot vouch for.
+  it("says there is no calibrated basis when no hit was reranked", () => {
+    // Lone-term path: best_score null carries it; the flag stays a boolean
+    // because clients validate against a cached schema that requires one.
     const r = slimSearchResponse({ results: [{ id: "p1", score: 1.5 }] });
     expect(r.results[0]!.score).toBe(1.5);
     expect(r.best_score).toBeNull();
-    expect(r.low_confidence).toBeNull();
+    expect(r.low_confidence).toBe(false);
   });
 
-  it("reports null best_score and low_confidence for an empty result set", () => {
+  it("reports a null best_score and an unflagged empty result set", () => {
     const r = slimSearchResponse({ results: [] });
     expect(r.best_score).toBeNull();
-    expect(r.low_confidence).toBeNull();
+    expect(r.low_confidence).toBe(false);
   });
 
   it("carries has_more from the response and defaults it to false when absent", () => {

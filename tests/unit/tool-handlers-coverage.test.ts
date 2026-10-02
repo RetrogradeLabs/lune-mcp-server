@@ -35,13 +35,13 @@ import type { JsonObject, JsonValue } from "../../src/json.js";
 interface SearchPayload {
   results: Array<JsonObject & { authors: string[] }>;
   best_score: number;
-  low_confidence: boolean | null;
+  low_confidence: boolean;
   has_more: boolean;
 }
 
 interface ScorePayload {
   best_score: number;
-  low_confidence: boolean | null;
+  low_confidence: boolean;
 }
 
 interface FulltextPayload {

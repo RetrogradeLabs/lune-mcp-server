@@ -252,6 +252,45 @@ describe("alwaysLoad entry tools (tool-selection: get picked over web_search)", 
     }
   });
 
+  it("keeps the output fields an earlier tool list required", () => {
+    // Clients validate results against the tool list they cached, so a field
+    // removed or made nullable fails every session that loaded the old list.
+    const { tools } = listToolsResponse();
+
+    const schemaOf = (name: string): JsonValue =>
+      tools.find((t) => t.name === name)?.outputSchema ?? {};
+
+    expect(schemaOf("search_papers_many")).toMatchObject({
+      required: expect.arrayContaining(["queries"]),
+      properties: {
+        results: {
+          items: {
+            properties: {
+              matched_queries: {
+                items: {
+                  required: expect.arrayContaining([
+                    "query",
+                    "query_index",
+                    "rank",
+                  ]),
+                  properties: {
+                    query: { type: "string" },
+                    query_index: { type: "integer" },
+                    rank: { type: "integer" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    expect(schemaOf("search_papers")).toMatchObject({
+      required: expect.arrayContaining(["low_confidence"]),
+      properties: { low_confidence: { type: "boolean" } },
+    });
+  });
+
   it("search_papers_many leads with the literature-sweep trigger and disambiguates from search_papers", () => {
     const t = getAllToolDefinitions().find(
       (d) => d.name === "search_papers_many",

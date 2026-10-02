@@ -105,8 +105,9 @@ export const ALWAYS_LOAD_META = {
  * only its path (v2.1.91+, `code.claude.com/docs/en/mcp`); in the 2026-10-01
  * A/B an agent then grepped the titles out of a 57 KB `search_papers_many`
  * result and missed the paper its snippet named. The value is the client's
- * ceiling: 10 queries at limit 50 measured 180,000 characters, and a sweep of
- * 25 is estimated at up to 330,000. Other clients ignore it.
+ * ceiling: 10 queries at limit 50 measured 180,000 characters, while a sweep
+ * of 25 long variants can still pass it and is saved to a file. Other clients
+ * ignore it.
  */
 export const INLINE_RESULT_META = {
   "anthropic/maxResultSizeChars": 500_000,

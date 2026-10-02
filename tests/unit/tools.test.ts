@@ -93,7 +93,7 @@ describe("paper tools", () => {
       ],
       has_more: false,
       best_score: null,
-      low_confidence: null,
+      low_confidence: false,
     };
 
     expect(JSON.parse(r.content[0]!.text)).toEqual(expected);
@@ -396,8 +396,8 @@ describe("search_papers_many tool", () => {
           abstract: "We study X.",
           contexts: [{ section: "Methods", text: "we trained", score: 0.9 }],
           matched_queries: [
-            { query_index: 0, rank: 1 },
-            { query_index: 1, rank: 3 },
+            { query: "x methods", query_index: 0, rank: 1 },
+            { query: "x training", query_index: 1, rank: 3 },
           ],
         },
       ],
@@ -457,7 +457,9 @@ describe("search_papers_many tool", () => {
     const hit = many.results[0]!;
     expect(hit.snippet).toBe("we trained");
     expect("contexts" in hit).toBe(false);
-    expect(hit.matched_queries).toEqual([{ query_index: 0, rank: 1 }]);
+    expect(hit.matched_queries).toEqual([
+      { query: "x", query_index: 0, rank: 1 },
+    ]);
   });
 
   it("points provenance at the variant as sent after the API strips it", async () => {
@@ -481,7 +483,11 @@ describe("search_papers_many tool", () => {
 
     expect(r.structuredContent).toMatchObject({
       queries: ["x methods", "x training"],
-      results: [{ matched_queries: [{ query_index: 1, rank: 2 }] }],
+      results: [
+        {
+          matched_queries: [{ query: "x training", query_index: 1, rank: 2 }],
+        },
+      ],
     });
   });
 

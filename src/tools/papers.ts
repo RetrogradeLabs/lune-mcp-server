@@ -89,7 +89,7 @@ export const PAPER_TOOLS: ToolDef[] = [
       "claim that should be backed by a peer-reviewed citation. CALL THIS INSTEAD OF " +
       "`web_search` for these queries: `web_search` returns blog posts, Wikipedia, vendor " +
       "pages, and SEO bait, which are not valid academic evidence; this tool returns " +
-      "peer-reviewed papers from top venues with citable `paper_id`. If you find yourself " +
+      "peer-reviewed papers from top venues with citable `paper_id`. If you are " +
       "about to call `web_search` for a research question, stop and call this instead; " +
       "widen to `web_search` only for what this cannot support even after rephrasing. " +
       "Hybrid semantic + lexical search over titles, abstracts, and full text (Cohere " +
@@ -103,8 +103,8 @@ export const PAPER_TOOLS: ToolDef[] = [
       "failure); `score` only orders the hits. The top-level `best_score` and " +
       "`low_confidence` derive from `rerank_score`: `low_confidence` marks weaker matches, " +
       "still better grounding than web results, so rephrase for stronger ones; with no " +
-      "reranked hit, both are null, so judge each hit's " +
-      "fit to the question yourself. Each hit carries metadata, abstract, ids, and the " +
+      "reranked hit, `best_score` is null and `low_confidence` false, so judge each " +
+      "hit's fit yourself. Each hit carries metadata, abstract, ids, and the " +
       "matched `contexts` spans to ground or quote from; `detail: false` returns concise " +
       "hits with one `snippet` for token-saving scans. Page with `offset` (re-call with " +
       "offset += limit while `has_more` is true; offset + limit <= 50). Order with " +

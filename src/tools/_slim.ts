@@ -188,8 +188,8 @@ interface RawSearchResponse {
  */
 const LOW_CONFIDENCE_THRESHOLD = 0.4;
 
-// Best numeric `rerank_score` and `low_confidence` below the floor, both null
-// when nothing was reranked, because false there would read as confidence.
+// With no reranked hit `best_score` is null and the flag stays false: clients
+// validate against a cached schema that requires a boolean (mcp.md).
 function withAbstention<T extends { rerank_score?: number | null | undefined }>(
   results: T[],
   hasMore: boolean,
@@ -206,8 +206,7 @@ function withAbstention<T extends { rerank_score?: number | null | undefined }>(
     results,
     has_more: hasMore,
     best_score: bestScore,
-    low_confidence:
-      bestScore === null ? null : bestScore < LOW_CONFIDENCE_THRESHOLD,
+    low_confidence: bestScore !== null && bestScore < LOW_CONFIDENCE_THRESHOLD,
   };
 }
 
@@ -269,7 +268,7 @@ function projectHit(p: RawPaper, detail: boolean) {
  * Slim the hybrid-search response. The envelope's `best_score` / `low_confidence`
  * derive from `rerank_score` ONLY (Cohere Rerank v3.5, calibrated 0..1), never the
  * ranking `score`; when no hit was reranked (a lone-term query) `best_score`
- * and `low_confidence` are null (no calibrated basis to judge). Per-hit
+ * is null and `low_confidence` false (no calibrated basis to judge). Per-hit
  * shape is `projectHit` (enriched default vs `detail: false` concise).
  */
 export function slimSearchResponse(r: JsonInput, detail = true) {
@@ -410,9 +409,9 @@ interface RawBatchSearchResponse {
  * heavy abstract / ids and attaches one grounding `snippet`), then ALWAYS keeps
  * its `matched_queries` provenance (which input variants surfaced it, each with
  * a 1-based rank). `queries` names each variant once, in the order `sent`, and
- * provenance points into it by index: repeating every variant's text in every
- * hit took 25 variants of 400 characters at limit 50 to 533,547 characters
- * before any abstract, past the client's 500,000 inline ceiling. The envelope
+ * each provenance entry carries both the variant's text (`query`) and its index
+ * there (`query_index`): clients validate results against the tool list they
+ * cached, so a field a released schema had never leaves. The envelope
  * keeps `queries_run`, `queries_failed`, and `has_more` regardless of detail.
  * Unlike single search there is no `best_score` / `low_confidence`: the API
  * fuses N ranked lists by RRF, so a single calibrated rerank floor across the
@@ -452,7 +451,13 @@ export function slimSearchManyResponse(
           // 1-based position, so a missing one has no meaningful default.
           .flatMap((match) =>
             hasQueryAndRank(match)
-              ? [{ query_index: queryIndex(match.query), rank: match.rank }]
+              ? [
+                  {
+                    query: match.query,
+                    query_index: queryIndex(match.query),
+                    rank: match.rank,
+                  },
+                ]
               : [],
           )
       : [],

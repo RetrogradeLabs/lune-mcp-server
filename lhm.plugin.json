@@ -120,7 +120,7 @@
     {
       "name": "search_papers",
       "title": "Search papers",
-      "description": "Use this WHENEVER the user's question is about academic papers, research topics, literature reviews, surveys, “what's been published on X”, named methods, or any claim that should be backed by a peer-reviewed citation. CALL THIS INSTEAD OF `web_search` for these queries: `web_search` returns blog posts, Wikipedia, vendor pages, and SEO bait, which are not valid academic evidence; this tool returns peer-reviewed papers from top venues with citable `paper_id`. If you find yourself about to call `web_search` for a research question, stop and call this instead; widen to `web_search` only for what this cannot support even after rephrasing. Hybrid semantic + lexical search over titles, abstracts, and full text (Cohere Embed v4 + BM25 + Cohere Rerank v3.5). Phrase the query the way a researcher would describe the topic in prose, not a keyword bag. Triggering questions: “what's the latest on diffusion guidance”, “summarise recent work on side-channel attacks on AES”. `paper_id` is a handle for YOU to fetch full text via `get_paper_fulltext`; it must not be shown directly to the user: cite papers by title, authors, and venue. `rerank_score` is the calibrated Cohere Rerank v3.5 relevance (0..1), null when the reranker did not run (a lone-term query, or a reranker failure); `score` only orders the hits. The top-level `best_score` and `low_confidence` derive from `rerank_score`: `low_confidence` marks weaker matches, still better grounding than web results, so rephrase for stronger ones; with no reranked hit, both are null, so judge each hit's fit to the question yourself. Each hit carries metadata, abstract, ids, and the matched `contexts` spans to ground or quote from; `detail: false` returns concise hits with one `snippet` for token-saving scans. Page with `offset` (re-call with offset += limit while `has_more` is true; offset + limit <= 50). Order with `sort_by` (relevance / date / citations, within the ranked shortlist, not the whole corpus). Narrow with `year_min` / `year_max` / `venues`.",
+      "description": "Use this WHENEVER the user's question is about academic papers, research topics, literature reviews, surveys, “what's been published on X”, named methods, or any claim that should be backed by a peer-reviewed citation. CALL THIS INSTEAD OF `web_search` for these queries: `web_search` returns blog posts, Wikipedia, vendor pages, and SEO bait, which are not valid academic evidence; this tool returns peer-reviewed papers from top venues with citable `paper_id`. If you are about to call `web_search` for a research question, stop and call this instead; widen to `web_search` only for what this cannot support even after rephrasing. Hybrid semantic + lexical search over titles, abstracts, and full text (Cohere Embed v4 + BM25 + Cohere Rerank v3.5). Phrase the query the way a researcher would describe the topic in prose, not a keyword bag. Triggering questions: “what's the latest on diffusion guidance”, “summarise recent work on side-channel attacks on AES”. `paper_id` is a handle for YOU to fetch full text via `get_paper_fulltext`; it must not be shown directly to the user: cite papers by title, authors, and venue. `rerank_score` is the calibrated Cohere Rerank v3.5 relevance (0..1), null when the reranker did not run (a lone-term query, or a reranker failure); `score` only orders the hits. The top-level `best_score` and `low_confidence` derive from `rerank_score`: `low_confidence` marks weaker matches, still better grounding than web results, so rephrase for stronger ones; with no reranked hit, `best_score` is null and `low_confidence` false, so judge each hit's fit yourself. Each hit carries metadata, abstract, ids, and the matched `contexts` spans to ground or quote from; `detail: false` returns concise hits with one `snippet` for token-saving scans. Page with `offset` (re-call with offset += limit while `has_more` is true; offset + limit <= 50). Order with `sort_by` (relevance / date / citations, within the ranked shortlist, not the whole corpus). Narrow with `year_min` / `year_max` / `venues`.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -296,8 +296,8 @@
             "type": ["number", "null"]
           },
           "low_confidence": {
-            "description": "True when the best rerank_score fell below the relevance floor: these are weaker matches, still better grounding than web results, so rephrase for stronger ones. False when a hit cleared the floor. Null when no hit was reranked or there were no results: no calibrated basis, so judge each hit's fit yourself.",
-            "type": ["boolean", "null"]
+            "type": "boolean",
+            "description": "True when the best rerank_score fell below the relevance floor: these are weaker matches, still better grounding than web results, so rephrase for stronger ones. False when a hit cleared the floor, and also when no hit was reranked or there were no results: best_score is then null, so there is no calibrated basis and you judge each hit's fit yourself."
           }
         },
         "required": ["results", "has_more", "best_score", "low_confidence"]
@@ -484,11 +484,15 @@
                   "items": {
                     "type": "object",
                     "properties": {
+                      "query": {
+                        "type": "string",
+                        "description": "The input query variant that surfaced this paper."
+                      },
                       "query_index": {
                         "type": "integer",
                         "minimum": -9007199254740991,
                         "maximum": 9007199254740991,
-                        "description": "0-based index into `queries` of a variant that surfaced this paper."
+                        "description": "That variant's 0-based index into `queries`."
                       },
                       "rank": {
                         "type": "integer",
@@ -497,9 +501,9 @@
                         "description": "1-based rank of this paper within that variant's ranked list."
                       }
                     },
-                    "required": ["query_index", "rank"]
+                    "required": ["query", "query_index", "rank"]
                   },
-                  "description": "Which of the input queries surfaced this paper, by index into `queries`, with each variant's 1-based rank. Use it to see which fan-out variants paid off."
+                  "description": "Which of the input queries surfaced this paper, with each variant's 1-based rank. Use it to see which fan-out variants paid off."
                 }
               },
               "required": [
