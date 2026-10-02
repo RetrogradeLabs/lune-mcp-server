@@ -414,8 +414,10 @@ describe("JWKS cooldown after a signing-key rotation", () => {
     const newKey = await keyFor("rotation-new");
     served = [oldKey.jwk];
 
-    // Warm the cache with the pre-rotation key set, which is what starts the
-    // cooldown clock; only `Date` is faked, so the real fetch still works.
+    // Freeze only `Date`, before the warm-up fetch starts the cooldown: jose's
+    // stamp and `warmedAt` then share one clock that host clock steps cannot move.
+    vi.useFakeTimers({ toFake: ["Date"] });
+
     const before = await mintWith(
       oldKey.privateKey,
       "rotation-old",
@@ -431,7 +433,6 @@ describe("JWKS cooldown after a signing-key rotation", () => {
     // so only freshly minted tokens can land on an unknown kid.
     served = [newKey.jwk, oldKey.jwk];
     const warmedAt = Date.now();
-    vi.useFakeTimers({ toFake: ["Date"] });
     const after = await mintWith(newKey.privateKey, "rotation-new", "user-new");
 
     vi.setSystemTime(warmedAt + 3_000);
