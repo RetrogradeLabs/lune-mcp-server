@@ -323,7 +323,9 @@ export const PAPER_TOOLS: ToolDef[] = [
 /**
  * Fetch the conferences list (cached on the API side for 10 min and
  * cached again on this side via `cachedJson`) and use it to canonicalise
- * a user-supplied conference identifier.
+ * a user-supplied conference identifier. The list includes unlisted venues:
+ * their papers stay searchable, and a name matched against the listed ones
+ * alone could resolve to a different venue it happens to prefix.
  *
  *   • Exact / unique fuzzy match → return the canonical `short_name`.
  *   • Ambiguous → throw `LuneErrorCode.InvalidParams` with the candidate
@@ -342,7 +344,10 @@ async function resolveConferenceArg(
       api,
       "get",
       "conferences",
-      { defaultTtlMs: TTL_CONFERENCES },
+      {
+        searchParams: new URLSearchParams({ include_unlisted: "true" }),
+        defaultTtlMs: TTL_CONFERENCES,
+      },
     );
 
     if (Array.isArray(r)) list = r;

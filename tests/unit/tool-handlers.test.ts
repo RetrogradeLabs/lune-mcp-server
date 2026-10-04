@@ -117,6 +117,39 @@ describe("resolveConferenceArg via search_papers", () => {
     });
   });
 
+  it("resolves an unlisted venue to itself, not to a listed one it prefixes", async () => {
+    const listed = [
+      {
+        short_name: "EUROCRYPT",
+        full_name:
+          "International Conference on the Theory and Applications of Cryptographic Techniques",
+      },
+    ];
+
+    const everyVenue = [
+      ...listed,
+      {
+        short_name: "CRYPTO",
+        full_name: "Annual International Cryptology Conference",
+      },
+    ];
+
+    const { ky, calls } = createFakeKy((call) => {
+      if (call.method === "post") return jsonReply({ results: [] });
+
+      return jsonReply(
+        searchParamsOf(call).include_unlisted === "true" ? everyVenue : listed,
+      );
+    });
+
+    await callPaperTool(ky, "search_papers", {
+      query: "lattice signatures",
+      conference: "crypto",
+    });
+    const searchCall = callTo(calls, "search");
+    expect(jsonBodyOf(searchCall).conference_short_name).toBe("CRYPTO");
+  });
+
   it("passes an unmatched conference name through unchanged", async () => {
     const { ky, calls } = routedKy({
       get: { conferences: CONFERENCES },
