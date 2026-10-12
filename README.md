@@ -30,15 +30,20 @@ A client without OAuth support sends a Lune access key in the `Authorization`
 header instead. Create one on the
 [Credentials page](https://luneresearch.com/dashboard/settings/credentials):
 open **API keys** and click **New key**. This request lists the tools, which
-makes it a quick way to check a key:
+makes it a quick way to check a key. It reads the key from `LUNE_API_KEY`, set from
+your password manager or a file only you can read:
 
 ```bash
-curl https://mcp.luneresearch.com \
-  -H "Authorization: Bearer lune_your_access_key" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+printf 'Authorization: Bearer %s\n' "$LUNE_API_KEY" |
+  curl https://mcp.luneresearch.com \
+    -H @- \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
+
+The key reaches curl on its input, so it stays out of your shell history and
+the process list.
 
 Setup notes for specific apps are in the docs:
 [web AI apps](https://luneresearch.com/docs/mcp/remote) such as ChatGPT, Claude
