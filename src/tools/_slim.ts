@@ -107,6 +107,7 @@ interface RawMatchedChunk {
   text?: string | null;
   score?: number | null;
   chunk_id?: string | null;
+  condition?: string | null;
 }
 
 interface RawPaper {
@@ -125,7 +126,6 @@ interface RawPaper {
   rerank_score?: number | null;
   conference?: RawConference | string | null;
   matched_chunks?: RawMatchedChunk[] | null;
-  compares_against?: string | null;
 }
 
 export function slimPaper(p: RawPaper) {
@@ -155,25 +155,23 @@ function isAbstractSection(section: string | null | undefined): boolean {
  * paper that matched the query, scored by the hybrid retriever) into the slim
  * `contexts` shape surfaced to the agent. The paper abstract is returned as its
  * own field in the enriched search shape, so abstract-section chunks are
- * dropped here to avoid duplicating the same evidence twice. `evidenceFirst`
- * keeps the first chunk whatever its section: a checked relation hit leads with
- * the passage its check named, which can be an abstract's comparison claim.
+ * dropped here to avoid duplicating the same evidence twice, except the
+ * evidence a condition check named (`condition` set), which an abstract's
+ * claim can be.
  */
-function slimContexts(
-  chunks: RawMatchedChunk[] | null | undefined,
-  evidenceFirst = false,
-) {
+function slimContexts(chunks: RawMatchedChunk[] | null | undefined) {
   if (!Array.isArray(chunks)) return [];
 
-  return chunks.flatMap((chunk, index) =>
+  return chunks.flatMap((chunk) =>
     hasText(chunk) &&
-    ((evidenceFirst && index === 0) || !isAbstractSection(chunk.section_name))
+    (chunk.condition || !isAbstractSection(chunk.section_name))
       ? [
           {
             section: chunk.section_name || undefined,
             text: chunk.text,
             score: isJsonNumber(chunk.score) ? chunk.score : undefined,
             chunk_id: chunk.chunk_id || undefined,
+            condition: chunk.condition || undefined,
           },
         ]
       : [],
@@ -183,6 +181,7 @@ function slimContexts(
 interface RawSearchResponse {
   results?: RawPaper[];
   has_more?: boolean;
+  conditions?: string[] | null;
 }
 
 /**
@@ -224,7 +223,7 @@ const CONCISE_AUTHOR_LIMIT = 6;
 // Prefer the top context, then a truncated abstract, so concise hits stay
 // grounded.
 function bestSnippet(p: RawPaper): string | undefined {
-  const chunks = slimContexts(p.matched_chunks, Boolean(p.compares_against));
+  const chunks = slimContexts(p.matched_chunks);
 
   if (chunks.length > 0) return chunks[0]!.text;
   const abstract = p.abstract || "";
@@ -246,15 +245,12 @@ function projectHit(p: RawPaper, detail: boolean) {
     ? p.rerank_score
     : undefined;
 
-  const compares_against = p.compares_against || undefined;
-
   if (detail) {
     return {
       ...base,
       score,
       rerank_score,
-      compares_against,
-      contexts: slimContexts(p.matched_chunks, Boolean(compares_against)),
+      contexts: slimContexts(p.matched_chunks),
     };
   }
 
@@ -270,7 +266,6 @@ function projectHit(p: RawPaper, detail: boolean) {
     citation_count: base.citation_count,
     score,
     rerank_score,
-    compares_against,
     snippet: bestSnippet(p),
   };
 }
@@ -289,10 +284,14 @@ export function slimSearchResponse(r: JsonInput, detail = true) {
 
   // The API reports whether more results exist past this window; default to
   // false when the field is absent (a pre-deploy API) so the agent stops here.
-  return withAbstention(
+  const page = withAbstention(
     projected,
     isJsonBoolean(obj.has_more) ? obj.has_more : false,
   );
+
+  return Array.isArray(obj.conditions)
+    ? { ...page, conditions: obj.conditions.filter(isJsonString) }
+    : page;
 }
 
 interface RawWorkspaceSpan {

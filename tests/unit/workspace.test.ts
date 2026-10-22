@@ -118,9 +118,8 @@ describe("search_papers source=workspace routing", () => {
     // value, NEVER null), so a workspace doc must OMIT them, not emit null.
     expect(hit.year).toBeUndefined();
     expect(hit.conference).toBeUndefined();
-    // Workspace search runs no relation check; SearchPapersOutput scopes
-    // compares_against to a corpus search.
-    expect("compares_against" in hit).toBe(false);
+    // Workspace search checks no condition, so it reports none.
+    expect("conditions" in payload).toBe(false);
     expect(SearchPapersOutput.safeParse(res.structuredContent).success).toBe(
       true,
     );

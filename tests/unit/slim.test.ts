@@ -18,7 +18,10 @@ import {
   slimRelated,
   slimSearchResponse,
 } from "../../src/tools/_slim.js";
-import { GetCitationsOutput } from "../../src/tools/_outputs.js";
+import {
+  GetCitationsOutput,
+  SearchPapersOutput,
+} from "../../src/tools/_outputs.js";
 
 /**
  * A projected search hit, and the two shapes `detail` picks between. The union
@@ -251,37 +254,27 @@ describe("slimSearchResponse", () => {
     ]);
   });
 
-  it("keeps a checked hit's compares_against in both shapes and omits an unset one", () => {
-    const raw = {
-      results: [
-        {
-          id: "p1",
-          compares_against: "SimPO",
-          matched_chunks: [
-            { section_name: "Results", text: "SimPO | 41.2 | Ours | 44.0" },
-          ],
-        },
-        { id: "p2", compares_against: null },
-      ],
-    };
+  it("carries the conditions a search checked and omits them when none were", () => {
+    const checked = slimSearchResponse({
+      results: [],
+      has_more: false,
+      conditions: ["compares against SimPO"],
+    });
 
-    const detailed = slimSearchResponse(raw).results;
-    const concise = slimSearchResponse(raw, false).results;
+    const unchecked = slimSearchResponse({ results: [], conditions: null });
 
-    expect(detailed[0]!.compares_against).toBe("SimPO");
-    expect(concise[0]!.compares_against).toBe("SimPO");
-    expect(concise[0]!.snippet).toBe("SimPO | 41.2 | Ours | 44.0");
-    expect("compares_against" in JSON.parse(JSON.stringify(detailed[1]))).toBe(
-      false,
-    );
+    expect(checked).toMatchObject({ conditions: ["compares against SimPO"] });
+    expect("conditions" in unchecked).toBe(false);
+    expect(SearchPapersOutput.safeParse(checked).success).toBe(true);
   });
 
-  it("keeps a checked hit's evidence first even when the abstract holds it", () => {
+  it("keeps a condition's evidence first and labelled, even when the abstract holds it", () => {
     const abstract = `${"x".repeat(300)} We outperform SimPO by 4 points.`;
 
     const evidence = {
       section_name: "Abstract",
       text: "We outperform SimPO by 4 points.",
+      condition: "compares against SimPO",
     };
 
     const chunks = [
@@ -291,28 +284,18 @@ describe("slimSearchResponse", () => {
     ];
 
     const raw = {
-      results: [
-        {
-          id: "p1",
-          abstract,
-          compares_against: "SimPO",
-          matched_chunks: chunks,
-        },
-        { id: "p2", abstract, matched_chunks: chunks },
-      ],
+      results: [{ id: "p1", abstract, matched_chunks: chunks }],
+      conditions: ["compares against SimPO"],
     };
 
-    const [checked, unchecked] = slimSearchResponse(raw).results;
-    const [checkedConcise] = slimSearchResponse(raw, false).results;
+    const [hit] = slimSearchResponse(raw).results;
+    const [conciseHit] = slimSearchResponse(raw, false).results;
 
-    expect(detailed(checked!).contexts.map((c) => c.text)).toEqual([
-      evidence.text,
-      "Our loss",
+    expect(detailed(hit!).contexts.map((c) => [c.text, c.condition])).toEqual([
+      [evidence.text, "compares against SimPO"],
+      ["Our loss", undefined],
     ]);
-    expect(concise(checkedConcise!).snippet).toBe(evidence.text);
-    expect(detailed(unchecked!).contexts.map((c) => c.text)).toEqual([
-      "Our loss",
-    ]);
+    expect(concise(conciseHit!).snippet).toBe(evidence.text);
   });
 
   it("emits an empty contexts array when a hit has no matched_chunks", () => {

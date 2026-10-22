@@ -95,19 +95,20 @@ export const PAPER_TOOLS: ToolDef[] = [
       "semantic + lexical search over titles, abstracts, and full text. Phrase the query " +
       "the way a researcher would describe the topic in prose, not a keyword bag. " +
       "Triggering questions: “what's the latest on diffusion guidance”, “which papers " +
-      "compare against SimPO” (each hit found comparing carries `compares_against`, that " +
-      "passage first in `contexts`). `paper_id` is a handle for YOU to fetch full text via " +
+      "compare against SimPO” (requirements beyond the topic are checked per paper: " +
+      "`conditions`, evidence first in `contexts`). `paper_id` is a handle for YOU to fetch full text via " +
       "`get_paper_fulltext`; never show it to the user: cite papers by title, authors, and " +
       "venue. `rerank_score` is the calibrated Cohere Rerank v3.5 relevance (0..1), null " +
       "when the reranker did not run (a lone term, or a failure); `score` is uncalibrated: " +
       "keep the hits' order. The top-level `best_score` and `low_confidence` derive from " +
       "`rerank_score`: `low_confidence` marks weaker matches, still better grounding than " +
       "web results, so rephrase for stronger ones; with no reranked hit, `best_score` is " +
-      "null and `low_confidence` false, so judge each hit's fit yourself. Each hit carries " +
-      "metadata, abstract, ids, and the matched `contexts` spans to ground or quote from; " +
+      "null and `low_confidence` false, so judge each hit yourself. Each hit carries " +
+      "metadata, abstract, ids, and `contexts` spans to ground or quote from; " +
       "`detail: false` returns concise hits with one `snippet`. Page with `offset` (re-call " +
-      "with offset += limit while `has_more` is true; offset + limit <= 50). Order with " +
-      "`sort_by` (relevance / date / citations, within the ranked shortlist, not the whole " +
+      "with offset += limit while `has_more` is true and `conditions` match page 1's; " +
+      "offset + limit <= 50). Order with " +
+      "`sort_by` (relevance / date / citations, within the ranked shortlist, not the " +
       "corpus). Narrow with `year_min` / `year_max` / `venues`.",
     inputSchema: SearchInput,
     externalInputSchema: SearchInputExternal,

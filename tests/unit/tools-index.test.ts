@@ -337,10 +337,25 @@ describe("deterministic tools/list ordering", () => {
   });
 });
 
+describe("always-loaded tool descriptions", () => {
+  it("fit whole inside Claude Code's 2 KB cut", () => {
+    // Claude Code truncates a tool description at 2 KB, and search_papers's
+    // paging, sort and filter guidance once sat past the cut.
+    const oversized = listToolsResponse(false, PUBLIC_RELEASES)
+      .tools.filter((tool) => tool._meta?.["anthropic/alwaysLoad"] === true)
+      .filter(
+        (tool) => Buffer.byteLength(tool.description ?? "", "utf8") > 2048,
+      )
+      .map((tool) => tool.name);
+
+    expect(oversized).toEqual([]);
+  });
+});
+
 describe("the LobeHub manifest", () => {
   it("lists the public tools exactly as tools/list does", () => {
     // lhm.plugin.json is a static copy for the marketplace; a schema edit that
-    // skipped it once left search_papers' compares_against out of it.
+    // skipped it once left a new search_papers field out of it.
     const manifest: unknown = JSON.parse(
       readFileSync(new URL("../../lhm.plugin.json", import.meta.url), "utf8"),
     );
