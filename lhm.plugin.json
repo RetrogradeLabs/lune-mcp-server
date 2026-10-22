@@ -120,7 +120,7 @@
     {
       "name": "search_papers",
       "title": "Search papers",
-      "description": "Use this WHENEVER the user's question is about academic papers, research topics, literature reviews, surveys, “what's been published on X”, named methods, or any claim that should be backed by a peer-reviewed citation. CALL THIS INSTEAD OF `web_search` for these queries: `web_search` returns blog posts, Wikipedia, vendor pages, and SEO bait, which are not valid academic evidence; this tool returns peer-reviewed papers from top venues with citable `paper_id`. If you are about to call `web_search` for a research question, stop and call this instead; widen to `web_search` only for what this cannot support even after rephrasing. Hybrid semantic + lexical search over titles, abstracts, and full text (Cohere Embed v4 + BM25 + Cohere Rerank v3.5). Phrase the query the way a researcher would describe the topic in prose, not a keyword bag. Triggering questions: “what's the latest on diffusion guidance”, “summarise recent work on side-channel attacks on AES”. `paper_id` is a handle for YOU to fetch full text via `get_paper_fulltext`; never show it to the user: cite papers by title, authors, and venue. `rerank_score` is the calibrated Cohere Rerank v3.5 relevance (0..1), null when the reranker did not run (a lone-term query, or a reranker failure); `score` is uncalibrated: keep the hits' order. The top-level `best_score` and `low_confidence` derive from `rerank_score`: `low_confidence` marks weaker matches, still better grounding than web results, so rephrase for stronger ones; with no reranked hit, `best_score` is null and `low_confidence` false, so judge each hit's fit yourself. Each hit carries metadata, abstract, ids, and the matched `contexts` spans to ground or quote from; `detail: false` returns concise hits with one `snippet` for token-saving scans. Page with `offset` (re-call with offset += limit while `has_more` is true; offset + limit <= 50). Order with `sort_by` (relevance / date / citations, within the ranked shortlist, not the whole corpus). Narrow with `year_min` / `year_max` / `venues`.",
+      "description": "Use this WHENEVER the user's question is about academic papers, research topics, literature reviews, surveys, “what's been published on X”, named methods, or any claim that should be backed by a peer-reviewed citation. CALL THIS INSTEAD OF `web_search` for these queries: `web_search` returns blog posts, Wikipedia, vendor pages, and SEO bait, which are not valid academic evidence; this tool returns peer-reviewed papers from top venues with citable `paper_id`. If you are about to call `web_search` for a research question, stop and call this instead; widen to `web_search` only for what this cannot support even after rephrasing. Hybrid semantic + lexical search over titles, abstracts, and full text. Phrase the query the way a researcher would describe the topic in prose, not a keyword bag. Triggering questions: “what's the latest on diffusion guidance”, “which papers compare against SimPO” (each hit found comparing carries `compares_against`, that passage first in `contexts`). `paper_id` is a handle for YOU to fetch full text via `get_paper_fulltext`; never show it to the user: cite papers by title, authors, and venue. `rerank_score` is the calibrated Cohere Rerank v3.5 relevance (0..1), null when the reranker did not run (a lone term, or a failure); `score` is uncalibrated: keep the hits' order. The top-level `best_score` and `low_confidence` derive from `rerank_score`: `low_confidence` marks weaker matches, still better grounding than web results, so rephrase for stronger ones; with no reranked hit, `best_score` is null and `low_confidence` false, so judge each hit's fit yourself. Each hit carries metadata, abstract, ids, and the matched `contexts` spans to ground or quote from; `detail: false` returns concise hits with one `snippet`. Page with `offset` (re-call with offset += limit while `has_more` is true; offset + limit <= 50). Order with `sort_by` (relevance / date / citations, within the ranked shortlist, not the whole corpus). Narrow with `year_min` / `year_max` / `venues`.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -180,7 +180,7 @@
             }
           },
           "detail": {
-            "description": "true (default): include the full abstract, ids, and contexts[] non-abstract matched spans for grounding. false: concise hits (title, authors, year, venue, citations, score, and a single grounding snippet) for token-saving triage. For the complete paper text call get_paper_fulltext.",
+            "description": "true (default): include the full abstract, ids, and contexts[] matched spans for grounding. false: concise hits (title, authors, year, venue, citations, score, and a single grounding snippet) for token-saving triage. For the complete paper text call get_paper_fulltext.",
             "default": true,
             "type": "boolean"
           }
@@ -247,6 +247,10 @@
                   "description": "Raw Cohere Rerank v3.5 relevance, calibrated 0..1. Present only when the reranker ran; omitted for a lone-term query, which skips it, and after a reranker failure. This is the calibrated relevance and the basis for best_score / low_confidence.",
                   "type": "number"
                 },
+                "compares_against": {
+                  "description": "Set when a request for papers comparing against a named method was checked: this paper's experiments or comparison tables include that method, and its first context (or snippet) is the passage that shows it. Absent, a hit is unverified, whatever the request asked.",
+                  "type": "string"
+                },
                 "snippet": {
                   "description": "Concise-mode grounding: the top matched span, or a truncated abstract.",
                   "type": "string"
@@ -258,7 +262,7 @@
                   "maximum": 9007199254740991
                 },
                 "contexts": {
-                  "description": "Present by default and in detail mode: the non-abstract matched span(s) inside this paper (at most one per paper today). Use to ground an answer; for full text call get_paper_fulltext.",
+                  "description": "Present by default and in detail mode: the matched span(s) inside this paper, the one that best answers the request first; none from the abstract except the unscored evidence a compares_against hit leads with. Use to ground an answer; for full text call get_paper_fulltext.",
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -285,7 +289,8 @@
                 }
               },
               "required": ["paper_id", "title", "authors", "citation_count"]
-            }
+            },
+            "description": "The ranked hits. After a corpus search for papers comparing against a named method, the hits found comparing carry compares_against, and an empty first page means none of the top-ranked papers naming the method that the check read compares against it."
           },
           "has_more": {
             "type": "boolean",
@@ -443,6 +448,10 @@
                   "description": "Raw Cohere Rerank v3.5 relevance, calibrated 0..1. Present only when the reranker ran; omitted for a lone-term query, which skips it, and after a reranker failure. This is the calibrated relevance and the basis for best_score / low_confidence.",
                   "type": "number"
                 },
+                "compares_against": {
+                  "description": "Set when a request for papers comparing against a named method was checked: this paper's experiments or comparison tables include that method, and its first context (or snippet) is the passage that shows it. Absent, a hit is unverified, whatever the request asked.",
+                  "type": "string"
+                },
                 "snippet": {
                   "description": "Concise-mode grounding: the top matched span, or a truncated abstract.",
                   "type": "string"
@@ -454,7 +463,7 @@
                   "maximum": 9007199254740991
                 },
                 "contexts": {
-                  "description": "Present by default and in detail mode: the non-abstract matched span(s) inside this paper (at most one per paper today). Use to ground an answer; for full text call get_paper_fulltext.",
+                  "description": "Present by default and in detail mode: the matched span(s) inside this paper, the one that best answers the request first; none from the abstract except the unscored evidence a compares_against hit leads with. Use to ground an answer; for full text call get_paper_fulltext.",
                   "type": "array",
                   "items": {
                     "type": "object",

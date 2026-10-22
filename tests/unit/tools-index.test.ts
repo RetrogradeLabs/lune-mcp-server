@@ -17,6 +17,7 @@ import {
   type JsonObject,
   type JsonValue,
 } from "../../src/json.js";
+import { readFileSync } from "node:fs";
 import type { MetaObject } from "@modelcontextprotocol/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { KyInstance } from "ky";
@@ -333,6 +334,21 @@ describe("deterministic tools/list ordering", () => {
       "search_research_guidance",
       "get_research_guidance_doc",
     ]);
+  });
+});
+
+describe("the LobeHub manifest", () => {
+  it("lists the public tools exactly as tools/list does", () => {
+    // lhm.plugin.json is a static copy for the marketplace; a schema edit that
+    // skipped it once left search_papers' compares_against out of it.
+    const manifest: unknown = JSON.parse(
+      readFileSync(new URL("../../lhm.plugin.json", import.meta.url), "utf8"),
+    );
+
+    expect(manifest).toHaveProperty(
+      "tools",
+      listToolsResponse(false, PUBLIC_RELEASES).tools,
+    );
   });
 });
 

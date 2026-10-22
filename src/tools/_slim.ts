@@ -125,6 +125,7 @@ interface RawPaper {
   rerank_score?: number | null;
   conference?: RawConference | string | null;
   matched_chunks?: RawMatchedChunk[] | null;
+  compares_against?: string | null;
 }
 
 export function slimPaper(p: RawPaper) {
@@ -154,13 +155,19 @@ function isAbstractSection(section: string | null | undefined): boolean {
  * paper that matched the query, scored by the hybrid retriever) into the slim
  * `contexts` shape surfaced to the agent. The paper abstract is returned as its
  * own field in the enriched search shape, so abstract-section chunks are
- * dropped here to avoid duplicating the same evidence twice.
+ * dropped here to avoid duplicating the same evidence twice. `evidenceFirst`
+ * keeps the first chunk whatever its section: a checked relation hit leads with
+ * the passage its check named, which can be an abstract's comparison claim.
  */
-function slimContexts(chunks: RawMatchedChunk[] | null | undefined) {
+function slimContexts(
+  chunks: RawMatchedChunk[] | null | undefined,
+  evidenceFirst = false,
+) {
   if (!Array.isArray(chunks)) return [];
 
-  return chunks.flatMap((chunk) =>
-    hasText(chunk) && !isAbstractSection(chunk.section_name)
+  return chunks.flatMap((chunk, index) =>
+    hasText(chunk) &&
+    ((evidenceFirst && index === 0) || !isAbstractSection(chunk.section_name))
       ? [
           {
             section: chunk.section_name || undefined,
@@ -214,10 +221,10 @@ const SNIPPET_MAX = 280;
 
 const CONCISE_AUTHOR_LIMIT = 6;
 
-// Prefer top non-abstract context, then a truncated abstract, so concise hits
-// stay grounded.
+// Prefer the top context, then a truncated abstract, so concise hits stay
+// grounded.
 function bestSnippet(p: RawPaper): string | undefined {
-  const chunks = slimContexts(p.matched_chunks);
+  const chunks = slimContexts(p.matched_chunks, Boolean(p.compares_against));
 
   if (chunks.length > 0) return chunks[0]!.text;
   const abstract = p.abstract || "";
@@ -239,12 +246,15 @@ function projectHit(p: RawPaper, detail: boolean) {
     ? p.rerank_score
     : undefined;
 
+  const compares_against = p.compares_against || undefined;
+
   if (detail) {
     return {
       ...base,
       score,
       rerank_score,
-      contexts: slimContexts(p.matched_chunks),
+      compares_against,
+      contexts: slimContexts(p.matched_chunks, Boolean(compares_against)),
     };
   }
 
@@ -260,6 +270,7 @@ function projectHit(p: RawPaper, detail: boolean) {
     citation_count: base.citation_count,
     score,
     rerank_score,
+    compares_against,
     snippet: bestSnippet(p),
   };
 }

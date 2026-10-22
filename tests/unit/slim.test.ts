@@ -251,6 +251,70 @@ describe("slimSearchResponse", () => {
     ]);
   });
 
+  it("keeps a checked hit's compares_against in both shapes and omits an unset one", () => {
+    const raw = {
+      results: [
+        {
+          id: "p1",
+          compares_against: "SimPO",
+          matched_chunks: [
+            { section_name: "Results", text: "SimPO | 41.2 | Ours | 44.0" },
+          ],
+        },
+        { id: "p2", compares_against: null },
+      ],
+    };
+
+    const detailed = slimSearchResponse(raw).results;
+    const concise = slimSearchResponse(raw, false).results;
+
+    expect(detailed[0]!.compares_against).toBe("SimPO");
+    expect(concise[0]!.compares_against).toBe("SimPO");
+    expect(concise[0]!.snippet).toBe("SimPO | 41.2 | Ours | 44.0");
+    expect("compares_against" in JSON.parse(JSON.stringify(detailed[1]))).toBe(
+      false,
+    );
+  });
+
+  it("keeps a checked hit's evidence first even when the abstract holds it", () => {
+    const abstract = `${"x".repeat(300)} We outperform SimPO by 4 points.`;
+
+    const evidence = {
+      section_name: "Abstract",
+      text: "We outperform SimPO by 4 points.",
+    };
+
+    const chunks = [
+      evidence,
+      { section_name: "Method", text: "Our loss" },
+      { section_name: "Abstract", text: "a second abstract chunk" },
+    ];
+
+    const raw = {
+      results: [
+        {
+          id: "p1",
+          abstract,
+          compares_against: "SimPO",
+          matched_chunks: chunks,
+        },
+        { id: "p2", abstract, matched_chunks: chunks },
+      ],
+    };
+
+    const [checked, unchecked] = slimSearchResponse(raw).results;
+    const [checkedConcise] = slimSearchResponse(raw, false).results;
+
+    expect(detailed(checked!).contexts.map((c) => c.text)).toEqual([
+      evidence.text,
+      "Our loss",
+    ]);
+    expect(concise(checkedConcise!).snippet).toBe(evidence.text);
+    expect(detailed(unchecked!).contexts.map((c) => c.text)).toEqual([
+      "Our loss",
+    ]);
+  });
+
   it("emits an empty contexts array when a hit has no matched_chunks", () => {
     const r = slimSearchResponse({ results: [{ id: "p1" }] });
     const hit = detailed(r.results[0]!);

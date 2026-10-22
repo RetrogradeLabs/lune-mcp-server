@@ -95,9 +95,9 @@ export const SearchInput = z.object({
     .optional()
     .describe(
       "true (default): include the full abstract, ids, and contexts[] " +
-        "non-abstract matched spans for grounding. false: concise hits (title, " +
-        "authors, year, venue, citations, score, and a single grounding " +
-        "snippet) for token-saving triage. For the complete paper text call " +
+        "matched spans for grounding. false: concise hits (title, authors, " +
+        "year, venue, citations, score, and a single grounding snippet) for " +
+        "token-saving triage. For the complete paper text call " +
         "get_paper_fulltext.",
     ),
 });

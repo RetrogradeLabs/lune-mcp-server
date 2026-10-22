@@ -153,6 +153,15 @@ const SearchHitOut = PaperOut.extend({
         "after a reranker failure. This is the calibrated relevance and the " +
         "basis for best_score / low_confidence.",
     ),
+  compares_against: z
+    .string()
+    .optional()
+    .describe(
+      "Set when a request for papers comparing against a named method was " +
+        "checked: this paper's experiments or comparison tables include that " +
+        "method, and its first context (or snippet) is the passage that shows " +
+        "it. Absent, a hit is unverified, whatever the request asked.",
+    ),
   snippet: z
     .string()
     .optional()
@@ -168,14 +177,22 @@ const SearchHitOut = PaperOut.extend({
     .array(MatchedContextOut)
     .optional()
     .describe(
-      "Present by default and in detail mode: the non-abstract matched span(s) " +
-        "inside this paper (at most one per paper today). Use to ground an " +
-        "answer; for full text call get_paper_fulltext.",
+      "Present by default and in detail mode: the matched span(s) inside this " +
+        "paper, the one that best answers the request first; none from the " +
+        "abstract except the unscored evidence a compares_against hit leads " +
+        "with. Use to ground an answer; for full text call get_paper_fulltext.",
     ),
 });
 
 export const SearchPapersOutput = z.object({
-  results: z.array(SearchHitOut),
+  results: z
+    .array(SearchHitOut)
+    .describe(
+      "The ranked hits. After a corpus search for papers comparing against a " +
+        "named method, the hits found comparing carry compares_against, and an " +
+        "empty first page means none of the top-ranked papers naming the method " +
+        "that the check read compares against it.",
+    ),
   has_more: z
     .boolean()
     .describe(
