@@ -84,14 +84,10 @@ async function post(
   return { status: res.status, text: await res.text() };
 }
 
-/**
- * Modern requests MUST carry Mcp-Method; absence is a hard -32020.
- * `MCP-Protocol-Version` is OPTIONAL alongside a `_meta` envelope claim (the
- * claim is what classifies the era), so `versionHeader: false` builds the
- * conforming header-less shape.
- */
-function modernHeaders(method: string, name?: string, versionHeader = true) {
-  if (versionHeader && name !== undefined) {
+/** Modern requests MUST carry Mcp-Method and MCP-Protocol-Version; the
+ *  absence of either is a hard -32020. */
+function modernHeaders(method: string, name?: string) {
+  if (name !== undefined) {
     return {
       "Mcp-Method": method,
       "MCP-Protocol-Version": "2026-07-28",
@@ -99,16 +95,7 @@ function modernHeaders(method: string, name?: string, versionHeader = true) {
     };
   }
 
-  if (versionHeader) {
-    return {
-      "Mcp-Method": method,
-      "MCP-Protocol-Version": "2026-07-28",
-    };
-  }
-
-  if (name !== undefined) return { "Mcp-Method": method, "Mcp-Name": name };
-
-  return { "Mcp-Method": method };
+  return { "Mcp-Method": method, "MCP-Protocol-Version": "2026-07-28" };
 }
 
 function resultOf(raw: string) {
@@ -160,6 +147,23 @@ describe("protocol era serving", () => {
         params: { _meta: MODERN_ENVELOPE },
       },
       { "MCP-Protocol-Version": "2026-07-28" },
+    );
+
+    expect(r.status).toBe(400);
+    expect(r.text).toContain("-32020");
+  });
+
+  it("rejects a modern request that omits the MCP-Protocol-Version header", async () => {
+    // The `_meta` claim classifies the era; from SDK 2.1 the header must
+    // still accompany it.
+    const r = await post(
+      {
+        jsonrpc: "2.0",
+        id: 5,
+        method: "tools/list",
+        params: { _meta: MODERN_ENVELOPE },
+      },
+      { "Mcp-Method": "tools/list" },
     );
 
     expect(r.status).toBe(400);
@@ -347,15 +351,9 @@ describe("per-request attribution and the analytics context", () => {
       params?: JsonObject;
       clientInfo?: { name: string; version: string } | null;
       era?: "modern" | "legacy";
-      versionHeader?: boolean;
     } = {},
   ): Promise<number> {
-    const {
-      params = {},
-      clientInfo = CLAUDE_CODE,
-      era = "modern",
-      versionHeader = true,
-    } = opts;
+    const { params = {}, clientInfo = CLAUDE_CODE, era = "modern" } = opts;
 
     const envelope =
       clientInfo === null
@@ -380,7 +378,7 @@ describe("per-request attribution and the analytics context", () => {
       const name = isJsonString(params.name) ? params.name : undefined;
 
       for (const [header, value] of Object.entries(
-        modernHeaders(method, name, versionHeader),
+        modernHeaders(method, name),
       )) {
         headers.set(header, value);
       }
@@ -462,21 +460,6 @@ describe("per-request attribution and the analytics context", () => {
     if (!props) throw new Error("analytics recorder saw no tool call event");
     expect(props.$session_id).toEqual(expect.any(String));
     expect(props.$session_id).not.toBe("client-supplied-session");
-  });
-
-  it("reads the protocol revision off a header-less modern request", async () => {
-    // `MCP-Protocol-Version` is optional once `_meta` carries the claim, and
-    // that claim is what the SDK classifies on. Header-first reports nothing.
-    const status = await call(6, "tools/call", {
-      ...searchCall("header-less modern"),
-      versionHeader: false,
-    });
-
-    expect(status).toBe(200);
-    expect(properties("$mcp_tool_call")).toMatchObject({
-      $mcp_protocol_version: "2026-07-28",
-      $mcp_client_name: "claude-code",
-    });
   });
 
   it("does not leak one client's identity into the next request", async () => {

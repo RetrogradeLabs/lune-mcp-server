@@ -167,11 +167,10 @@ function headerValue(value: string | string[] | undefined): string | undefined {
 }
 
 /**
- * The revision this request declares, envelope FIRST. The SDK classifies a
- * request as modern from the `_meta` envelope claim, not from the header
- * (`classifyRequestBody`), and `MCP-Protocol-Version` is optional alongside
- * that claim, so reading the header first reports no version at all for a
- * conforming header-less modern client. A legacy `initialize` carries the
+ * The revision this request declares, envelope FIRST: the SDK classifies a
+ * request as modern from the `_meta` envelope claim (`classifyRequestBody`),
+ * and from SDK 2.1 refuses one without `MCP-Protocol-Version` (-32020), so on
+ * an admitted modern request the two agree. A legacy `initialize` carries the
  * revision as a plain param; every other legacy request has only the header.
  */
 type ProtocolVersionEnvelope = {
@@ -572,8 +571,8 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
         "Access-Control-Allow-Methods",
         "GET, POST, DELETE, OPTIONS",
       );
-      // `mcp-method` is mandatory on a 2026-07-28 request, so a browser client
-      // without it fails every modern call. `mcp-session-id` stays for legacy.
+      // A 2026-07-28 request needs `mcp-method` and `mcp-protocol-version`;
+      // `mcp-session-id` stays for legacy.
       res.setHeader(
         "Access-Control-Allow-Headers",
         "Authorization, Content-Type, Accept, mcp-session-id, mcp-protocol-version, last-event-id, mcp-method, mcp-name",
