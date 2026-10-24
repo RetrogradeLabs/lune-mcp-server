@@ -857,7 +857,7 @@ describe("get_more_tools (analytics-gated roadmap intake)", () => {
     });
     const properties = eventProperties("$mcp_tool_call");
     expect(properties.$mcp_is_error).toBe(true);
-    expect(properties.$mcp_error_type).toBe("tool_error");
+    expect(properties.$mcp_error_type).toBe("validation");
     expect(properties.$mcp_error_status).toBe("422");
     expect(properties.$mcp_error_message).toContain(
       "fields.0.name: field name 'model_dump' is reserved",

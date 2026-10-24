@@ -279,7 +279,16 @@ async function dispatchToolCall(
             .replace(/^\//, "")
             .replaceAll("/", ".");
 
-          return `${path || "arguments"}: ${issue.message ?? "is invalid"}`;
+          // Ajv's own wording never names the stray key, so an agent retried
+          // the same call not knowing which argument to drop.
+          const extra: JsonValue | undefined =
+            issue.keyword === "additionalProperties"
+              ? issue.params.additionalProperty
+              : undefined;
+
+          return isJsonString(extra)
+            ? `${path || "arguments"}: ${extra} is not an argument of ${name}; remove it`
+            : `${path || "arguments"}: ${issue.message ?? "is invalid"}`;
         })
       : (input.success ? [] : input.error.issues).slice(0, 5).map((issue) => {
           const path = issue.path.map(String).join(".") || "arguments";
@@ -296,6 +305,7 @@ async function dispatchToolCall(
             `Invalid arguments for ${name}:`,
             ...issues,
             "Correct the named arguments before retrying.",
+            "error_type=validation",
           ].join("\n"),
         },
       ],

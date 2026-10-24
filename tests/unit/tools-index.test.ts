@@ -552,7 +552,9 @@ describe("dispatchToolCall", () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(toolText(result)).toContain("additional properties");
+    expect(toolText(result)).toContain(
+      "invented is not an argument of search_papers",
+    );
   });
 
   it("returns a model-readable error when successful output violates outputSchema", async () => {
@@ -728,7 +730,9 @@ describe("registerAllTools", () => {
     );
 
     expect(result.isError).toBe(true);
-    expect(toolText(result)).toContain("additional properties");
+    expect(toolText(result)).toContain(
+      "source is not an argument of search_papers",
+    );
   });
 
   it("the tools/call handler returns an isError result on a 429 (does not crash the session)", async () => {

@@ -490,13 +490,17 @@ describe("toToolError", () => {
   it("omits the footer entirely when no actionable fields are present", () => {
     const r = toToolError(mapHttpError(404, { detail: "paper not found" }));
     expect(r.isError).toBe(true);
-    // 404 carries only `status` in data; status surfaces as http_status.
+    // 404 carries only `status` in data, which surfaces as http_status and
+    // the error_type analytics groups by.
     expect(r.content[0]!.text).toBe(
-      "paper not found If you do not have a valid paper_id, call search_papers first. " +
+      "paper not found Copy a paper_id exactly as a result gave it: a retyped " +
+        "or shortened id names no paper. If you do not have a valid paper_id, " +
+        "call search_papers first. " +
         "The id must match the source: a corpus paper_id comes from search_papers " +
         "(source=corpus); a workspace document id comes from " +
         "search_papers(source=workspace) and must be used with source=workspace; a " +
-        "guidance doc_id comes from search_research_guidance.\nhttp_status=404",
+        "guidance doc_id comes from search_research_guidance.\n" +
+        "http_status=404 error_type=not_found",
     );
   });
 

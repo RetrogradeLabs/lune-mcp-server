@@ -365,7 +365,8 @@ function quotaMessageFor(
 // Paper 404s usually mix corpus, workspace, or guidance ids; name each
 // namespace so agents can correct the source.
 const PAPER_NOT_FOUND_STEER =
-  " If you do not have a valid paper_id, call search_papers first. The id " +
+  " Copy a paper_id exactly as a result gave it: a retyped or shortened id " +
+  "names no paper. If you do not have a valid paper_id, call search_papers first. The id " +
   "must match the source: a corpus paper_id comes from search_papers " +
   "(source=corpus); a workspace document id comes from " +
   "search_papers(source=workspace) and must be used with source=workspace; a " +
@@ -542,7 +543,9 @@ function invalidParamsError(
   body: ApiErrorBody,
   base: ErrorEnvelope,
 ): MappedError {
-  const lines = validationLines(body);
+  // FastAPI's own 422 lists fields; Lune's checks (a venue, a page window)
+  // send one plain reason, which is just as much the fix to name.
+  const lines = validationLines(body) ?? asText(body.detail);
 
   return {
     code: LuneErrorCode.InvalidParams,
@@ -607,6 +610,26 @@ export function mapHttpError(
   }
 }
 
+const STATUS_ERROR_TYPES = new Map([
+  [401, "permission"],
+  [403, "permission"],
+  [404, "not_found"],
+  [422, "validation"],
+  [429, "rate_limited"],
+]);
+
+/** What `$mcp_error_type` records for an upstream failure, so analytics tells
+ *  a quota refusal or a caller's bad argument from a broken tool. */
+function errorType(data: JsonObject): string {
+  if (isJsonString(data.quota_reason)) return `quota_${data.quota_reason}`;
+
+  const status = isJsonNumber(data.status) ? data.status : 0;
+
+  return (
+    STATUS_ERROR_TYPES.get(status) ?? (status >= 500 ? "api_5xx" : "api_4xx")
+  );
+}
+
 /**
  * Render a mapped upstream error as an MCP tool execution error (`isError: true`
  * + a text block), NOT a JSON-RPC protocol error: per the MCP spec, tool
@@ -615,7 +638,7 @@ export function mapHttpError(
  * HTTP failure (incl. 429/402) belongs here.
  *
  * The footer appends the actionable fields (retry_after_seconds, buy_credits_url,
- * quota_reason, quota_resets_at, http_status) as one space-joined `k=v` line so a
+ * quota_reason, quota_resets_at, http_status, error_type) as one space-joined `k=v` line so a
  * consumer can parse them from `content`, the only channel every client forwards.
  * That line is also how the dashboard timeline labels a quota step
  * (`_error_step_detail` reads `quota_reason=`) without pattern-matching our
@@ -641,7 +664,10 @@ export function toToolError(m: MappedError): ToolCallResult {
     footer.push(`quota_resets_at=${data.resets_at}`);
   }
 
-  if (isJsonNumber(data.status)) footer.push(`http_status=${data.status}`);
+  if (isJsonNumber(data.status)) {
+    footer.push(`http_status=${data.status}`, `error_type=${errorType(data)}`);
+  }
+
   const text = footer.length ? `${m.message}\n${footer.join(" ")}` : m.message;
 
   return { content: [{ type: "text", text }], isError: true };
@@ -821,7 +847,7 @@ export async function httpErrorToToolResult(
           type: "text",
           text:
             `The Lune API request${label} timed out or the connection dropped before a ` +
-            `response. This is usually transient; retry the call.`,
+            `response. This is usually transient; retry the call.\nerror_type=timeout`,
         },
       ],
       isError: true,

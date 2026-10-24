@@ -558,7 +558,7 @@ export const GatherEvidenceOutput = z.object({
     )
     .nullable()
     .describe(
-      "Per-sentence support for a supplied draft, or null when no draft was sent.",
+      "Per-sentence support for a supplied draft; null when no draft was sent or the check did not finish (stop_reason says time_budget when the time budget cut it).",
     ),
   queries_failed: z
     .array(z.object({ query: z.string(), reason: z.string() }))
