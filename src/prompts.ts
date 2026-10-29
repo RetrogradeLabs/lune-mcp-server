@@ -55,8 +55,8 @@ function present(value: string | undefined): value is string {
 
 const CITE_RULE =
   "Cite every paper by title, authors, and venue/year (a paper_id is only your " +
-  "fetch handle, never show it to me). Use Lune's tools, not web search, and " +
-  "widen to the web only for what Lune cannot support even after rephrasing.";
+  "fetch handle, never show it to me). Ground claims in what Lune's tools return, " +
+  "quoting a passage wherever a tool returned one.";
 
 export const PROMPTS: PromptDef[] = [
   {
@@ -276,7 +276,7 @@ export const PROMPTS: PromptDef[] = [
     title: "Fact-check a draft",
     description:
       "Fact-check a paragraph or list of claims against the peer-reviewed corpus, with a " +
-      "verbatim supporting quote per claim.",
+      "verbatim quote for every claim the corpus settles.",
     arguments: [
       {
         name: "draft",
@@ -294,12 +294,13 @@ export const PROMPTS: PromptDef[] = [
         "Steps:",
         "1. Break the text into atomic, individually checkable claims (one assertion each).",
         "2. Call verify_claims with those claims (up to 25 per call). Each verdict is grounded " +
-          "ONLY in retrieved passages and carries a server-verified verbatim quote.",
+          "ONLY in retrieved passages; a supported or unsupported one carries a " +
+          "server-verified verbatim quote.",
         "3. Report per claim: the verdict (supported / unsupported / insufficient_evidence), " +
-          "the supporting quote and its paper, and the confidence. Clearly flag every claim " +
+          "its quote and paper when it has them, and the confidence. Clearly flag every claim " +
           "that is unsupported or has insufficient evidence so I can fix or hedge it.",
         "",
-        "Do not assert anything from memory. " + CITE_RULE,
+        CITE_RULE,
       ].join("\n"),
   },
   {

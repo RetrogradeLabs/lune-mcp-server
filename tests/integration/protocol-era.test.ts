@@ -587,15 +587,15 @@ describe("the analytics context handed to each per-request server", () => {
     }
   }
 
-  it("withholds get_more_tools from a principal who opted out of capture", async () => {
+  it("withholds request_capability from a principal who opted out of capture", async () => {
     expect(
       await listedTools({ suppressAnalytics: true, captureAllowed: false }),
-    ).not.toContain("get_more_tools");
+    ).not.toContain("request_capability");
   });
 
   it("keeps offering it to a principal who allows capture", async () => {
     expect(await listedTools({ captureAllowed: true })).toContain(
-      "get_more_tools",
+      "request_capability",
     );
   });
 
@@ -604,7 +604,7 @@ describe("the analytics context handed to each per-request server", () => {
     // budget runs out, and a telemetry quota must not move the tool surface.
     expect(
       await listedTools({ suppressAnalytics: false, captureAllowed: false }),
-    ).toContain("get_more_tools");
+    ).toContain("request_capability");
   });
 });
 

@@ -364,7 +364,7 @@ export { dispatchToolCall };
  * signal. Local stdio installs never see the tool (analytics is never
  * initialized there), so the published tool surface is unchanged for them.
  */
-const GET_MORE_TOOLS_SCHEMA = z.object({
+const REQUEST_CAPABILITY_SCHEMA = z.object({
   capability: z
     .string()
     .min(1)
@@ -375,14 +375,15 @@ const GET_MORE_TOOLS_SCHEMA = z.object({
     ),
 });
 
-export const GET_MORE_TOOLS_DEF = {
-  name: "get_more_tools",
+export const REQUEST_CAPABILITY_DEF = {
+  name: "request_capability",
   title: "Request a missing capability",
   description:
     "Call this when the research task needs something Lune's tools cannot do " +
-    "yet (a data source, a filter, an analysis). The request is recorded for " +
-    "the roadmap; omit private details. It does not add tools to this session.",
-  inputSchema: jsonSchema(GET_MORE_TOOLS_SCHEMA),
+    "yet (a data source, a filter, an analysis). Lune queues the request for " +
+    "the roadmap and the reply says whether it was accepted; omit private " +
+    "details. It does not add tools to this session.",
+  inputSchema: jsonSchema(REQUEST_CAPABILITY_SCHEMA),
   annotations: {
     readOnlyHint: false,
     destructiveHint: false,
@@ -497,14 +498,14 @@ export function registerAllTools(
         return response as ListToolsResult;
       }
 
-      const tools = [...response.tools, GET_MORE_TOOLS_DEF];
+      const tools = [...response.tools, REQUEST_CAPABILITY_DEF];
       // Fires per REQUEST (the HTTP handler builds a server per request), so a
       // de-dup flag here is dead code; repeat lists spend the analytics budget.
       captureMcp("$mcp_tools_list", server, analyticsContext?.(), {
         $mcp_listed_tool_names: tools.map((tool) => tool.name),
       });
 
-      // SAFETY: same entries as above plus `GET_MORE_TOOLS_DEF`, whose schema
+      // SAFETY: same entries as above plus `REQUEST_CAPABILITY_DEF`, whose schema
       // comes from the same `jsonSchema` helper.
       return { tools } as ListToolsResult;
     },
@@ -533,10 +534,10 @@ export function registerAllTools(
       // the tool schema before handlers see them.
       const args = (req.params.arguments ?? {}) as JsonObject;
 
-      if (name === "get_more_tools" && analyticsEnabled()) {
+      if (name === "request_capability" && analyticsEnabled()) {
         // Bad args resolve to an isError result, never a thrown protocol error:
         // this tool exists to listen, so a malformed request is itself signal.
-        const parsed = GET_MORE_TOOLS_SCHEMA.safeParse(args);
+        const parsed = REQUEST_CAPABILITY_SCHEMA.safeParse(args);
 
         const captured = captureMcp(
           "$mcp_missing_capability",
@@ -557,7 +558,7 @@ export function registerAllTools(
               {
                 type: "text",
                 text:
-                  "get_more_tools needs a `capability` string describing " +
+                  "request_capability needs a `capability` string describing " +
                   "what you were trying to do.",
               },
             ],

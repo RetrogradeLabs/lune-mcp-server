@@ -92,12 +92,17 @@ export const READ_ONLY_OPEN: ToolAnnotations = {
  * ignore the unknown `_meta` key). Set on the 1-3 cold-start entry tools only:
  * each always-loaded tool spends context, and Claude Code truncates server
  * `instructions` at 2KB, so an entry tool's own description (which carries the
- * "use this for research, not web_search" trigger) being present upfront is what
- * makes Lune reliably selected without a `ToolSearch` hop. See the MCP server design notes.
+ * research trigger) being present upfront is what makes Lune reliably selected
+ * without a `ToolSearch` hop. See the MCP server design notes.
  */
 export const ALWAYS_LOAD_META = {
   "anthropic/alwaysLoad": true,
 } satisfies JsonObject;
+
+/** Directory review refuses comparisons with alternatives and "prefer this"
+ *  instructions in anything we expose; see the MCP server design notes. */
+export const COMPARATIVE_WORDING =
+  /web[_ ]?search|\bSEO\b|open web|than (?:the )?web|blog posts|Substack|instead of `|prefer (?:this|it|lune)\b|your default|plausible guess|from memory|(?:use|call) (?:this|it)\b[^.]{0,120}\binstead of\b/i;
 
 /**
  * `_meta` hint that keeps a large result in the conversation. Claude Code saves

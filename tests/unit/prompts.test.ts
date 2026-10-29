@@ -20,9 +20,11 @@ import {
 import {
   answeredView,
   fixedReleases,
+  PUBLIC_RELEASES,
   UNANSWERED_VIEW,
   type ReleaseView,
 } from "../../src/releases.js";
+import { COMPARATIVE_WORDING } from "../../src/tools/_shared.js";
 
 const text = (name: string, args: Record<string, string>) =>
   getPromptResult(name, args).messages[0]!.content.text;
@@ -69,6 +71,26 @@ describe("listPrompts", () => {
       "trace_citations",
       "research_methodology",
     ]);
+  });
+});
+
+describe("directory listing policy", () => {
+  it.each([
+    ["public", PUBLIC_RELEASES],
+    ["figures-released", FIGURES_RELEASED],
+  ])("no %s prompt compares Lune with an alternative", (_label, releases) => {
+    // Directories read prompts/list and prompts/get as well as the tools.
+    for (const prompt of listPrompts(releases).prompts) {
+      const args = Object.fromEntries(
+        prompt.arguments.map((arg) => [arg.name, "a topic"]),
+      );
+
+      const rendered = getPromptResult(prompt.name, args, releases);
+
+      expect(JSON.stringify([prompt, rendered])).not.toMatch(
+        COMPARATIVE_WORDING,
+      );
+    }
   });
 });
 

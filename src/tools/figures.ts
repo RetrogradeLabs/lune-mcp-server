@@ -96,7 +96,7 @@ export const FIGURE_TOOLS: ToolDef[] = [
     release: "figures",
     title: "Search figure design references",
     description:
-      "CALL THIS INSTEAD OF `web_search` when the user is drawing a figure for a " +
+      "Use when the user is drawing a figure for a " +
       "paper: a teaser, a system or architecture overview, a method pipeline, a " +
       "qualitative results grid. Describe the FIGURE you need, not the research " +
       'topic ("a system overview where data flows left to right through three ' +

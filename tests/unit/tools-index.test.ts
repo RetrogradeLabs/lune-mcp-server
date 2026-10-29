@@ -27,13 +27,16 @@ import {
   listToolsResponse,
   registerAllTools,
   requiredScopeForTool,
+  REQUEST_CAPABILITY_DEF,
 } from "../../src/tools/index.js";
+import { COMPARATIVE_WORDING } from "../../src/tools/_shared.js";
 import {
   answeredView,
   fixedReleases,
   PUBLIC_RELEASES,
   UNANSWERED_VIEW,
 } from "../../src/releases.js";
+import { listPrompts } from "../../src/prompts.js";
 import { registerResources } from "../../src/resources.js";
 import { TOOL_RESPONSE_CACHE } from "../../src/cache.js";
 import { GatherEvidenceOutput } from "../../src/tools/_outputs.js";
@@ -194,7 +197,7 @@ describe("credential-aware tools/list (workspace source hiding)", () => {
   });
 });
 
-describe("alwaysLoad entry tools (tool-selection: get picked over web_search)", () => {
+describe("alwaysLoad entry tools (tool-selection: present at decision time)", () => {
   // Entry tools carry `_meta["anthropic/alwaysLoad"]` so a client running MCP
   // tool search keeps them un-deferred. Why three: the MCP server design notes.
   const ENTRY_TOOLS = [
@@ -297,12 +300,23 @@ describe("alwaysLoad entry tools (tool-selection: get picked over web_search)", 
       (d) => d.name === "search_papers_many",
     )!;
 
-    // Front-loaded intent + the prefer-over-web_search trigger survive Claude
-    // Code's 2KB description truncation only if they are near the start.
+    // Front-loaded intent survives Claude Code's 2KB description truncation
+    // only if it is near the start.
     expect(t.description.slice(0, 400)).toMatch(/literature sweep/i);
-    expect(t.description.slice(0, 400)).toContain("web_search");
     // Cross-reference that routes single questions to the cheaper entry tool.
     expect(t.description).toContain("use `search_papers` instead");
+  });
+});
+
+describe("directory listing policy", () => {
+  it("never compares Lune with web search or tells an agent to prefer it", () => {
+    // The hosted-only roadmap tool is outside listToolsResponse, so add it.
+    const listed = JSON.stringify([
+      listToolsResponse(true, FIGURES_RELEASED),
+      REQUEST_CAPABILITY_DEF,
+    ]);
+
+    expect(listed).not.toMatch(COMPARATIVE_WORDING);
   });
 });
 
@@ -363,6 +377,17 @@ describe("the LobeHub manifest", () => {
     expect(manifest).toHaveProperty(
       "tools",
       listToolsResponse(false, PUBLIC_RELEASES).tools,
+    );
+  });
+
+  it("lists the public prompts exactly as prompts/list does", () => {
+    const manifest: unknown = JSON.parse(
+      readFileSync(new URL("../../lhm.plugin.json", import.meta.url), "utf8"),
+    );
+
+    expect(manifest).toHaveProperty(
+      "prompts",
+      listPrompts(PUBLIC_RELEASES).prompts,
     );
   });
 });

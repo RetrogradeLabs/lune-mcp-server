@@ -221,8 +221,8 @@ export const SearchPapersOutput = z.object({
     .boolean()
     .describe(
       "True when the best rerank_score fell below the relevance floor: these " +
-        "are weaker matches, still better grounding than web results, so " +
-        "rephrase for stronger ones. False when a hit cleared the floor, and " +
+        "are weaker matches, so rephrase for stronger ones and still cite a " +
+        "hit that fits. False when a hit cleared the floor, and " +
         "also when no hit was reranked or there were no results: best_score " +
         "is then null, so there is no calibrated basis and you judge each " +
         "hit's fit yourself.",

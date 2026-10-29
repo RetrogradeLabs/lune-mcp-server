@@ -1,7 +1,7 @@
 /**
  * MCP analytics: env gating (the published stdio binary must never emit), the
  * PostHog wire shape ($mcp_* contract), client-attribution headers, the HTTP
- * transport's identity helper, and the analytics-gated `get_more_tools`
+ * transport's identity helper, and the analytics-gated `request_capability`
  * roadmap tool.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -655,12 +655,12 @@ describe("analyticsIdentityOf", () => {
   });
 });
 
-describe("get_more_tools (analytics-gated roadmap intake)", () => {
+describe("request_capability (analytics-gated roadmap intake)", () => {
   it("is absent from tools/list when analytics is disabled (local installs)", async () => {
     const { server, handler } = createFakeServer();
     registerAllTools(server, () => fakeKy());
     const res = await handler<ToolsListResult>("tools/list")({});
-    expect(res.tools.map((t) => t.name)).not.toContain("get_more_tools");
+    expect(res.tools.map((t) => t.name)).not.toContain("request_capability");
   });
 
   it("is listed and records $mcp_missing_capability when enabled", async () => {
@@ -676,11 +676,11 @@ describe("get_more_tools (analytics-gated roadmap intake)", () => {
       }),
     );
     const res = await handler<ToolsListResult>("tools/list")({});
-    expect(res.tools.map((t) => t.name)).toContain("get_more_tools");
+    expect(res.tools.map((t) => t.name)).toContain("request_capability");
 
     const result = await handler<ToolCallResult>("tools/call")({
       params: {
-        name: "get_more_tools",
+        name: "request_capability",
         arguments: { capability: "search preprint servers" },
       },
     });
@@ -704,7 +704,7 @@ describe("get_more_tools (analytics-gated roadmap intake)", () => {
 
     const result = await handler<ToolCallResult>("tools/call")({
       params: {
-        name: "get_more_tools",
+        name: "request_capability",
         arguments: { capability: "search preprint servers" },
       },
     });

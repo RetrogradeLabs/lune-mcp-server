@@ -157,7 +157,7 @@ export interface McpAnalyticsContext {
    * The principal opted OUT of capture, permanently. NARROWER than
    * `captureEnabled: false`, which is also how a spent daily event budget
    * arrives. Both stop capture; only this one may shape what the agent is
-   * offered (`tools/index.ts`, `get_more_tools`).
+   * offered (`tools/index.ts`, `request_capability`).
    */
   captureOptOut?: boolean;
   workspaceCredential?: boolean;

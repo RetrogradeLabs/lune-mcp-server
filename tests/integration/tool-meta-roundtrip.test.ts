@@ -5,7 +5,7 @@
  * SDK's own `ListToolsResult` validator), not just our local
  * `listToolsResponse()`. The hint is what keeps `search_papers` /
  * `search_papers_many` / `search_research_guidance` un-deferred in Claude Code so
- * their full descriptions (with the "use Lune, not web_search" trigger) are in
+ * their full descriptions (with the research trigger) are in
  * context from turn 1. If a future SDK started stripping unrecognized-looking
  * `_meta`, the unit test on `listToolsResponse()` would still pass while real
  * clients silently lost the hint; this catches that.

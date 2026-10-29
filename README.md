@@ -4,8 +4,8 @@
 
 The official [Lune Research](https://luneresearch.com) MCP server. It lets an
 AI agent search the full text of papers from top-tier venues, follow citations,
-and look up curated research-methodology guidance, so its answers can cite a
-paper's title, authors and venue instead of relying on memory.
+and look up curated research-methodology guidance, so its answers can cite each
+paper by title, authors and venue.
 
 ## Install
 
@@ -72,9 +72,9 @@ stderr, never stdout, so JSON-RPC framing stays intact.
 
 Twelve tools. Most follow a prefix: `search_*` finds candidates, `get_*`
 retrieves something you already have a handle on, and `list_*` browses. The
-hosted endpoint also offers `get_more_tools`, which an agent calls to tell Lune
-about a capability it needed and could not find. The stdio package does not
-include it.
+hosted endpoint also offers `request_capability`, which an agent calls to tell Lune
+about a capability it needed and could not find; its reply says whether Lune
+accepted the request. The stdio package does not include it.
 
 **Finding papers**
 

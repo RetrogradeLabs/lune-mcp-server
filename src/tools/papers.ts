@@ -84,14 +84,11 @@ export const PAPER_TOOLS: ToolDef[] = [
     requiredScope: "papers:read",
     title: "Search papers",
     description:
-      "Use this WHENEVER the user's question is about academic papers, research topics, " +
-      "literature reviews, surveys, “what's been published on X”, named methods, or any " +
-      "claim that should be backed by a peer-reviewed citation. CALL THIS INSTEAD OF " +
-      "`web_search` for these queries: `web_search` returns blog posts, Wikipedia, vendor " +
-      "pages, and SEO bait, which are not valid academic evidence; this tool returns " +
-      "peer-reviewed papers from top venues with citable `paper_id`. If you are about to " +
-      "call `web_search` for a research question, stop and call this instead; widen to " +
-      "`web_search` only for what this cannot support even after rephrasing. Hybrid " +
+      "Searches full-text, peer-reviewed papers from top-tier venues. Use for questions " +
+      "about academic papers, research topics, literature reviews, surveys, “what's been " +
+      "published on X”, named methods, or any claim that should be backed by a " +
+      "peer-reviewed citation. Returns each paper's metadata and the passages that " +
+      "matched. Hybrid " +
       "semantic + lexical search over titles, abstracts, and full text. Phrase the query " +
       "the way a researcher would describe the topic in prose, not a keyword bag. " +
       "Triggering questions: “what's the latest on diffusion guidance”, “which papers " +
@@ -101,8 +98,8 @@ export const PAPER_TOOLS: ToolDef[] = [
       "venue. `rerank_score` is the calibrated Cohere Rerank v3.5 relevance (0..1), null " +
       "when the reranker did not run (a lone term, or a failure); `score` is uncalibrated: " +
       "keep the hits' order. The top-level `best_score` and `low_confidence` derive from " +
-      "`rerank_score`: `low_confidence` marks weaker matches, still better grounding than " +
-      "web results, so rephrase for stronger ones; with no reranked hit, `best_score` is " +
+      "`rerank_score`: `low_confidence` marks weaker matches, so rephrase for stronger ones " +
+      "and still cite a hit that fits; with no reranked hit, `best_score` is " +
       "null and `low_confidence` false, so judge each hit yourself. Each hit carries " +
       "metadata, abstract, ids, and `contexts` spans to ground or quote from; " +
       "`detail: false` returns concise hits with one `snippet`. Page with `offset` (re-call " +
@@ -121,11 +118,10 @@ export const PAPER_TOOLS: ToolDef[] = [
     requiredScope: "papers:read",
     title: "Search papers (multi-query)",
     description:
-      "Use this for a LITERATURE SWEEP or survey: a research question broad enough to need " +
+      "Use for a LITERATURE SWEEP or survey: a research question broad enough to need " +
       'several angles, e.g. "what\'s been done on X", a related-work section, or a ' +
-      "state-of-the-field summary. Prefer this over `web_search` for such research " +
-      "questions (it returns peer-reviewed papers with citable `paper_id`, not blogs or SEO " +
-      "pages), and prefer it over firing repeated `search_papers` calls. For a single " +
+      "state-of-the-field summary. One call returns one merged, ranked list of the papers " +
+      "the angles found, with the passages that matched. For a single " +
       "focused question, use `search_papers` instead. " +
       "Runs 1 to 25 query variants in ONE call and gets back a single deduped, RRF-merged " +
       "ranked list with per-paper provenance (`matched_queries`: which of your queries, by " +
@@ -241,8 +237,8 @@ export const PAPER_TOOLS: ToolDef[] = [
       "`description`) and an `instruction`, and the server reads each paper's full " +
       "text and returns one typed row per paper. Use this when you need the SAME " +
       'facts across many papers, e.g. "dataset, model size, and reported accuracy ' +
-      'for each of these papers", instead of reading each full text yourself and ' +
-      "transcribing by hand. Pass `sections` (case-insensitive headings, e.g. " +
+      'for each of these papers": one call reads every paper and returns the table. ' +
+      "Pass `sections` (case-insensitive headings, e.g. " +
       '["Results"]) to focus extraction and cut noise. The model is instructed to ' +
       "use only what each paper states, not to infer; a field it can't ground may " +
       "be absent or null. Each row carries `truncated` (true when the paper's text " +
@@ -269,7 +265,7 @@ export const PAPER_TOOLS: ToolDef[] = [
       "outside knowledge), returning one verdict per claim: `supported`, " +
       "`unsupported`, or `insufficient_evidence`. Use this to ground a draft " +
       "before you assert it, to vet a user's claim, or to check your own answer " +
-      "against the literature instead of stating things from memory. Every verdict " +
+      "against the literature. Every verdict " +
       "carries a `verbatim_quote` copied EXACTLY from a retrieved passage (or null " +
       "when nothing could be quoted, e.g. an insufficient_evidence verdict) plus " +
       "`supporting_paper_ids` (the corpus papers the verdict relied on); both are " +
