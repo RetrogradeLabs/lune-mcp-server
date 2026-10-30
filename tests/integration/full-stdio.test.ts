@@ -106,6 +106,7 @@ const EXPECTED_TOOLS = [
   "gather_evidence",
   "search_related_papers",
   "search_research_guidance",
+  "send_feedback",
 ].sort();
 
 // Every setting only the hosted server must inject. The API target stays set, to

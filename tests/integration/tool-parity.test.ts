@@ -15,18 +15,19 @@ const PUBLIC_TOOL_NAMES = [
   "gather_evidence",
   "search_related_papers",
   "search_research_guidance",
+  "send_feedback",
 ];
 
 const FIGURES_RELEASED = { figures: true };
 
 describe("tool catalog parity", () => {
-  it("exposes the 12 public tools with stable names", () => {
+  it("exposes the 13 public tools with stable names", () => {
     const r = listToolsResponse();
     const names = r.tools.map((t) => t.name).sort();
     expect(names).toEqual([...PUBLIC_TOOL_NAMES].sort());
   });
 
-  it("adds the two figure tools, 14 in all, only where Figures is released", () => {
+  it("adds the two figure tools, 15 in all, only where Figures is released", () => {
     const names = listToolsResponse(true, FIGURES_RELEASED)
       .tools.map((t) => t.name)
       .sort();

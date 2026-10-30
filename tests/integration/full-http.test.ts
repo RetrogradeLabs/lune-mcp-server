@@ -306,7 +306,7 @@ describe("HTTP transport", () => {
     const listResult = jsonObject(listBody.result, "tools/list result");
     // No credential probe runs under test, so this credential was released
     // nothing and sees the public catalog.
-    expect(jsonObjects(listResult.tools, "tools")).toHaveLength(12);
+    expect(jsonObjects(listResult.tools, "tools")).toHaveLength(13);
 
     // 3. The 2025 session verbs are declined without ceremony: there is no
     // standalone stream to open and nothing to tear down.

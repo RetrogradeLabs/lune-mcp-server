@@ -19,6 +19,7 @@ import {
   type McpServerLike,
 } from "../analytics.js";
 import { fetchMcpContext } from "../api/mcp-context.js";
+import { httpErrorToToolResult, isUnconfirmedDelivery } from "../errors.js";
 import {
   isJsonObject,
   isJsonString,
@@ -36,6 +37,11 @@ import {
 import { PAPER_TOOLS, callPaperTool } from "./papers.js";
 import { GUIDANCE_TOOLS, callGuidanceTool } from "./guidance.js";
 import { FIGURE_TOOLS, callFigureTool } from "./figures.js";
+import {
+  AGENT_FEEDBACK_PATH,
+  FEEDBACK_TOOLS,
+  callFeedbackTool,
+} from "./feedback.js";
 import { wireContent } from "../tool-result.js";
 import type { ToolCallResult, ToolDef } from "./_shared.js";
 
@@ -45,6 +51,7 @@ const ALL_TOOLS: readonly ToolDef[] = [
   ...PAPER_TOOLS,
   ...FIGURE_TOOLS,
   ...GUIDANCE_TOOLS,
+  ...FEEDBACK_TOOLS,
 ];
 
 const TOOLS_BY_NAME = new Map(ALL_TOOLS.map((tool) => [tool.name, tool]));
@@ -155,11 +162,22 @@ function traceContextHeaders(ctx?: ServerContext): Record<string, string> {
   );
 }
 
-const PAPER_NAMES = new Set(PAPER_TOOLS.map((t) => t.name));
+type ToolHandler = (
+  api: KyInstance,
+  name: string,
+  args: JsonValue,
+) => Promise<ToolCallResult>;
 
-const GUIDANCE_NAMES = new Set(GUIDANCE_TOOLS.map((t) => t.name));
-
-const FIGURE_NAMES = new Set(FIGURE_TOOLS.map((t) => t.name));
+const HANDLERS = new Map<string, ToolHandler>(
+  (
+    [
+      [PAPER_TOOLS, callPaperTool],
+      [FIGURE_TOOLS, callFigureTool],
+      [GUIDANCE_TOOLS, callGuidanceTool],
+      [FEEDBACK_TOOLS, callFeedbackTool],
+    ] as const
+  ).flatMap(([tools, handler]) => tools.map((t) => [t.name, handler] as const)),
+);
 
 export function getAllToolDefinitions(): readonly ToolDef[] {
   return ALL_TOOLS;
@@ -317,15 +335,11 @@ async function dispatchToolCall(
   // erases that JSON type.
   const parsedArgs = input.data as JsonValue;
 
-  if (PAPER_NAMES.has(name)) {
-    result = await callPaperTool(api, name, parsedArgs);
-  } else if (FIGURE_NAMES.has(name)) {
-    result = await callFigureTool(api, name, parsedArgs);
-  } else if (GUIDANCE_NAMES.has(name)) {
-    result = await callGuidanceTool(api, name, parsedArgs);
-  } else {
-    throw new Error(`Tool ${name} has no registered handler`);
-  }
+  const handler = HANDLERS.get(name);
+
+  if (!handler) throw new Error(`Tool ${name} has no registered handler`);
+
+  result = await handler(api, name, parsedArgs);
 
   const outputValidator = OUTPUT_VALIDATORS.get(name);
 
@@ -360,27 +374,30 @@ export { dispatchToolCall };
 /**
  * Roadmap intake, registered ONLY when analytics is enabled (the remote
  * deployment): an agent that needs a capability Lune lacks invokes this, and
- * the request lands as `$mcp_missing_capability`, a direct unmet-demand
- * signal. Local stdio installs never see the tool (analytics is never
- * initialized there), so the published tool surface is unchanged for them.
+ * the request lands in the feedback inbox and as `$mcp_missing_capability`, a
+ * direct unmet-demand signal. Local stdio installs never see the tool
+ * (analytics is never initialized there), so their tool surface omits it.
  */
-const REQUEST_CAPABILITY_SCHEMA = z.object({
-  capability: z
-    .string()
-    .min(1)
-    .max(500)
-    .describe(
-      "Describe the missing capability generically in one or two sentences. " +
-        "Do not include user text, names, emails, credentials, or draft content.",
-    ),
-});
+const REQUEST_CAPABILITY_SCHEMA = z
+  .object({
+    capability: z
+      .string()
+      .trim()
+      .min(3)
+      .max(500)
+      .describe(
+        "Describe the missing capability generically in one or two sentences. " +
+          "Do not include user text, names, emails, credentials, or draft content.",
+      ),
+  })
+  .strict();
 
 export const REQUEST_CAPABILITY_DEF = {
   name: "request_capability",
   title: "Request a missing capability",
   description:
     "Call this when the research task needs something Lune's tools cannot do " +
-    "yet (a data source, a filter, an analysis). Lune queues the request for " +
+    "yet (a data source, a filter, an analysis). Lune records the request for " +
     "the roadmap and the reply says whether it was accepted; omit private " +
     "details. It does not add tools to this session.",
   inputSchema: jsonSchema(REQUEST_CAPABILITY_SCHEMA),
@@ -420,6 +437,14 @@ function errorFacts(result: ToolCallResult): ErrorFacts {
   if (status) facts.$mcp_error_status = status;
 
   return facts;
+}
+
+function onTheWire(result: ToolCallResult): CallToolResult {
+  const { attachments: _attachments, ...wire } = result;
+
+  // SAFETY: structured output passed its schema in dispatch (request_capability
+  // has none); our alias only widens the SDK's content, `attachments` is ours.
+  return { ...wire, content: wireContent(result) } as CallToolResult;
 }
 
 /**
@@ -490,26 +515,37 @@ export function registerAllTools(
         listed,
       );
 
-      // Gated on the principal's opt-out, never on `captureEnabled`: that also
-      // goes false on a spent event budget, which must not move the tool list.
-      if (!analyticsEnabled() || analyticsContext?.()?.captureOptOut === true) {
+      if (!analyticsEnabled()) {
         // SAFETY: ToolDefs hold draft-2020-12 object schemas; zod types the
         // export only as generic JSON.
         return response as ListToolsResult;
       }
 
-      const tools = [...response.tools, REQUEST_CAPABILITY_DEF];
+      const tools = capabilityIntakeOpen()
+        ? [...response.tools, REQUEST_CAPABILITY_DEF]
+        : response.tools;
+
       // Fires per REQUEST (the HTTP handler builds a server per request), so a
       // de-dup flag here is dead code; repeat lists spend the analytics budget.
       captureMcp("$mcp_tools_list", server, analyticsContext?.(), {
         $mcp_listed_tool_names: tools.map((tool) => tool.name),
       });
 
-      // SAFETY: same entries as above plus `REQUEST_CAPABILITY_DEF`, whose schema
-      // comes from the same `jsonSchema` helper.
+      // SAFETY: the listed entries, plus `REQUEST_CAPABILITY_DEF` when offered,
+      // whose schema comes from the same `jsonSchema` helper.
       return { tools } as ListToolsResult;
     },
   );
+
+  /**
+   * Whether this principal is offered `request_capability`, for the listing and
+   * the call alike: only once the probe confirmed it has not opted out, so an
+   * unanswered probe stores nothing for someone who has. Gated on the opt-out,
+   * never on `captureEnabled`, which a spent event budget also turns off.
+   */
+  function capabilityIntakeOpen(): boolean {
+    return analyticsEnabled() && analyticsContext?.()?.captureOptOut === false;
+  }
 
   /**
    * The free-text capability an agent asked for, for `$mcp_missing_capability`.
@@ -520,6 +556,77 @@ export function registerAllTools(
     const raw = args.capability;
 
     return isJsonString(raw) ? raw.slice(0, 500) : "";
+  }
+
+  /**
+   * The roadmap intake: an inbox row, then a `$mcp_missing_capability` event.
+   * The event follows the write, so a request Lune refused leaves no copy.
+   */
+  async function requestCapability(
+    args: JsonObject,
+    ctx: ServerContext,
+  ): Promise<ToolCallResult> {
+    const parsed = REQUEST_CAPABILITY_SCHEMA.safeParse(args);
+
+    // Bad args resolve to an isError result, never a thrown protocol error:
+    // this tool exists to listen, so a malformed request is itself signal.
+    if (!parsed.success) {
+      captureMcp("$mcp_missing_capability", server, analyticsContext?.(), {
+        $mcp_intent: capabilityIntent(args),
+        $mcp_is_error: true,
+      });
+
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text:
+              "request_capability takes one argument, `capability`: 3 to 500 " +
+              "characters describing what you were trying to do.",
+          },
+        ],
+      };
+    }
+
+    // The feedback inbox is where the roadmap is read; the event below feeds
+    // PostHog's MCP views.
+    let outcome = "The request was submitted for roadmap review. ";
+
+    try {
+      // Read as text, never parsed: only the status decides the outcome, and
+      // draining the body frees the pooled connection.
+      await taggedClient(ctx)
+        .post(AGENT_FEEDBACK_PATH, {
+          json: { category: "capability", message: parsed.data.capability },
+        })
+        .text();
+    } catch (e) {
+      // An answered refusal reads as any tool's would (a deleted account, the
+      // daily cap); only a request that may have landed keeps this reply.
+      if (!isUnconfirmedDelivery(e)) {
+        return await httpErrorToToolResult(e, "request_capability");
+      }
+
+      outcome = "Lune did not confirm the request was stored. ";
+    }
+
+    captureMcp("$mcp_missing_capability", server, analyticsContext?.(), {
+      $mcp_intent: parsed.data.capability,
+      $mcp_is_error: false,
+    });
+
+    return {
+      content: [
+        {
+          type: "text",
+          text:
+            "Lune cannot do this yet. " +
+            outcome +
+            "Continue with the existing tools.",
+        },
+      ],
+    };
   }
 
   server.setRequestHandler(
@@ -534,50 +641,10 @@ export function registerAllTools(
       // the tool schema before handlers see them.
       const args = (req.params.arguments ?? {}) as JsonObject;
 
-      if (name === "request_capability" && analyticsEnabled()) {
-        // Bad args resolve to an isError result, never a thrown protocol error:
-        // this tool exists to listen, so a malformed request is itself signal.
-        const parsed = REQUEST_CAPABILITY_SCHEMA.safeParse(args);
-
-        const captured = captureMcp(
-          "$mcp_missing_capability",
-          server,
-          analyticsContext?.(),
-          {
-            $mcp_intent: parsed.success
-              ? parsed.data.capability
-              : capabilityIntent(args),
-            $mcp_is_error: !parsed.success,
-          },
-        );
-
-        if (!parsed.success) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: "text",
-                text:
-                  "request_capability needs a `capability` string describing " +
-                  "what you were trying to do.",
-              },
-            ],
-          };
-        }
-
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                "Lune cannot do this yet. " +
-                (captured
-                  ? "The request was submitted for roadmap review. "
-                  : "No roadmap event was stored. ") +
-                "Continue with the existing tools.",
-            },
-          ],
-        };
+      // An opted-out principal naming the hidden tool falls through to
+      // dispatch, which answers "Unknown tool" as for any unlisted name.
+      if (name === "request_capability" && capabilityIntakeOpen()) {
+        return onTheWire(await requestCapability(args, ctx));
       }
 
       const api = taggedClient(ctx);
@@ -619,14 +686,7 @@ export function registerAllTools(
           );
         }
 
-        const { attachments: _attachments, ...wire } = result;
-
-        // SAFETY: dispatcher output passed its schema; our alias only widens
-        // the SDK content discriminants, and `attachments` is our own field.
-        return {
-          ...wire,
-          content: wireContent(result),
-        } as CallToolResult;
+        return onTheWire(result);
       } catch (e) {
         if (analyticsEnabled()) {
           captureMcp("$mcp_tool_call", server, analyticsContext?.(), {

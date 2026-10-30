@@ -70,11 +70,12 @@ stderr, never stdout, so JSON-RPC framing stays intact.
 
 ## Tools
 
-Twelve tools. Most follow a prefix: `search_*` finds candidates, `get_*`
+Thirteen tools. Most follow a prefix: `search_*` finds candidates, `get_*`
 retrieves something you already have a handle on, and `list_*` browses. The
-hosted endpoint also offers `request_capability`, which an agent calls to tell Lune
-about a capability it needed and could not find; its reply says whether Lune
-accepted the request. The stdio package does not include it.
+hosted endpoint also offers `request_capability`, once Lune has confirmed the user
+has not opted out of its analytics: an agent calls it to tell Lune about a
+capability it needed and could not find, and its reply says whether Lune accepted
+the request. The stdio package does not include it.
 
 **Finding papers**
 
@@ -107,6 +108,12 @@ accepted the request. The stdio package does not include it.
 | --------------------------- | -------------------------------------------------- |
 | `search_research_guidance`  | The curated methodology and reproducibility corpus |
 | `get_research_guidance_doc` | The full text of one guidance document             |
+
+**Feedback**
+
+| Tool            | What it does                                                            |
+| --------------- | ----------------------------------------------------------------------- |
+| `send_feedback` | Passes the user's feedback about Lune to the team, once the user agrees |
 
 ## Prompts
 

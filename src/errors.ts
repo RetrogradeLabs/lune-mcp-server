@@ -441,6 +441,16 @@ function unauthorizedError(
     };
   }
 
+  if (body.error === "user_deleted" || body.detail === "user_deleted") {
+    return {
+      code: LuneErrorCode.Unauthorized,
+      message:
+        "This Lune account was deleted, so this call did not run. Stop " +
+        "retrying; a new credential will not bring the account back.",
+      data: { ...base, error: "user_deleted" },
+    };
+  }
+
   return {
     code: LuneErrorCode.Unauthorized,
     message:
@@ -481,6 +491,17 @@ function quotaError(
 }
 
 function forbiddenError(body: ApiErrorBody, base: ErrorEnvelope): MappedError {
+  if (body.detail === "feedback_needs_a_user") {
+    return {
+      code: LuneErrorCode.Forbidden,
+      message:
+        "This Lune credential belongs to no user, so Lune stored nothing: it " +
+        "keeps feedback and roadmap requests only for a user. Retrying will " +
+        "not help.",
+      data: base,
+    };
+  }
+
   const fields = flattenDetail(body);
   const required = fields.required ?? [];
   const granted = fields.granted ?? [];
@@ -522,6 +543,17 @@ function rateLimitError(
   retryAfterSeconds: number | undefined,
 ): MappedError {
   const retry = asNumber(body.retry_after_seconds) ?? retryAfterSeconds ?? 60;
+
+  if (body.error === "feedback_daily_cap") {
+    return {
+      code: LuneErrorCode.RateLimited,
+      message:
+        "Lune accepts no more feedback of this kind from this account today, " +
+        "so nothing was stored; tell the user. Do not retry before UTC midnight.",
+      data: { ...base, retry_after_seconds: retry },
+    };
+  }
+
   const hint = asText(body.upgrade_hint);
 
   const lane =
@@ -804,6 +836,19 @@ function parseRetryAfterHeader(value: string | null): number | undefined {
   }
 
   return undefined;
+}
+
+/**
+ * Whether a write may have landed although no answer confirmed it: the request
+ * timed out or dropped, or a gateway (502, 504) cut the response off. A caller
+ * that must not repeat a write says so instead of asking for a retry.
+ */
+export function isUnconfirmedDelivery(cause: unknown): boolean {
+  if (isKyHttpError(cause)) {
+    return cause.response.status === 502 || cause.response.status === 504;
+  }
+
+  return isRetryableTransportError(cause);
 }
 
 /**

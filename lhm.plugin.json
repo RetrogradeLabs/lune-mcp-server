@@ -1821,6 +1821,65 @@
         "openWorldHint": false,
         "idempotentHint": true
       }
+    },
+    {
+      "name": "send_feedback",
+      "title": "Send feedback to Lune",
+      "description": "Sends the user's feedback about Lune to the Lune team. Use it when the user says something about Lune itself (papers it missed, results that did not fit, an error, something that helped, an idea): offer to pass it on, show the user the message you would send, and call this only after they agree. Set `allow_training` only if they also agreed that Lune may train models on it, after telling them they can withdraw that at any time in their Lune account settings. Write the message from what the user said about Lune, leaving out unrelated conversation and personal details.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": [
+              "missing_papers",
+              "irrelevant_results",
+              "helpful",
+              "issue",
+              "idea",
+              "other"
+            ],
+            "description": "missing_papers: Lune did not find papers the user expected. irrelevant_results: the results did not fit the question. helpful: Lune helped. issue: an error or something broken. idea: a suggestion."
+          },
+          "message": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000,
+            "description": "The feedback as the user approved it: what they asked Lune for and what happened, naming the papers involved. Leave out the user's own name and contact details, credentials, and private documents."
+          },
+          "allow_training": {
+            "description": "True only when the user explicitly agreed that Lune may use this feedback to train its models.",
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": ["category", "message"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "const": "sent"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+            "description": "The stored feedback's id; nothing to show the user."
+          }
+        },
+        "required": ["status", "id"]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
     }
   ]
 }

@@ -29,6 +29,14 @@ describe("mapHttpError", () => {
     expect(e.message).not.toMatch(/lune login/i);
   });
 
+  it("401 for a deleted account says so instead of asking for a new credential", () => {
+    const e = mapHttpError(401, { detail: "user_deleted" });
+
+    expect(e.code).toBe(LuneErrorCode.Unauthorized);
+    expect(e.message).toContain("account was deleted");
+    expect(e.message).not.toMatch(/reconnect|re-authorize|lune login/i);
+  });
+
   it("429 → rate_limited with retry_after", () => {
     const e = mapHttpError(429, { retry_after_seconds: 42 }, "req-2");
     expect(e.code).toBe(LuneErrorCode.RateLimited);
@@ -435,6 +443,29 @@ describe("mapHttpError", () => {
     expect(e.message).toContain("per-second burst guard");
     expect(e.message).toContain("not your daily allowance");
     expect(e.message).toContain("retry the same call");
+  });
+
+  it("429 from the feedback inbox's daily cap tells the agent to stop for today", () => {
+    const e = mapHttpError(429, {
+      error: "feedback_daily_cap",
+      detail: "This account has sent all the feedback Lune accepts today.",
+      retry_after_seconds: 40_000,
+    });
+
+    expect(e.code).toBe(LuneErrorCode.RateLimited);
+    expect(e.message).toContain(
+      "no more feedback of this kind from this account today",
+    );
+    expect(e.message).toContain("Do not retry before UTC midnight");
+    expect(e.data.retry_after_seconds).toBe(40_000);
+  });
+
+  it("403 for a credential with no user says feedback cannot be sent, not a scope", () => {
+    const e = mapHttpError(403, { detail: "feedback_needs_a_user" });
+
+    expect(e.code).toBe(LuneErrorCode.Forbidden);
+    expect(e.message).toContain("belongs to no user");
+    expect(e.message).not.toMatch(/scope/i);
   });
 
   it("429 from an unknown source keeps the generic retry line", () => {

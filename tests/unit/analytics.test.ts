@@ -663,16 +663,33 @@ describe("request_capability (analytics-gated roadmap intake)", () => {
     expect(res.tools.map((t) => t.name)).not.toContain("request_capability");
   });
 
-  it("is listed and records $mcp_missing_capability when enabled", async () => {
+  it("is listed, stores the request in the inbox and records $mcp_missing_capability", async () => {
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
     initAnalytics();
+
+    const sent: Request[] = [];
+
+    const recordingKy = ky.create({
+      prefix: "https://api.example.test/",
+      retry: 0,
+      fetch: async (request) => {
+        sent.push(new Request(request));
+
+        return new Response('{"id":"c1"}', {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
     const { server, handler } = createFakeServer();
     registerAllTools(
       server,
-      () => fakeKy(),
+      () => recordingKy,
       () => ({
         identity: { distinctId: "user-42", personless: false },
         sessionId: "session-42",
+        captureOptOut: false,
       }),
     );
     const res = await handler<ToolsListResult>("tools/list")({});
@@ -687,19 +704,189 @@ describe("request_capability (analytics-gated roadmap intake)", () => {
 
     expect(result.content[0]!.text).toMatch(/submitted for roadmap review/);
 
+    const inbox = sent.find((request) =>
+      request.url.endsWith("/feedback/agent"),
+    );
+
+    expect(await inbox?.json()).toEqual({
+      category: "capability",
+      message: "search preprint servers",
+    });
     expect(eventProperties("$mcp_missing_capability").$mcp_intent).toBe(
       "search preprint servers",
     );
   });
 
-  it("does not claim a roadmap event was stored when capture is unavailable", async () => {
+  it("offers nothing while the probe has not said whether the principal opted out", async () => {
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
     initAnalytics();
+
+    const sent: Request[] = [];
+
+    const recordingKy = ky.create({
+      prefix: "https://api.example.test/",
+      retry: 0,
+      fetch: async (request) => {
+        sent.push(new Request(request));
+
+        return new Response("{}", {
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
     const { server, handler } = createFakeServer();
     registerAllTools(
       server,
-      () => fakeKy(),
-      () => ({ captureEnabled: false }),
+      () => recordingKy,
+      () => ({}),
+    );
+
+    const listed = await handler<ToolsListResult>("tools/list")({});
+
+    expect(listed.tools.map((t) => t.name)).not.toContain("request_capability");
+    await expect(
+      handler<ToolCallResult>("tools/call")({
+        params: {
+          name: "request_capability",
+          arguments: { capability: "search preprint servers" },
+        },
+      }),
+    ).rejects.toMatchObject({ message: "Unknown tool: request_capability" });
+    expect(sent.filter((r) => r.url.endsWith("/feedback/agent"))).toEqual([]);
+  });
+
+  it("treats a direct call from a principal who opted out as an unknown tool", async () => {
+    vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+    initAnalytics();
+
+    const sent: Request[] = [];
+
+    const recordingKy = ky.create({
+      prefix: "https://api.example.test/",
+      retry: 0,
+      fetch: async (request) => {
+        sent.push(new Request(request));
+
+        return new Response("{}", {
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const { server, handler } = createFakeServer();
+    registerAllTools(
+      server,
+      () => recordingKy,
+      () => ({ captureOptOut: true }),
+    );
+
+    await expect(
+      handler<ToolCallResult>("tools/call")({
+        params: {
+          name: "request_capability",
+          arguments: { capability: "search preprint servers" },
+        },
+      }),
+    ).rejects.toMatchObject({ message: "Unknown tool: request_capability" });
+    expect(sent).toEqual([]);
+  });
+
+  it("refuses an argument the published schema does not have, sending nothing", async () => {
+    vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+    initAnalytics();
+
+    const sent: Request[] = [];
+
+    const recordingKy = ky.create({
+      prefix: "https://api.example.test/",
+      retry: 0,
+      fetch: async (request) => {
+        sent.push(new Request(request));
+
+        return new Response("{}", {
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+
+    const { server, handler } = createFakeServer();
+    registerAllTools(
+      server,
+      () => recordingKy,
+      () => ({ captureOptOut: false }),
+    );
+
+    const result = await handler<ToolCallResult>("tools/call")({
+      params: {
+        name: "request_capability",
+        arguments: {
+          capability: "search preprint servers",
+          allow_training: true,
+        },
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("takes one argument");
+    expect(sent).toEqual([]);
+  });
+
+  it.each([
+    ["too short to read", "  x "],
+    ["longer than the inbox keeps", "x".repeat(501)],
+  ])(
+    "refuses a capability %s before it reaches the inbox",
+    async (_, capability) => {
+      vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+      initAnalytics();
+
+      const sent: Request[] = [];
+
+      const recordingKy = ky.create({
+        prefix: "https://api.example.test/",
+        retry: 0,
+        fetch: async (request) => {
+          sent.push(new Request(request));
+
+          return new Response("{}", {
+            headers: { "content-type": "application/json" },
+          });
+        },
+      });
+
+      const { server, handler } = createFakeServer();
+      registerAllTools(
+        server,
+        () => recordingKy,
+        () => ({ captureOptOut: false }),
+      );
+
+      const result = await handler<ToolCallResult>("tools/call")({
+        params: { name: "request_capability", arguments: { capability } },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain("3 to 500 characters");
+      expect(sent).toEqual([]);
+    },
+  );
+
+  it("counts a stored request as submitted whatever its answer's body", async () => {
+    vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+    initAnalytics();
+
+    const bodilessKy = ky.create({
+      prefix: "https://api.example.test/",
+      retry: 0,
+      fetch: async () => new Response(null, { status: 201 }),
+    });
+
+    const { server, handler } = createFakeServer();
+    registerAllTools(
+      server,
+      () => bodilessKy,
+      () => ({ captureOptOut: false }),
     );
 
     const result = await handler<ToolCallResult>("tools/call")({
@@ -709,8 +896,84 @@ describe("request_capability (analytics-gated roadmap intake)", () => {
       },
     });
 
-    expect(result.content[0]!.text).toContain("No roadmap event was stored");
+    expect(result.content[0]!.text).toMatch(/submitted for roadmap review/);
   });
+
+  it("says the request is unconfirmed when the connection drops", async () => {
+    vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+    initAnalytics();
+
+    const droppingKy = ky.create({
+      prefix: "https://api.example.test/",
+      retry: 0,
+      fetch: async () => {
+        throw new TypeError("fetch failed", {
+          cause: Object.assign(new Error("socket hang up"), {
+            code: "ECONNRESET",
+          }),
+        });
+      },
+    });
+
+    const { server, handler } = createFakeServer();
+    registerAllTools(
+      server,
+      () => droppingKy,
+      () => ({ captureOptOut: false }),
+    );
+
+    const result = await handler<ToolCallResult>("tools/call")({
+      params: {
+        name: "request_capability",
+        arguments: { capability: "search preprint servers" },
+      },
+    });
+
+    expect(result.content[0]!.text).toContain(
+      "did not confirm the request was stored",
+    );
+  });
+
+  it.each([
+    [503, { detail: "unavailable" }, "server error (503)"],
+    [401, { detail: "user_deleted" }, "account was deleted"],
+  ])(
+    "words Lune's %i refusal as any tool would and keeps no analytics copy",
+    async (status, body, says) => {
+      vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+      initAnalytics();
+
+      const refusingKy = ky.create({
+        prefix: "https://api.example.test/",
+        retry: 0,
+        fetch: async () =>
+          new Response(JSON.stringify(body), {
+            status,
+            headers: { "content-type": "application/json" },
+          }),
+      });
+
+      const { server, handler } = createFakeServer();
+      registerAllTools(
+        server,
+        () => refusingKy,
+        () => ({ captureOptOut: false }),
+      );
+
+      const result = await handler<ToolCallResult>("tools/call")({
+        params: {
+          name: "request_capability",
+          arguments: { capability: "search preprint servers" },
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]!.text).toContain(says);
+      expect(deliveredPayloads().map((payload) => payload.event)).not.toContain(
+        "$mcp_missing_capability",
+      );
+    },
+  );
 
   it("records canonical list, resource, and prompt lifecycle events", async () => {
     vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
@@ -719,6 +982,7 @@ describe("request_capability (analytics-gated roadmap intake)", () => {
     const context = () => ({
       identity: { distinctId: "user-42", personless: false },
       sessionId: "session-42",
+      captureOptOut: false,
     });
 
     const { server, handler } = createFakeServer();

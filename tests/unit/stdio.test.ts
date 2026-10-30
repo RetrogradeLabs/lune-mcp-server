@@ -164,7 +164,7 @@ describe("runStdio", () => {
     await buildInstance(serve);
     const tools = await listedTools(servers[0]!);
 
-    expect(tools.size).toBe(14);
+    expect(tools.size).toBe(15);
     expect(tools.get("search_papers")).toContain("source");
     expect(await listedPrompts(servers[0]!)).toContain("design_figure");
     expect(probes()).toBe(1);
@@ -180,14 +180,14 @@ describe("runStdio", () => {
 
     await runStdio(deps);
     await buildInstance(serve);
-    expect((await listedTools(servers[0]!)).size).toBe(14);
+    expect((await listedTools(servers[0]!)).size).toBe(15);
 
     vi.setSystemTime(Date.now() + TOOL_SURFACE_TTL_MS - 1);
-    expect((await listedTools(servers[0]!)).size).toBe(14);
+    expect((await listedTools(servers[0]!)).size).toBe(15);
     expect(probes()).toBe(1);
 
     vi.setSystemTime(Date.now() + 1);
-    expect((await listedTools(servers[0]!)).size).toBe(12);
+    expect((await listedTools(servers[0]!)).size).toBe(13);
     expect(await listedPrompts(servers[0]!)).not.toContain("design_figure");
     expect(probes()).toBe(2);
   });
@@ -205,7 +205,7 @@ describe("runStdio", () => {
     expect(buildServer.mock.calls[0]![1]?.releases?.listed).toEqual(
       PUBLIC_RELEASES,
     );
-    expect((await listedTools(servers[0]!)).size).toBe(14);
+    expect((await listedTools(servers[0]!)).size).toBe(15);
     expect(probes()).toBe(2);
   });
 
@@ -220,7 +220,7 @@ describe("runStdio", () => {
     await buildInstance(serve);
     const tools = await listedTools(servers[0]!);
 
-    expect(tools.size).toBe(12);
+    expect(tools.size).toBe(13);
     expect(tools.get("search_papers")).not.toContain("source");
     expect(probes()).toBe(1);
   });
@@ -235,7 +235,7 @@ describe("runStdio", () => {
     await runStdio(deps);
     await buildInstance(serve);
 
-    expect((await listedTools(servers[0]!)).size).toBe(12);
+    expect((await listedTools(servers[0]!)).size).toBe(13);
 
     await servers[0]!.handler("tools/call")(
       {
@@ -265,10 +265,10 @@ describe("runStdio", () => {
     await buildInstance(serve);
 
     vi.setSystemTime(Date.now() + 4 * 60_000);
-    expect((await listedTools(servers[0]!)).size).toBe(14);
+    expect((await listedTools(servers[0]!)).size).toBe(15);
 
     vi.setSystemTime(Date.now() + 60_000);
-    expect((await listedTools(servers[0]!)).size).toBe(12);
+    expect((await listedTools(servers[0]!)).size).toBe(13);
   });
 
   it("asks once for instances the SDK builds together", async () => {

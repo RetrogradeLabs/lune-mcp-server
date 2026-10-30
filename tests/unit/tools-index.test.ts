@@ -10,7 +10,13 @@ import {
   createRecordingServer,
   createServerContext,
 } from "../support/mcp-server.js";
-import { createFakeKy, httpErrorReply, jsonReply } from "../support/fake-ky.js";
+import {
+  callTo,
+  createFakeKy,
+  httpErrorReply,
+  jsonBodyOf,
+  jsonReply,
+} from "../support/fake-ky.js";
 import { callResult, toolText } from "../support/tool-result.js";
 import {
   isJsonObject,
@@ -20,7 +26,7 @@ import {
 import { readFileSync } from "node:fs";
 import type { MetaObject } from "@modelcontextprotocol/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { KyInstance } from "ky";
+import ky, { type KyInstance } from "ky";
 import {
   dispatchToolCall,
   getAllToolDefinitions,
@@ -70,12 +76,13 @@ const PUBLIC_TOOL_ORDER = [
   "gather_evidence",
   "search_research_guidance",
   "get_research_guidance_doc",
+  "send_feedback",
 ];
 
 describe("getAllToolDefinitions", () => {
-  it("returns the union of paper, figure and guidance tools", () => {
+  it("returns the union of paper, figure, guidance and feedback tools", () => {
     const defs = getAllToolDefinitions();
-    expect(defs.length).toBe(14);
+    expect(defs.length).toBe(15);
     const names = defs.map((d) => d.name);
     expect(names).toContain("search_papers");
     // Workspace retrieval is folded into the corpus tools' source="workspace"
@@ -347,6 +354,7 @@ describe("deterministic tools/list ordering", () => {
       "get_paper_figures",
       "search_research_guidance",
       "get_research_guidance_doc",
+      "send_feedback",
     ]);
   });
 });
@@ -525,6 +533,96 @@ describe("dispatchToolCall", () => {
     expect(r.structuredContent).toEqual(response);
   });
 
+  it("sends feedback to the agent inbox with training off unless the user granted it", async () => {
+    const recording = createFakeKy(() =>
+      jsonReply({ id: "6f1c2a3e-8b4d-4c5e-9f60-7a8b9c0d1e2f" }),
+    );
+
+    const result = await dispatchToolCall(recording.ky, "send_feedback", {
+      category: "missing_papers",
+      message: "  Lune missed Lewis et al. 2020 on RAG  ",
+    });
+
+    expect(result.structuredContent).toEqual({
+      status: "sent",
+      id: "6f1c2a3e-8b4d-4c5e-9f60-7a8b9c0d1e2f",
+    });
+    expect(
+      jsonBodyOf(callTo(recording.calls, "feedback/agent", "post")),
+    ).toEqual({
+      category: "missing_papers",
+      message: "Lune missed Lewis et al. 2020 on RAG",
+      allow_training: false,
+    });
+  });
+
+  it.each([
+    ["without an id", "{}"],
+    ["with an empty body", ""],
+  ])(
+    "reports drift, never a confirmed send, when Lune answers %s",
+    async (_, body) => {
+      const answering = ky.create({
+        prefix: "https://api.example.test/",
+        retry: 0,
+        fetch: async () =>
+          new Response(body, {
+            status: 201,
+            headers: { "content-type": "application/json" },
+          }),
+      });
+
+      const result = await dispatchToolCall(answering, "send_feedback", {
+        category: "helpful",
+        message: "it found the paper",
+      });
+
+      expect(result.isError).toBe(true);
+      expect(toolText(result)).toContain("error_type=output_schema_violation");
+    },
+  );
+
+  it("does not ask for a resend when Lune never confirmed the feedback", async () => {
+    const result = await dispatchToolCall(
+      erroringKy(504, {}),
+      "send_feedback",
+      { category: "helpful", message: "it found the paper" },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(toolText(result)).toContain("did not confirm the feedback arrived");
+    expect(toolText(result)).not.toMatch(/retry/i);
+  });
+
+  it("lets an agent leave training consent out of a send", () => {
+    const listed = listToolsResponse(false).tools.find(
+      (tool) => tool.name === "send_feedback",
+    );
+
+    expect(listed?.inputSchema.required).toEqual(["category", "message"]);
+  });
+
+  it("tells the agent when Lune accepts no more feedback today", async () => {
+    const result = await dispatchToolCall(
+      erroringKy(429, {
+        error: "feedback_daily_cap",
+        detail: "This account has sent all the feedback Lune accepts today.",
+        retry_after_seconds: 40_000,
+      }),
+      "send_feedback",
+      {
+        category: "helpful",
+        message: "it found the paper",
+        allow_training: true,
+      },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(toolText(result)).toContain(
+      "no more feedback of this kind from this account today",
+    );
+  });
+
   it("throws for an unknown tool name", async () => {
     await expect(
       dispatchToolCall(fakeKy(), "definitely_not_a_tool", {}),
@@ -639,7 +737,7 @@ describe("registerAllTools", () => {
       createServerContext({ method: "tools/list" }),
     );
 
-    expect(res.tools).toHaveLength(14);
+    expect(res.tools).toHaveLength(15);
     expect(res.tools.map((t) => t.name)).toEqual(
       expect.arrayContaining(["search_figure_references", "get_paper_figures"]),
     );

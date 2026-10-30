@@ -651,3 +651,8 @@ export const GetPaperFiguresOutput = z.object({
     }),
   ),
 });
+
+export const SendFeedbackOutput = z.object({
+  status: z.literal("sent"),
+  id: z.uuid().describe("The stored feedback's id; nothing to show the user."),
+});

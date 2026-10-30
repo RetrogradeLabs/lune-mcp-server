@@ -56,7 +56,8 @@ export function serverInstructions(releases: Releases): string {
           "how they are composed), get_paper_figures. ",
       ) +
       "Methodology: search_research_guidance ('how should I...' " +
-      "questions), get_research_guidance_doc.",
+      "questions), get_research_guidance_doc. Feedback about Lune: " +
+      "send_feedback, only after the user agrees to send it.",
     "",
     "WORKFLOWS (compose tools; rarely stop at one search). Literature review: " +
       "search_papers_many across angles, get_paper_citations (cites) on key " +

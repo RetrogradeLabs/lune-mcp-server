@@ -628,7 +628,7 @@ describe("per-credential releases on the hosted transport", () => {
 
   it("gives a released credential the figure tools, prompt and workflow", async () => {
     const tools = await names(RELEASED, "tools/list");
-    expect(tools).toHaveLength(14);
+    expect(tools).toHaveLength(15);
     expect(tools).toEqual(
       expect.arrayContaining(["search_figure_references", "get_paper_figures"]),
     );
@@ -649,7 +649,7 @@ describe("per-credential releases on the hosted transport", () => {
     "gives %s the public surface with no figure wording",
     async (_label, probe) => {
       const tools = await names(probe, "tools/list");
-      expect(tools).toHaveLength(12);
+      expect(tools).toHaveLength(13);
       expect(tools.join(" ")).not.toMatch(/figure/);
 
       const prompts = await names(probe, "prompts/list");
@@ -708,6 +708,33 @@ describe("per-credential releases on the hosted transport", () => {
     });
   });
 
+  it("keeps request_capability closed while the probe cannot say whether the principal opted out", async () => {
+    vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+    initAnalytics();
+
+    const hosted = await hostedApp(INDETERMINATE);
+
+    try {
+      expect(toolNames(await hosted.ask("tools/list"))).not.toContain(
+        "request_capability",
+      );
+
+      const call = await hosted.ask("tools/call", {
+        name: "request_capability",
+        arguments: { capability: "search preprint servers" },
+      });
+
+      // Refused before any handler runs, so nothing reaches the feedback inbox.
+      expect(call.error).toMatchObject({
+        code: -32602,
+        message: "Unknown tool: request_capability",
+      });
+    } finally {
+      await hosted.close();
+      resetAnalyticsForTests();
+    }
+  });
+
   it("lets a figure call reach the API while the probe cannot answer and nothing is remembered", async () => {
     const response = await exchange(INDETERMINATE, "tools/call", {
       name: "search_figure_references",
@@ -725,18 +752,18 @@ describe("per-credential releases on the hosted transport", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
 
     try {
-      expect(toolNames(await hosted.ask("tools/list"))).toHaveLength(14);
-      expect(toolNames(await hosted.ask("tools/list"))).toHaveLength(14);
+      expect(toolNames(await hosted.ask("tools/list"))).toHaveLength(15);
+      expect(toolNames(await hosted.ask("tools/list"))).toHaveLength(15);
 
       // Another credential on the same task inherits nothing.
       expect(
         toolNames(
           await hosted.ask("tools/list", {}, { token: "lune_someone_else" }),
         ),
-      ).toHaveLength(12);
+      ).toHaveLength(13);
 
       vi.setSystemTime(Date.now() + 5 * 60_000);
-      expect(toolNames(await hosted.ask("tools/list"))).toHaveLength(12);
+      expect(toolNames(await hosted.ask("tools/list"))).toHaveLength(13);
     } finally {
       vi.useRealTimers();
       await hosted.close();

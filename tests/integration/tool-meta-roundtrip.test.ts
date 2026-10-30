@@ -131,7 +131,7 @@ describe.each(["modern", "legacy"] as const)(
     it("the SDK's result validator keeps _meta['anthropic/alwaysLoad'] on exactly the entry tools", async () => {
       const tools = await listTools(era);
       // The public catalog parses (no tool rejected over the added _meta).
-      expect(tools.length).toBe(12);
+      expect(tools.length).toBe(13);
 
       const flagged = tools
         .filter((t) => t._meta?.["anthropic/alwaysLoad"] === true)
@@ -157,7 +157,7 @@ describe.each(["modern", "legacy"] as const)(
 
     it("the SDK's result validator accepts every tool a released credential lists", async () => {
       const tools = await listTools(era, answeredView(ALL_RELEASES));
-      expect(tools.length).toBe(14);
+      expect(tools.length).toBe(15);
     });
   },
 );

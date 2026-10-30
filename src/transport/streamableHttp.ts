@@ -833,10 +833,13 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
     );
 
     if (analyticsProbe) {
-      // `analytics_suppressed` is the opt-out; capture also stops when the shared
-      // budget is spent. Only the opt-out may reshape the tool surface.
-      requestAnalyticsContext.captureOptOut =
-        analyticsProbe.suppressAnalytics === true;
+      // Only the opt-out may reshape the tool surface, and only an answered
+      // probe knows it; unknown keeps `request_capability` closed.
+      if (analyticsProbe.status === "valid") {
+        requestAnalyticsContext.captureOptOut =
+          analyticsProbe.suppressAnalytics === true;
+      }
+
       requestAnalyticsContext.captureEnabled =
         analyticsProbe.suppressAnalytics !== true &&
         analyticsProbe.captureAllowed === true;
