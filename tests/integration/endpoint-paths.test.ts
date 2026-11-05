@@ -68,6 +68,13 @@ const toolsList = (id: number) => ({
   params: {},
 });
 
+const toolCall = {
+  jsonrpc: "2.0",
+  id: 3,
+  method: "tools/call",
+  params: { name: "list_conferences", arguments: {} },
+};
+
 let app: Express;
 
 let server: HttpServer;
@@ -118,23 +125,69 @@ describe("every endpoint spelling serves the JSON-RPC transport", () => {
     expect(rpcTools(list.body).length).toBeGreaterThan(0);
   });
 
-  it.each(ENDPOINTS)("challenges an anonymous POST on %s", async (path) => {
-    const res = await rawRequest(
-      port,
-      "POST",
-      path,
-      { accept: ACCEPT },
-      initBody,
-    );
+  it.each(ENDPOINTS)(
+    "serves initialize + tools/list without a credential on %s",
+    async (path) => {
+      const init = await rawRequest(
+        port,
+        "POST",
+        path,
+        { accept: ACCEPT },
+        initBody,
+      );
 
-    expect(res.status).toBe(401);
-    // RFC 9728 §3.3: the pointer names the metadata for the endpoint called,
-    // so a shared document makes a legacy-URL client discard it and fail OAuth.
-    expect(res.headers["www-authenticate"]).toBe(
-      `Bearer resource_metadata="${METADATA_URL}${aliasOf(path)}", ` +
-        'scope="papers:read guidance:read account:read"',
-    );
-  });
+      expect(init.status).toBe(200);
+      expect(
+        jsonObject(rpcResult(init.body).serverInfo, "server info").name,
+      ).toBe("lune-research");
+
+      const list = await rawRequest(
+        port,
+        "POST",
+        path,
+        { accept: ACCEPT },
+        toolsList(2),
+      );
+
+      expect(list.status).toBe(200);
+      expect(rpcTools(list.body).map((tool) => tool.name)).toEqual([
+        "search_papers",
+        "search_papers_many",
+        "get_paper_fulltext",
+        "get_paper_citations",
+        "list_conferences",
+        "get_conference_papers",
+        "search_related_papers",
+        "extract_from_papers",
+        "verify_claims",
+        "gather_evidence",
+        "search_research_guidance",
+        "get_research_guidance_doc",
+        "send_feedback",
+      ]);
+    },
+  );
+
+  it.each(ENDPOINTS)(
+    "challenges an anonymous tool call on %s",
+    async (path) => {
+      const res = await rawRequest(
+        port,
+        "POST",
+        path,
+        { accept: ACCEPT },
+        toolCall,
+      );
+
+      expect(res.status).toBe(401);
+      // RFC 9728 §3.3: the pointer names the metadata for the endpoint called,
+      // so a shared document makes a legacy-URL client discard it and fail OAuth.
+      expect(res.headers["www-authenticate"]).toBe(
+        `Bearer resource_metadata="${METADATA_URL}${aliasOf(path)}", ` +
+          'scope="papers:read guidance:read account:read"',
+      );
+    },
+  );
 });
 
 describe("the DNS-rebinding guard covers the new root path", () => {

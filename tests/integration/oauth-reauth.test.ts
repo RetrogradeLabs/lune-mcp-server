@@ -323,8 +323,18 @@ describe("oauth auto-reauth (expired access token -> 401 -> silent refresh)", ()
     expect(r.status).not.toBe(401);
   });
 
-  it("still answers a NO-token request with the bare discovery challenge (no regression)", async () => {
-    const r = await post(port, {}, initBody(4));
+  it("still answers a NO-token tool call with the bare discovery challenge (no regression)", async () => {
+    const r = await post(
+      port,
+      {},
+      {
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "list_conferences", arguments: {} },
+      },
+    );
+
     expect(r.status).toBe(401);
     const wa = requiredHeader(r, "www-authenticate");
     // Anonymous discovery: bare challenge, NO error code (RFC 6750 §3).

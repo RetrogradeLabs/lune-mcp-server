@@ -41,7 +41,7 @@ describe("HTTP transport", () => {
     expect(body).toMatchObject({ status: "ok", server: "lune-mcp" });
   });
 
-  it("rejects POST /mcp without Authorization", async () => {
+  it("challenges a tool call on /mcp without Authorization", async () => {
     const r = await fetch(`http://localhost:${port}/mcp`, {
       method: "POST",
       headers: {
@@ -51,8 +51,8 @@ describe("HTTP transport", () => {
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
-        method: "initialize",
-        params: {},
+        method: "tools/call",
+        params: { name: "list_conferences", arguments: {} },
       }),
     });
 
@@ -355,8 +355,8 @@ describe("HTTP transport", () => {
       // No `id` field → `req.body?.id ?? null` falls to null.
       body: JSON.stringify({
         jsonrpc: "2.0",
-        method: "initialize",
-        params: {},
+        method: "tools/call",
+        params: { name: "list_conferences", arguments: {} },
       }),
     });
 

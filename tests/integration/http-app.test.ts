@@ -20,6 +20,7 @@ import {
   jsonObject,
   jsonObjects,
   jsonString,
+  jsonStrings,
   parseJsonObject,
 } from "../support/json.js";
 import { portOf } from "../support/net.js";
@@ -306,8 +307,8 @@ describe("buildHttpApp standalone", () => {
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
-        method: "initialize",
-        params: {},
+        method: "tools/call",
+        params: { name: "list_conferences", arguments: {} },
       }),
     });
 
@@ -315,7 +316,7 @@ describe("buildHttpApp standalone", () => {
     expect(r.headers.get("www-authenticate")).toMatch(/^Bearer\s/);
   });
 
-  it("rejects POST /v1/mcp without Authorization (alias shares the handler)", async () => {
+  it("challenges a tool call on /v1/mcp without Authorization (alias shares the handler)", async () => {
     const r = await fetch(`http://localhost:${port}/v1/mcp`, {
       method: "POST",
       headers: {
@@ -325,8 +326,8 @@ describe("buildHttpApp standalone", () => {
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
-        method: "initialize",
-        params: {},
+        method: "tools/call",
+        params: { name: "list_conferences", arguments: {} },
       }),
     });
 
@@ -417,9 +418,9 @@ describe("buildHttpApp standalone", () => {
     expect(r.body).toMatch(/host not allowed/);
   });
 
-  it("admits an allowlisted Origin through the guard (then 401 on auth)", async () => {
-    // claude.ai is allowlisted, so the request reaches the handler and dies on
-    // the fake token: the origin guard does not block legitimate browsers.
+  it("admits an allowlisted Origin through the guard", async () => {
+    // claude.ai is allowlisted, so the request reaches the handler, which serves
+    // credential-less discovery: the origin guard does not block real browsers.
     const r = await rawRequest(
       port,
       "POST",
@@ -431,8 +432,174 @@ describe("buildHttpApp standalone", () => {
       { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
     );
 
+    expect(r.status).toBe(200);
+  });
+});
+
+describe("credential-less discovery", () => {
+  const ACCEPT = "application/json, text/event-stream";
+  let server: HttpServer;
+  let port: number;
+  let probes = 0;
+
+  beforeAll(async () => {
+    // A probe that would grant everything, so only the public surface can show
+    // that a request without a credential never reached it.
+    const app = buildHttpApp({
+      credentialProbe: async () => {
+        probes += 1;
+
+        return {
+          status: "valid",
+          workspaceCredential: true,
+          releases: { figures: true },
+        };
+      },
+    });
+
+    server = app.listen(0);
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    port = portOf(server);
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  const post = (
+    body: JsonObject | JsonObject[],
+    headers: Record<string, string> = {},
+  ) => rawRequest(port, "POST", "/mcp", { accept: ACCEPT, ...headers }, body);
+
+  it("lists the public surface without asking the API about a credential", async () => {
+    const r = await post({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+
+    expect(r.status).toBe(200);
+
+    const tools = jsonObjects(
+      jsonObject(jsonRpcObject(r.body).result, "result").tools,
+      "tools",
+    );
+
+    const searchPapers = jsonObject(
+      tools.find((tool) => tool.name === "search_papers"),
+      "search_papers",
+    );
+
+    const schema = jsonObject(searchPapers.inputSchema, "input schema");
+
+    expect(jsonObject(schema.properties, "properties").source).toBeUndefined();
+    expect(tools.map((tool) => tool.name)).not.toContain(
+      "search_figure_references",
+    );
+    expect(probes).toBe(0);
+  });
+
+  it("serves a modern client's server/discover and tools/list", async () => {
+    const envelope = {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientInfo": { name: "scanner", version: "1" },
+      "io.modelcontextprotocol/clientCapabilities": {},
+    };
+
+    const modern = async (method: string) => {
+      const r = await post(
+        { jsonrpc: "2.0", id: 2, method, params: { _meta: envelope } },
+        { "mcp-method": method, "mcp-protocol-version": "2026-07-28" },
+      );
+
+      expect(r.status).toBe(200);
+
+      return jsonObject(jsonRpcObject(r.body).result, "result");
+    };
+
+    const discovered = await modern("server/discover");
+
+    expect(jsonStrings(discovered.supportedVersions, "versions")).toContain(
+      "2026-07-28",
+    );
+    expect(jsonString(discovered.instructions, "instructions")).not.toMatch(
+      /figure/i,
+    );
+
+    const listed = jsonObjects((await modern("tools/list")).tools, "tools");
+
+    expect(listed.map((tool) => tool.name)).toContain("search_papers");
+    expect(listed.map((tool) => tool.name)).not.toContain(
+      "search_figure_references",
+    );
+  });
+
+  it("introduces itself with the public instructions", async () => {
+    const r = await post({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "scanner", version: "1" },
+      },
+    });
+
+    expect(r.status).toBe(200);
+
+    const result = jsonObject(jsonRpcObject(r.body).result, "result");
+
+    expect(jsonString(result.instructions, "instructions")).not.toMatch(
+      /figure/i,
+    );
+  });
+
+  it("challenges any batch, even one of discovery alone", async () => {
+    const discovery = await post([
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: {} },
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+    ]);
+
+    expect(discovery.status).toBe(401);
+
+    const mixed = await post([
+      { jsonrpc: "2.0", id: 1, method: "tools/list" },
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "list_conferences", arguments: {} },
+      },
+    ]);
+
+    expect(mixed.status).toBe(401);
+    expect(mixed.headers["www-authenticate"]).toMatch(
+      /^Bearer resource_metadata="/,
+    );
+  });
+
+  it("checks an empty Authorization header rather than reading it as none", async () => {
+    const r = await post(
+      { jsonrpc: "2.0", id: 4, method: "tools/list" },
+      { authorization: "" },
+    );
+
     expect(r.status).toBe(401);
   });
+
+  it.each(["tools/call", "prompts/get", "resources/read"])(
+    "asks for sign-in before %s",
+    async (method) => {
+      const r = await post({ jsonrpc: "2.0", id: 9, method, params: {} });
+
+      expect(r.status).toBe(401);
+      expect(parseJsonObject(r.body, "challenge body")).toMatchObject({
+        id: 9,
+        error: {
+          code: -32001,
+          message:
+            "Sign in to Lune to run its tools: authorize this server in your MCP client, then retry.",
+        },
+      });
+    },
+  );
 });
 
 describe("startHttpServer", () => {

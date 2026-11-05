@@ -130,14 +130,12 @@ async function probeRequestCredential(
 function mcpHandler(): McpHttpHandler {
   return createMcpHandler(
     (ctx) => {
-      // `ctx.requestInfo` is a web Request, so adapt rather than reparse. The POST
-      // gate already rejected a bad header, so a throw here is a real bug.
-      const token = extractTokenHttp({
-        authorization:
-          ctx.requestInfo?.headers.get("authorization") ?? undefined,
-      });
+      // Read only when a handler reaches the API, which discovery never does;
+      // the POST gate refuses a bad header before anything that would.
+      const authorization =
+        ctx.requestInfo?.headers.get("authorization") ?? undefined;
 
-      return makeServer(() => makeClient(token), {
+      return makeServer(() => makeClient(extractTokenHttp({ authorization })), {
         // Express entered the ALS scope before dispatch, so this getter keeps
         // `tools/list`'s workspace and capture gates on the same object.
         analyticsContext: () => currentAnalyticsContext() ?? {},
@@ -502,6 +500,44 @@ export function originIsAllowed(
 // Modern SDK rejects arrays, and real legacy batches are far smaller.
 const MAX_BATCH_MESSAGES = 50;
 
+/**
+ * What a client may ask without a credential: what the server is and offers,
+ * so an agent choosing a server, or a directory scoring one, sees the tools
+ * before signing up. Clients list prompts and resources right after
+ * `initialize`, so a 401 there would start sign-in at connect anyway. Running
+ * anything, `tools/call` above all, is challenged as before.
+ */
+const DISCOVERY_METHODS = new Set([
+  "initialize",
+  "notifications/initialized",
+  "ping",
+  "server/discover",
+  "tools/list",
+  "prompts/list",
+  "resources/list",
+  "resources/templates/list",
+]);
+
+const SIGN_IN_REQUIRED =
+  "Sign in to Lune to run its tools: authorize this server in your MCP client, then retry.";
+
+type MethodMessage = { method?: JsonValue };
+
+/**
+ * Whether the body is ONE discovery message; the SDK dispatches on its method.
+ * Never a batch: 50 tool lists in one 3 KB POST answer 2.6 MB, which only a
+ * credential the API accepted may ask for.
+ */
+function isDiscovery(
+  body: MethodMessage | MethodMessage[] | undefined,
+): boolean {
+  if (Array.isArray(body)) return false;
+
+  const method = body?.method;
+
+  return isJsonString(method) && DISCOVERY_METHODS.has(method);
+}
+
 /** The one field of a body-parser failure the JSON error handler branches on. */
 interface BodyParserFailure {
   status?: number;
@@ -736,8 +772,33 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
     return server;
   };
 
-  // POST is the only verb that can execute a tool, so it is the only one gated on
-  // a credential; GET and DELETE answer 405 without building a server.
+  /** Discovery is served on the public surface; anything else is challenged. */
+  const serveWithoutCredential = async (
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
+    if (!isDiscovery(req.body)) {
+      // RFC 6750 §3 + MCP authorization spec: the WWW-Authenticate header is
+      // what triggers the client's OAuth discovery + browser-based consent.
+      sendUnauthorized(req, res, req.body?.id, SIGN_IN_REQUIRED);
+
+      return;
+    }
+
+    // Never captured: with no credential there is no identity for the
+    // fleet-wide analytics budget to count against.
+    await withAnalyticsContext(
+      {
+        captureEnabled: false,
+        workspaceCredential: false,
+        releases: PUBLIC_VIEW,
+      },
+      () => nodeHandler(req, res, req.body),
+    );
+  };
+
+  // POST is the only verb that can execute a tool, so it alone is gated on a
+  // credential; GET and DELETE answer 405 without building a server.
   app.post(MCP_PATHS, async (req: Request, res: Response) => {
     // A batch is one POST but N dispatches and N events, so uncapped it is a 40x
     // amplifier. Checked before the auth work so an abusive body buys no call.
@@ -754,13 +815,18 @@ export function buildHttpApp(options: HttpAppOptions = {}): Express {
       return;
     }
 
+    if (req.headers.authorization === undefined) {
+      await serveWithoutCredential(req, res);
+
+      return;
+    }
+
     let token: string;
 
     try {
       token = extractTokenHttp(req.headers);
     } catch (cause) {
-      // RFC 6750 §3 + MCP authorization spec: the WWW-Authenticate header is
-      // what triggers the connector's OAuth discovery + browser-based consent.
+      // A malformed header is challenged too, never served as discovery.
       sendUnauthorized(req, res, req.body?.id, messageOf(cause));
 
       return;

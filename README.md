@@ -132,7 +132,9 @@ task takes one command instead of a plan you have to spell out.
 
 ## Authentication
 
-The hosted endpoint takes one credential on every request, as
+The hosted endpoint answers discovery (`initialize`, `tools/list`,
+`prompts/list` and `resources/list`) without a credential, so an agent can see
+the tools before anyone signs in. Running a tool takes one credential, as
 `Authorization: Bearer <credential>`. The stdio package reads an access key
 from `LUNE_API_KEY` instead. The credential is one of these:
 
@@ -154,8 +156,7 @@ Most MCP clients run this flow on their own. If you are building a connector,
 the details follow. [auth.md](https://luneresearch.com/auth.md) walks through
 each request with `curl`.
 
-An unauthenticated `POST https://mcp.luneresearch.com` answers `401` with this
-challenge:
+A tool call without a credential answers `401` with this challenge:
 
 ```http
 WWW-Authenticate: Bearer resource_metadata="https://mcp.luneresearch.com/.well-known/oauth-protected-resource", scope="papers:read guidance:read account:read"

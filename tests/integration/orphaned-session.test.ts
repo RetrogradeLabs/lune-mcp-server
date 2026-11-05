@@ -202,13 +202,18 @@ describe("a stale session id is served, never refused", () => {
     expect(res.status).toBe(202);
   });
 
-  it("still requires auth on a stale-id request (401 + WWW-Authenticate)", async () => {
+  it("still requires auth for a tool call on a stale id (401 + WWW-Authenticate)", async () => {
     const res = await rawRequest(
       port,
       "POST",
       "/mcp",
       { accept: ACCEPT, "mcp-session-id": "stale-no-auth" },
-      toolsListBody(5),
+      {
+        jsonrpc: "2.0",
+        id: 5,
+        method: "tools/call",
+        params: { name: "list_conferences", arguments: {} },
+      },
     );
 
     expect(res.status).toBe(401);

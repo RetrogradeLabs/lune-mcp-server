@@ -117,7 +117,7 @@ describe("oauth discovery", () => {
     expect({ ...v1, resource: RESOURCE }).toEqual(root);
   });
 
-  it("rejects anonymous POST /mcp with a 401 carrying the resource_metadata pointer", async () => {
+  it("challenges an anonymous tool call on /mcp with a 401 carrying the resource_metadata pointer", async () => {
     const r = await fetch(`http://127.0.0.1:${port}/mcp`, {
       method: "POST",
       headers: {
@@ -127,8 +127,8 @@ describe("oauth discovery", () => {
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
-        method: "tools/list",
-        params: {},
+        method: "tools/call",
+        params: { name: "list_conferences", arguments: {} },
       }),
     });
 
@@ -166,7 +166,7 @@ describe("oauth discovery", () => {
     expect(echoed).toContain(`resource_metadata="${MCP_METADATA_URL}"`);
   });
 
-  it("rejects anonymous POST /v1/mcp with ITS own metadata pointer", async () => {
+  it("challenges an anonymous tool call on /v1/mcp with ITS own metadata pointer", async () => {
     const r = await fetch(`http://127.0.0.1:${port}/v1/mcp`, {
       method: "POST",
       headers: {
@@ -176,8 +176,8 @@ describe("oauth discovery", () => {
       body: JSON.stringify({
         jsonrpc: "2.0",
         id: 7,
-        method: "tools/list",
-        params: {},
+        method: "tools/call",
+        params: { name: "list_conferences", arguments: {} },
       }),
     });
 
