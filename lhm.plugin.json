@@ -805,13 +805,7 @@
                   "description": "Distinct years for which this conference has indexed papers."
                 }
               },
-              "required": [
-                "id",
-                "short_name",
-                "full_name",
-                "paper_count",
-                "years"
-              ]
+              "required": ["id", "short_name", "full_name", "years"]
             }
           }
         },
