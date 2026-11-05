@@ -1,6 +1,6 @@
 {
   "name": "@retrograde-labs/lune-mcp-server",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "mcpName": "com.luneresearch/lune",
   "description": "Search peer-reviewed papers and research methodology guidance from your AI agent: the Lune Research MCP server, over stdio or Streamable HTTP.",
   "license": "MIT",

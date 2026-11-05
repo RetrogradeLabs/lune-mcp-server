@@ -385,7 +385,7 @@ describe("list_conferences", () => {
     const sc: ConferencesPayload = JSON.parse(wireJson(res));
     expect(sc.conferences[0]!.id).toBe("conf-1");
     expect(sc.conferences[0]!.short_name).toBe("CCS");
-    expect(sc.conferences[0]!.paper_count).toBe(1200);
+    expect(sc.conferences[0]).not.toHaveProperty("paper_count");
     expect(sc.conferences[0]!.years).toEqual([2023, 2024]);
   });
 

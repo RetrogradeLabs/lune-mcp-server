@@ -1,7 +1,7 @@
 {
   "identifier": "retrogradelabs-lune-mcp-server",
   "name": "Lune Research",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Ground your agent in real peer-reviewed research. Search the full text of papers from top venues, follow citation trails, check draft claims against verbatim quotes, and pull up vetted methodology guidance.",
   "author": "Retrograde Labs",
   "authorUrl": "https://github.com/RetrogradeLabs",
@@ -791,6 +791,7 @@
                   "type": "string"
                 },
                 "paper_count": {
+                  "description": "No longer set; kept because released output schemas only grow.",
                   "type": "integer",
                   "minimum": -9007199254740991,
                   "maximum": 9007199254740991

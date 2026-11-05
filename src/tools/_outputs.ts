@@ -38,9 +38,12 @@ const ConferenceOut = z.object({
   full_name: z.string(),
   description: z.string().optional(),
   category: z.string().optional(),
-  // Optional so a later release can stop sending it (no holdings counts, owner
-  // decision 2026-11-04): a client checks results against its cached tools/list.
-  paper_count: z.number().int().optional(),
+  // No holdings counts (owner decision 2026-11-04): unset since 2026-11-05.
+  paper_count: z
+    .number()
+    .int()
+    .optional()
+    .describe("No longer set; kept because released output schemas only grow."),
   years: z
     .array(z.number().int())
     .describe("Distinct years for which this conference has indexed papers."),

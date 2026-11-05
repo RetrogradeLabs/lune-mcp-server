@@ -76,6 +76,7 @@ interface RawConference {
   full_name?: string;
   description?: string;
   category?: string | null;
+  // The API still sends it; this projection is where it is dropped.
   paper_count?: number;
   years?: number[];
 }
@@ -87,7 +88,6 @@ export function slimConference(c: RawConference) {
     full_name: c.full_name,
     description: c.description || undefined,
     category: c.category || undefined,
-    paper_count: c.paper_count ?? 0,
     years: c.years ?? [],
   };
 }

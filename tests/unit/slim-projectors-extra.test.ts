@@ -16,7 +16,7 @@ import {
  */
 
 describe("slimConference", () => {
-  it("keeps populated description/category and fills paper_count/years defaults", () => {
+  it("keeps populated description/category and fills the years default", () => {
     const out = slimConference({
       id: "c1",
       short_name: "NeurIPS",
@@ -31,7 +31,6 @@ describe("slimConference", () => {
       full_name: "Conference on Neural Information Processing Systems",
       description: "ML venue",
       category: "ml",
-      paper_count: 0,
       years: [],
     });
   });
@@ -49,7 +48,7 @@ describe("slimConference", () => {
 
     expect(out.description).toBeUndefined();
     expect(out.category).toBeUndefined();
-    expect(out.paper_count).toBe(12);
+    expect(out).not.toHaveProperty("paper_count");
     expect(out.years).toEqual([2024, 2025]);
   });
 });
@@ -65,7 +64,7 @@ describe("slimConferenceList", () => {
 
     expect(out.conferences).toHaveLength(2);
     expect(out.conferences.map((c) => c.id)).toEqual(["a", "b"]);
-    expect(out.conferences[1]!.paper_count).toBe(3);
+    expect(out.conferences[1]).not.toHaveProperty("paper_count");
   });
 
   it("returns an empty list when given a non-array", () => {

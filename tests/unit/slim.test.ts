@@ -49,7 +49,7 @@ function concise(hit: SearchHit) {
 }
 
 describe("slimConference", () => {
-  it("passes through populated fields", () => {
+  it("passes through populated fields and never states a paper count", () => {
     expect(
       slimConference({
         id: "c1",
@@ -66,12 +66,11 @@ describe("slimConference", () => {
       full_name: "Neural Information Processing Systems",
       description: "the big one",
       category: "ml",
-      paper_count: 42,
       years: [2023, 2024],
     });
   });
 
-  it("defaults missing description / category / counts", () => {
+  it("defaults missing description / category / years", () => {
     expect(
       slimConference({ id: "c2", short_name: "CCS", full_name: "ACM CCS" }),
     ).toEqual({
@@ -80,7 +79,6 @@ describe("slimConference", () => {
       full_name: "ACM CCS",
       description: undefined,
       category: undefined,
-      paper_count: 0,
       years: [],
     });
   });
