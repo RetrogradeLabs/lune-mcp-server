@@ -153,7 +153,9 @@ export const PROMPTS: PromptDef[] = [
     ],
     build: (a) => {
       const scope = [
-        present(a.venues) ? `Scope it to these venues: ${a.venues}.` : "",
+        present(a.venues)
+          ? `Scope it to these venues: ${a.venues}. Pass each as its own item in the \`venues\` filter.`
+          : "",
         present(a.since_year)
           ? `Focus on work from ${a.since_year} onward.`
           : "",
@@ -213,7 +215,7 @@ export const PROMPTS: PromptDef[] = [
         "Find and organise the related work I should cite and compare against:",
         `1. Call search_papers with a rich natural-language query derived from my abstract${scope}` +
           (scope
-            ? " (pass it as the `venues` filter, not only in prose)"
+            ? " (pass each venue as its own item in the `venues` filter, not only in prose)"
             : "") +
           ".",
         "2. For the 2 to 4 closest papers, call search_related_papers on their paper_id for " +

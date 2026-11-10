@@ -372,24 +372,44 @@ const PAPER_NOT_FOUND_STEER =
   "search_papers(source=workspace) and must be used with source=workspace; a " +
   "guidance doc_id comes from search_research_guidance.";
 
-// Apply paper-id recovery only to paper tools; conference and guidance 404s
-// need their own hints, while unmapped searches keep the bare detail.
+const CONFERENCE_NOT_FOUND_STEER =
+  " If the conference is unknown, call list_conferences for valid short names.";
+
+// Paper-id recovery fits the tools that take ids. A search or evidence tool's
+// only 404 is an unknown conference filter, whose detail names no fix.
 const NOT_FOUND_STEER = new Map([
   ["get_paper_fulltext", PAPER_NOT_FOUND_STEER],
   ["get_paper_citations", PAPER_NOT_FOUND_STEER],
   ["search_related_papers", PAPER_NOT_FOUND_STEER],
   ["extract_from_papers", PAPER_NOT_FOUND_STEER],
-  ["verify_claims", PAPER_NOT_FOUND_STEER],
-  ["gather_evidence", PAPER_NOT_FOUND_STEER],
   [
     "get_research_guidance_doc",
     " If you do not have a valid doc_id, call search_research_guidance first.",
   ],
-  [
-    "get_conference_papers",
-    " If the conference is unknown, call list_conferences for valid short names.",
-  ],
+  ["get_conference_papers", CONFERENCE_NOT_FOUND_STEER],
+  ["search_papers", CONFERENCE_NOT_FOUND_STEER],
+  ["search_papers_many", CONFERENCE_NOT_FOUND_STEER],
+  ["verify_claims", CONFERENCE_NOT_FOUND_STEER],
+  ["gather_evidence", CONFERENCE_NOT_FOUND_STEER],
 ]);
+
+const VENUES_STEER = "Call list_conferences for the valid short names.\n";
+
+/** Whether a 422 names the `venues` argument. Read off `loc`, never the
+ *  message, so the steer cannot follow a rewording. */
+function namesVenues(body: ApiErrorBody): boolean {
+  const detail = body.detail;
+
+  return (
+    Array.isArray(detail) &&
+    detail.some(
+      (item) =>
+        isJsonObject(item) &&
+        Array.isArray(item.loc) &&
+        item.loc.filter((p) => p !== "body")[0] === "venues",
+    )
+  );
+}
 
 /**
  * Flatten FastAPI's 422 body, which is an ARRAY of `{loc, msg}` objects rather
@@ -575,14 +595,15 @@ function invalidParamsError(
   body: ApiErrorBody,
   base: ErrorEnvelope,
 ): MappedError {
-  // FastAPI's own 422 lists fields; Lune's checks (a venue, a page window)
-  // send one plain reason, which is just as much the fix to name.
+  // A 422 lists fields, as FastAPI's own does; some of Lune's checks (a page
+  // window) send one plain reason, which is just as much the fix to name.
   const lines = validationLines(body) ?? asText(body.detail);
+  const steer = namesVenues(body) ? VENUES_STEER : "";
 
   return {
     code: LuneErrorCode.InvalidParams,
     message: lines
-      ? `Lune rejected the arguments for this call:\n${lines}\n` +
+      ? `Lune rejected the arguments for this call:\n${lines}\n${steer}` +
         "Fix the named argument and call again; retrying unchanged fails identically."
       : "Lune rejected the arguments for this call. Re-read the tool's input " +
         "schema, fix the arguments, and call again; retrying unchanged fails identically.",

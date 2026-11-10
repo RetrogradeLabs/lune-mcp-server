@@ -110,6 +110,36 @@ describe("mapHttpError", () => {
       "fields.0.name: field name 'model_dump' is reserved",
     );
     expect(e.message).toMatch(/retrying unchanged fails identically/i);
+    expect(e.message).not.toContain("list_conferences");
+  });
+
+  it("422 on venues names the argument and steers to list_conferences", () => {
+    // An agent packed six venues into one item five times in a day, and the
+    // old detail pointed it at a REST route no MCP client can call.
+    const e = mapHttpError(
+      422,
+      {
+        detail: [
+          {
+            type: "value_error",
+            loc: ["body", "venues"],
+            msg: "none of ['AAAI, CVPR, ICCV'] is a known conference short name; each item must be one short name",
+            input: ["AAAI, CVPR, ICCV"],
+          },
+        ],
+      },
+      undefined,
+      undefined,
+      "search_papers",
+    );
+
+    expect(e.code).toBe(LuneErrorCode.InvalidParams);
+    expect(e.message).toBe(
+      "Lune rejected the arguments for this call:\n" +
+        "venues: none of ['AAAI, CVPR, ICCV'] is a known conference short name; each item must be one short name\n" +
+        "Call list_conferences for the valid short names.\n" +
+        "Fix the named argument and call again; retrying unchanged fails identically.",
+    );
   });
 
   it("402 → quota exhausted with buy-credits url", () => {
@@ -716,13 +746,34 @@ describe("mapHttpError header + steer", () => {
     expect(m.message).toContain("search_research_guidance");
   });
 
+  it.each([
+    "search_papers",
+    "search_papers_many",
+    "verify_claims",
+    "gather_evidence",
+  ])("steers %s's unknown conference to list_conferences", (tool) => {
+    // These tools take no ids, so their only 404 is the conference filter.
+    const m = mapHttpError(
+      404,
+      { detail: "Unknown conference: 'NIPS2'." },
+      undefined,
+      undefined,
+      tool,
+    );
+
+    expect(m.message).toBe(
+      "Unknown conference: 'NIPS2'. If the conference is unknown, call " +
+        "list_conferences for valid short names.",
+    );
+  });
+
   it("leaves the detail bare for tools with no recovery steer", () => {
     const m = mapHttpError(
       404,
       { detail: "Nothing here" },
       undefined,
       undefined,
-      "search_papers",
+      "search_research_guidance",
     );
 
     expect(m.message).toBe("Nothing here");

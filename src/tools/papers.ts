@@ -1,9 +1,8 @@
-import { ProtocolError } from "@modelcontextprotocol/server";
 import type { KyInstance } from "ky";
 import { cachedJson } from "../api/cached-fetch.js";
 import { isJsonString, type JsonValue } from "../json.js";
 import { HEAVY_TOOL_TIMEOUT_MS } from "../api/client.js";
-import { httpErrorToToolResult, LuneErrorCode } from "../errors.js";
+import { httpErrorToToolResult } from "../errors.js";
 import {
   type ConferenceCandidate,
   resolveConferenceShortName,
@@ -11,6 +10,7 @@ import {
 import {
   ALWAYS_LOAD_META,
   INLINE_RESULT_META,
+  invalidArguments,
   plainText,
   READ_ONLY_OPEN,
   structuredJson,
@@ -316,6 +316,51 @@ export const PAPER_TOOLS: ToolDef[] = [
 
 // Filters and conference resolution
 
+type ConferenceField = "conference" | "venues";
+
+/** A conference argument the agent can correct; `callPaperTool` answers it
+ *  with `invalidArguments` rather than a protocol error. */
+class ConferenceArgumentError extends Error {}
+
+// What agents put between names packed into one string ("ACL, EMNLP", "ACL or
+// EMNLP"). Split only after the whole string matched nothing.
+const NAME_SEPARATOR = /\s*[,;/]\s*|\s+or\s+/i;
+
+/** The canonical short names when `raw` packs several conferences into one
+ *  string and every part is a match; otherwise null. */
+function packedConferences(
+  raw: string,
+  list: readonly ConferenceCandidate[],
+): string[] | null {
+  const parts = raw.split(NAME_SEPARATOR).filter((part) => part.trim() !== "");
+
+  if (parts.length < 2) return null;
+
+  const names: string[] = [];
+
+  for (const part of parts) {
+    const result = resolveConferenceShortName(part, list);
+
+    if (result.kind !== "match") return null;
+    names.push(result.short_name);
+  }
+
+  return names;
+}
+
+function packedMessage(
+  field: ConferenceField,
+  raw: string,
+  names: readonly string[],
+): string {
+  return field === "venues"
+    ? `venues: "${raw}" names ${names.length} conferences in one item; ` +
+        `pass each as its own item: ${JSON.stringify(names)}.`
+    : `conference: "${raw}" names ${names.length} conferences, and ` +
+        `conference takes one: pass them as venues: ${JSON.stringify(names)}, ` +
+        "or make one call per conference.";
+}
+
 /**
  * Fetch the conferences list (cached on the API side for 10 min and
  * cached again on this side via `cachedJson`) and use it to canonicalise
@@ -324,14 +369,17 @@ export const PAPER_TOOLS: ToolDef[] = [
  * alone could resolve to a different venue it happens to prefix.
  *
  *   • Exact / unique fuzzy match → return the canonical `short_name`.
- *   • Ambiguous → throw `LuneErrorCode.InvalidParams` with the candidate
- *     list so the agent can retry with a more specific input.
+ *   • Ambiguous → a `ConferenceArgumentError` naming the candidates, so the
+ *     agent can retry with a more specific input.
+ *   • Several names in one string, each a match ("ACL, EMNLP") → a
+ *     `ConferenceArgumentError` naming them as separate items.
  *   • No match / endpoint unreachable → return the raw input unchanged
- *     and let the downstream call's 404 surface as the agent's signal.
+ *     and let the downstream call's 404 or 422 surface as the agent's signal.
  */
 async function resolveConferenceArg(
   api: KyInstance,
   raw: string,
+  field: ConferenceField,
 ): Promise<string> {
   let list: ConferenceCandidate[] | null = null;
 
@@ -360,15 +408,19 @@ async function resolveConferenceArg(
     case "match":
       return result.short_name;
     case "ambiguous":
-      throw new ProtocolError(
-        LuneErrorCode.InvalidParams,
-        `Conference "${raw}" is ambiguous, matches: ${result.candidates.join(
-          ", ",
-        )}. Retry with a more specific name.`,
-        { input: raw, candidates: result.candidates },
+      throw new ConferenceArgumentError(
+        `${field}: "${raw}" is ambiguous, matching ` +
+          `${result.candidates.join(", ")}. Retry with a more specific name.`,
       );
-    case "none":
+    case "none": {
+      const packed = packedConferences(raw, list);
+
+      if (packed) {
+        throw new ConferenceArgumentError(packedMessage(field, raw, packed));
+      }
+
       return raw;
+    }
   }
 }
 
@@ -514,7 +566,11 @@ async function applySharedFilters(
   conferenceKey: "conference" | "conference_short_name",
 ): Promise<void> {
   if (filters.conference) {
-    body[conferenceKey] = await resolveConferenceArg(api, filters.conference);
+    body[conferenceKey] = await resolveConferenceArg(
+      api,
+      filters.conference,
+      "conference",
+    );
   }
 
   if (filters.year) body.year = filters.year;
@@ -525,7 +581,7 @@ async function applySharedFilters(
 
   if (filters.venues && filters.venues.length > 0) {
     body.venues = await Promise.all(
-      filters.venues.map((v) => resolveConferenceArg(api, v)),
+      filters.venues.map((v) => resolveConferenceArg(api, v, "venues")),
     );
   }
 }
@@ -727,7 +783,13 @@ async function handleConferencePapers(
   args: JsonValue,
 ): Promise<ToolCallResult> {
   const a = ConfPapersInput.parse(args);
-  const conference = await resolveConferenceArg(api, a.conference);
+
+  const conference = await resolveConferenceArg(
+    api,
+    a.conference,
+    "conference",
+  );
+
   const sp = new URLSearchParams();
   setIfPresent(sp, "limit", a.limit);
   setIfPresent(sp, "offset", a.offset);
@@ -890,6 +952,10 @@ export async function callPaperTool(
         throw new Error(`unknown paper tool: ${name}`);
     }
   } catch (e) {
+    if (e instanceof ConferenceArgumentError) {
+      return invalidArguments(name, [e.message]);
+    }
+
     // Upstream API failures (401/402/403/404/429/5xx) resolve to an
     // `{ isError: true }` tool result; the rest re-throw as protocol errors.
     return await httpErrorToToolResult(e, name);

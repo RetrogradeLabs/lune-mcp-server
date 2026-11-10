@@ -28,7 +28,6 @@ import {
 } from "../support/json.js";
 import { callPaperTool } from "../../src/tools/papers.js";
 import { callGuidanceTool } from "../../src/tools/guidance.js";
-import { LuneErrorCode } from "../../src/errors.js";
 import { TOOL_RESPONSE_CACHE } from "../../src/cache.js";
 
 beforeEach(async () => {
@@ -86,6 +85,38 @@ const CONFERENCES = [
   { short_name: "USENIX Privacy", full_name: "USENIX Privacy Conference" },
 ];
 
+const PACKED_CONFERENCES = [
+  {
+    short_name: "AAAI",
+    full_name: "AAAI Conference on Artificial Intelligence",
+  },
+  {
+    short_name: "CVPR",
+    full_name: "IEEE/CVF Conference on Computer Vision and Pattern Recognition",
+  },
+  {
+    short_name: "ICCV",
+    full_name: "IEEE/CVF International Conference on Computer Vision",
+  },
+  {
+    short_name: "ICML",
+    full_name: "International Conference on Machine Learning",
+  },
+  {
+    short_name: "ACL",
+    full_name:
+      "Annual Meeting of the Association for Computational Linguistics",
+  },
+  {
+    short_name: "EMNLP",
+    full_name: "Conference on Empirical Methods in Natural Language Processing",
+  },
+];
+
+function textOf(result: PaperToolResult): string {
+  return result.content.map((block) => block.text).join("\n");
+}
+
 describe("resolveConferenceArg via search_papers", () => {
   it("canonicalises a fuzzy conference name to its short_name", async () => {
     const { ky, calls } = routedKy({
@@ -101,20 +132,103 @@ describe("resolveConferenceArg via search_papers", () => {
     expect(jsonBodyOf(searchCall).conference_short_name).toBe("NeurIPS");
   });
 
-  it("throws InvalidParams when the conference name is ambiguous", async () => {
-    const { ky } = routedKy({
+  it("answers an ambiguous conference name with a tool error the model reads", async () => {
+    // A thrown protocol error never enters the model's context (SEP-1303).
+    const { ky, calls } = routedKy({
       get: { conferences: CONFERENCES },
       post: { search: { results: [] } },
     });
 
-    await expect(
-      callPaperTool(ky, "search_papers", {
-        query: "x",
-        conference: "usenix",
-      }),
-    ).rejects.toMatchObject({
-      code: LuneErrorCode.InvalidParams,
+    const result = await callPaperTool(ky, "search_papers", {
+      query: "x",
+      conference: "usenix",
     });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain(
+      'conference: "usenix" is ambiguous, matching USENIX Security, USENIX Privacy.',
+    );
+    expect(textOf(result)).toContain("error_type=validation");
+    expect(calls.some((call) => call.url === "search")).toBe(false);
+  });
+
+  it("refuses venues packed into one item and names them as items", async () => {
+    // An agent sent this shape five times in a day (2026-11-10), and every
+    // name in it is a real short name.
+    const { ky, calls } = routedKy({
+      get: { conferences: PACKED_CONFERENCES },
+      post: { search: { results: [] } },
+    });
+
+    const result = await callPaperTool(ky, "search_papers", {
+      query: "x",
+      venues: ["AAAI, CVPR, ICCV"],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain(
+      'venues: "AAAI, CVPR, ICCV" names 3 conferences in one item; pass each ' +
+        'as its own item: ["AAAI","CVPR","ICCV"].',
+    );
+    expect(calls.some((call) => call.url === "search")).toBe(false);
+  });
+
+  it("refuses a packed item beside a good one instead of dropping it", async () => {
+    // The API keeps a partially known list, so ["ICML", "ACL or EMNLP"]
+    // searched ICML alone and said nothing.
+    const { ky, calls } = routedKy({
+      get: { conferences: PACKED_CONFERENCES },
+      post: { "search/batch": { results: [] } },
+    });
+
+    const result = await callPaperTool(ky, "search_papers_many", {
+      queries: ["x"],
+      limit: 10,
+      detail: false,
+      venues: ["ICML", "ACL or EMNLP"],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain(
+      'pass each as its own item: ["ACL","EMNLP"]',
+    );
+    expect(calls.some((call) => call.url === "search/batch")).toBe(false);
+  });
+
+  it("points a packed conference filter at venues", async () => {
+    const { ky, calls } = routedKy({
+      get: { conferences: PACKED_CONFERENCES },
+      post: { "evidence/gather": {} },
+    });
+
+    const result = await callPaperTool(ky, "gather_evidence", {
+      task: "x",
+      queries: ["x"],
+      conference: "ACL or EMNLP",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain(
+      'conference: "ACL or EMNLP" names 2 conferences, and conference takes ' +
+        'one: pass them as venues: ["ACL","EMNLP"], or make one call per conference.',
+    );
+    expect(calls.some((call) => call.url === "evidence/gather")).toBe(false);
+  });
+
+  it("passes a comma-bearing name through when its parts are not all venues", async () => {
+    const { ky, calls } = routedKy({
+      get: { conferences: PACKED_CONFERENCES },
+      post: { search: { results: [] } },
+    });
+
+    await callPaperTool(ky, "search_papers", {
+      query: "x",
+      venues: ["Proceedings of ICML, Long Papers"],
+    });
+
+    expect(jsonBodyOf(callTo(calls, "search")).venues).toEqual([
+      "Proceedings of ICML, Long Papers",
+    ]);
   });
 
   it("resolves an unlisted venue to itself, not to a listed one it prefixes", async () => {

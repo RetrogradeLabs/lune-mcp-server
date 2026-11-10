@@ -138,3 +138,25 @@ export function structuredJson(value: JsonValue): ToolCallResult {
 export function plainText(value: string): ToolCallResult {
   return { content: [{ type: "text", text: value }] };
 }
+
+/** Arguments the model can correct, answered as a tool error it reads
+ *  (SEP-1303): a protocol error never enters its context. */
+export function invalidArguments(
+  tool: string,
+  issues: readonly string[],
+): ToolCallResult {
+  return {
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text: [
+          `Invalid arguments for ${tool}:`,
+          ...issues,
+          "Correct the named arguments before retrying.",
+          "error_type=validation",
+        ].join("\n"),
+      },
+    ],
+  };
+}

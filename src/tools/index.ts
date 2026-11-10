@@ -43,7 +43,11 @@ import {
   callFeedbackTool,
 } from "./feedback.js";
 import { wireContent } from "../tool-result.js";
-import type { ToolCallResult, ToolDef } from "./_shared.js";
+import {
+  invalidArguments,
+  type ToolCallResult,
+  type ToolDef,
+} from "./_shared.js";
 
 // Workspace access rides source="workspace" on corpus tools; the API resolves
 // the active workspace and ordinary credentials get 400, so none register here.
@@ -314,20 +318,7 @@ async function dispatchToolCall(
           return `${path}: ${issue.message}`;
         });
 
-    return {
-      isError: true,
-      content: [
-        {
-          type: "text",
-          text: [
-            `Invalid arguments for ${name}:`,
-            ...issues,
-            "Correct the named arguments before retrying.",
-            "error_type=validation",
-          ].join("\n"),
-        },
-      ],
-    };
+    return invalidArguments(name, issues);
   }
 
   let result: ToolCallResult;

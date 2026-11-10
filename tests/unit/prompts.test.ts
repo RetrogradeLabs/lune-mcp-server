@@ -114,7 +114,20 @@ describe("getPromptResult rendering", () => {
 
     expect(t).toContain("mixture-of-experts routing");
     expect(t).toContain("NeurIPS, ICLR");
+    expect(t).toContain("Pass each as its own item in the `venues` filter.");
     expect(t).toContain("2022");
+  });
+
+  it("tells find_related_work to pass each venue as its own item", () => {
+    // "pass it as the venues filter" invited venues: ["NeurIPS, ICLR"].
+    const t = text("find_related_work", {
+      abstract: "Sparse attention for long documents.",
+      venues: "NeurIPS, ICLR",
+    });
+
+    expect(t).toContain(
+      "(restrict to NeurIPS, ICLR) (pass each venue as its own item in the `venues` filter",
+    );
   });
 
   it("omits optional clauses cleanly when not supplied (no stray placeholders)", () => {
