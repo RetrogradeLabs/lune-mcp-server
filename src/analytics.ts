@@ -376,7 +376,7 @@ export function claimMcpAnalyticsBudget(identity: string): boolean {
 }
 
 const SENSITIVE_ASSIGNMENT =
-  /\b([A-Za-z0-9_-]*(?:authorization|cookie|password|token|secret|api[_-]?key|private[_-]?key)[A-Za-z0-9_-]*)(\s*[:=]\s*)(?:Bearer\s+)?(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi;
+  /\b([A-Za-z0-9_-]*(?:authorization|cookie|password|token|secret|api[_-]?key|private[_-]?key)[A-Za-z0-9_-]*)(\s*[:=]\s*)(?:Bearer\s+)?(?:"[^"]*(?:"|$)|'[^']*(?:'|$)|[^\s,;]+)/gi;
 
 const BEARER_VALUE = /\bBearer\s+[^\s,;]+/gi;
 
@@ -388,10 +388,28 @@ const PROJECT_TOKEN_VALUE = /\bph[a-z]_[A-Za-z0-9_-]{8,}\b/gi;
 
 const LUNE_TOKEN_VALUE = /\blune_[A-Za-z0-9_-]{8,}\b/gi;
 
-const PEM_VALUE = /-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----/g;
+const PEM_VALUE = /-----BEGIN [^-]+-----[\s\S]*?(?:-----END [^-]+-----|$)/g;
+
+// Redaction can cost the square of the text and callers choose these strings,
+// so it scans the output plus this much.
+const REDACTION_LOOKAHEAD = 1024;
+
+const WHITESPACE = /\s/;
+
+// A secret the scan cut splits may no longer match, so its token goes too. Keys
+// and quoted values span spaces, so those patterns also match up to the cut.
+function scanWindow(value: string, limit: number): string {
+  if (value.length <= limit) return value;
+
+  let end = limit;
+
+  while (end > 0 && !WHITESPACE.test(value.charAt(end - 1))) end -= 1;
+
+  return value.slice(0, end);
+}
 
 export function sanitizeAnalyticsText(value: string, maxLength = 500): string {
-  const sanitized = value
+  const sanitized = scanWindow(value, maxLength + REDACTION_LOOKAHEAD)
     .replace(PEM_VALUE, "[private material redacted]")
     .replace(BEARER_VALUE, "Bearer [redacted]")
     .replace(

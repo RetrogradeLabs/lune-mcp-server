@@ -322,9 +322,9 @@ type ConferenceField = "conference" | "venues";
  *  with `invalidArguments` rather than a protocol error. */
 class ConferenceArgumentError extends Error {}
 
-// What agents put between names packed into one string ("ACL, EMNLP", "ACL or
-// EMNLP"). Split only after the whole string matched nothing.
-const NAME_SEPARATOR = /\s*[,;/]\s*|\s+or\s+/i;
+// What agents put between names packed into one string, once each whitespace
+// run is one space. Beside a separator, `\s*` rescans a long run quadratically.
+const NAME_SEPARATOR = / ?[,;/] ?| or /i;
 
 /** The canonical short names when `raw` packs several conferences into one
  *  string and every part is a match; otherwise null. */
@@ -332,7 +332,10 @@ function packedConferences(
   raw: string,
   list: readonly ConferenceCandidate[],
 ): string[] | null {
-  const parts = raw.split(NAME_SEPARATOR).filter((part) => part.trim() !== "");
+  const parts = raw
+    .replace(/\s+/g, " ")
+    .split(NAME_SEPARATOR)
+    .filter((part) => part.trim() !== "");
 
   if (parts.length < 2) return null;
 

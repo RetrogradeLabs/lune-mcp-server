@@ -668,6 +668,85 @@ describe("dispatchToolCall", () => {
     expect(toolText(result)).toContain(field);
   });
 
+  const LONG_NAME = "x".repeat(201);
+
+  describe.each([
+    ["a workspace credential", true],
+    ["any other credential", false],
+  ])("name bounds for %s", (_credential, includeWorkspace) => {
+    // A conference is matched against the venue list before the request it
+    // filters, so a name no venue could have must not reach that matching.
+    it.each([
+      ["search_papers", { query: "x", conference: LONG_NAME }, "conference"],
+      ["search_papers", { query: "x", venues: [LONG_NAME] }, "venues"],
+      [
+        "search_papers",
+        { query: "x", venues: Array.from({ length: 65 }, () => "ICML") },
+        "venues",
+      ],
+      [
+        "search_papers_many",
+        { queries: ["x"], limit: 10, detail: false, conference: LONG_NAME },
+        "conference",
+      ],
+      [
+        "search_papers_many",
+        { queries: ["x"], limit: 10, detail: false, venues: [LONG_NAME] },
+        "venues",
+      ],
+      ["verify_claims", { claims: ["x"], conference: LONG_NAME }, "conference"],
+      ["verify_claims", { claims: ["x"], venues: [LONG_NAME] }, "venues"],
+      [
+        "gather_evidence",
+        { task: "x", queries: ["x"], conference: LONG_NAME },
+        "conference",
+      ],
+      [
+        "gather_evidence",
+        { task: "x", queries: ["x"], venues: [LONG_NAME] },
+        "venues",
+      ],
+      ["get_conference_papers", { conference: LONG_NAME }, "conference"],
+      ["get_paper_fulltext", { paper_id: LONG_NAME }, "paper_id"],
+      ["get_paper_figures", { paper_id: LONG_NAME }, "paper_id"],
+      [
+        "search_figure_references",
+        { query: "x", venues: [LONG_NAME] },
+        "venues",
+      ],
+    ])(
+      "refuses an over-long %s %j argument unresolved",
+      async (name, args, field) => {
+        const upstream = createFakeKy(() => jsonReply({}));
+
+        const result = await dispatchToolCall(
+          upstream.ky,
+          name,
+          args,
+          includeWorkspace,
+          FIGURES_RELEASED,
+        );
+
+        expect(result.isError).toBe(true);
+        expect(toolText(result)).toContain(field);
+        expect(upstream.calls).toEqual([]);
+      },
+    );
+
+    it("takes a name at the bound", async () => {
+      const upstream = createFakeKy(() => jsonReply({ results: [] }));
+
+      await dispatchToolCall(
+        upstream.ky,
+        "search_papers",
+        { query: "x", conference: "x".repeat(200), venues: ["x".repeat(200)] },
+        includeWorkspace,
+      );
+
+      expect(upstream.calls.map((call) => call.url)).toContain("search");
+    });
+  });
+
   it("rejects arguments excluded by the advertised additionalProperties contract", async () => {
     const result = await dispatchToolCall(fakeKy(), "search_papers", {
       query: "valid",

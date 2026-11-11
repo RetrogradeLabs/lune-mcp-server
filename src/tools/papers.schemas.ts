@@ -1,15 +1,29 @@
 import { z } from "zod";
 
+// About twice the longest conference name. A name is matched against the
+// venue list before any request, and that work grows with its length.
+export const NAME_MAX_LENGTH = 200;
+
+// Bounds the resolution work per call; the corpus holds fewer venues than this.
+const VENUES_MAX = 64;
+
 // Reject "." and "..": encoding leaves them intact and URL normalization could
 // silently rewrite the API endpoint.
 export const pathSegmentId = (description: string) =>
   z
     .string()
     .min(1)
+    .max(NAME_MAX_LENGTH)
     .refine((s) => s !== "." && s !== "..", {
       message: "must be a real id, not '.' or '..'",
     })
     .describe(description);
+
+const CONFERENCE_NAME = z.string().max(NAME_MAX_LENGTH);
+
+const VENUE_NAMES = z
+  .array(z.string().min(1).max(NAME_MAX_LENGTH))
+  .max(VENUES_MAX);
 
 // Reuse one corpus|workspace selector; the API binds workspace to the credential
 // and rejects ordinary credentials, so callers never pass a workspace id.
@@ -45,10 +59,9 @@ export const SearchInput = z.object({
         'Less optimal: "RAG hallucination".',
     ),
   source: SOURCE_FIELD,
-  conference: z
-    .string()
-    .optional()
-    .describe('Filter by conference short name, e.g. "CCS", "NeurIPS".'),
+  conference: CONFERENCE_NAME.optional().describe(
+    'Filter by conference short name, e.g. "CCS", "NeurIPS".',
+  ),
   year: z.number().int().min(1990).max(2100).optional(),
   limit: z.number().int().min(1).max(50).default(10).optional(),
   offset: z
@@ -83,12 +96,9 @@ export const SearchInput = z.object({
     .max(2100)
     .optional()
     .describe("Only include papers published in this year or earlier."),
-  venues: z
-    .array(z.string().min(1))
-    .optional()
-    .describe(
-      'Restrict to these conference short names (e.g. ["NeurIPS", "ICML"]).',
-    ),
+  venues: VENUE_NAMES.optional().describe(
+    'Restrict to these conference short names (e.g. ["NeurIPS", "ICML"]).',
+  ),
   detail: z
     .boolean()
     .default(true)
@@ -116,13 +126,10 @@ export const SearchManyInput = z.object({
         "runs each variant through the full hybrid pipeline and RRF-fuses the " +
         "ranked lists into one deduped result set.",
     ),
-  conference: z
-    .string()
-    .optional()
-    .describe(
-      "Shared across every query: filter to this conference short name, e.g. " +
-        '"CCS", "NeurIPS".',
-    ),
+  conference: CONFERENCE_NAME.optional().describe(
+    "Shared across every query: filter to this conference short name, e.g. " +
+      '"CCS", "NeurIPS".',
+  ),
   year: z
     .number()
     .int()
@@ -150,13 +157,10 @@ export const SearchManyInput = z.object({
     .describe(
       "Shared across every query: only papers published in this year or earlier.",
     ),
-  venues: z
-    .array(z.string().min(1))
-    .optional()
-    .describe(
-      "Shared across every query: restrict to these conference short names " +
-        '(e.g. ["NeurIPS", "ICML"]).',
-    ),
+  venues: VENUE_NAMES.optional().describe(
+    "Shared across every query: restrict to these conference short names " +
+      '(e.g. ["NeurIPS", "ICML"]).',
+  ),
   limit: z
     .number()
     .int()
@@ -318,13 +322,10 @@ export const VerifyInput = z.object({
         "surrounding paragraph or the question the claims answer. Use it to " +
         "disambiguate terse claims; it does not change what is retrieved.",
     ),
-  conference: z
-    .string()
-    .optional()
-    .describe(
-      'Restrict the evidence search to this conference short name, e.g. "CCS", ' +
-        '"NeurIPS". Shared across every claim.',
-    ),
+  conference: CONFERENCE_NAME.optional().describe(
+    'Restrict the evidence search to this conference short name, e.g. "CCS", ' +
+      '"NeurIPS". Shared across every claim.',
+  ),
   year: z
     .number()
     .int()
@@ -350,13 +351,10 @@ export const VerifyInput = z.object({
     .describe(
       "Restrict the evidence search to this publication year or earlier. Shared across every claim.",
     ),
-  venues: z
-    .array(z.string().min(1))
-    .optional()
-    .describe(
-      "Restrict the evidence search to these conference short names " +
-        '(e.g. ["NeurIPS", "ICML"]). Shared across every claim.',
-    ),
+  venues: VENUE_NAMES.optional().describe(
+    "Restrict the evidence search to these conference short names " +
+      '(e.g. ["NeurIPS", "ICML"]). Shared across every claim.',
+  ),
 });
 
 export const GatherEvidenceInput = z.object({
@@ -425,17 +423,15 @@ export const GatherEvidenceInput = z.object({
       "Total search budget across all iterations (the billed ceiling). Defaults " +
         "to len(queries). Must exceed len(queries) only when max_iterations>1.",
     ),
-  conference: z
-    .string()
-    .optional()
-    .describe('Filter to this conference short name, e.g. "NeurIPS".'),
+  conference: CONFERENCE_NAME.optional().describe(
+    'Filter to this conference short name, e.g. "NeurIPS".',
+  ),
   year: z.number().int().min(1990).max(2100).optional(),
   year_min: z.number().int().min(1990).max(2100).optional(),
   year_max: z.number().int().min(1990).max(2100).optional(),
-  venues: z
-    .array(z.string().min(1))
-    .optional()
-    .describe("Restrict to these conference short names."),
+  venues: VENUE_NAMES.optional().describe(
+    "Restrict to these conference short names.",
+  ),
 });
 
 export const ListConfsInput = z.object({

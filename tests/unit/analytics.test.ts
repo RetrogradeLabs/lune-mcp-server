@@ -275,6 +275,61 @@ describe("sanitizeAnalyticsText", () => {
       `${key}=[redacted]`,
     );
   });
+
+  it("redacts in bounded time however long the text is", () => {
+    // Callers choose this text. Scanned whole, this shape took seconds here.
+    const started = performance.now();
+
+    const value = sanitizeAnalyticsText(
+      `${"a-".repeat(760)} ${"a-".repeat(64_000)}`,
+    );
+
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(value).toBe("a-".repeat(250));
+  });
+
+  it("redacts a secret the output cut would have split", () => {
+    const value = sanitizeAnalyticsText(
+      `${"x".repeat(490)} alice@example.com`,
+      500,
+    );
+
+    expect(value).not.toContain("alice");
+    expect(value.length).toBeLessThanOrEqual(500);
+  });
+
+  it("redacts a private key longer than the text it scans", () => {
+    const body = `${"A".repeat(64)}\n`.repeat(80);
+    const key = `-----BEGIN PRIVATE KEY-----\n${body}-----END PRIVATE KEY-----`;
+
+    expect(sanitizeAnalyticsText(`failed: ${key}`)).toBe(
+      "failed: [private material redacted]",
+    );
+  });
+
+  it("drops a token longer than the text it scans", () => {
+    const jwt = `eyJ${"a".repeat(20)}.${"b".repeat(5000)}.${"c".repeat(40)}`;
+
+    expect(sanitizeAnalyticsText(`failed: ${jwt}`)).toBe("failed:");
+  });
+
+  it.each([
+    ["an email", "alice@example.com", "alice"],
+    ["a Lune token", `lune_${"k".repeat(40)}`, "lune_"],
+    ["a quoted password", 'password: "correct horse battery staple"', "horse"],
+  ])("never emits part of %s the scan cut splits", (_kind, secret, part) => {
+    // Redacting the key shrinks the text and pulls what follows the cut forward.
+    const body = `${"A".repeat(64)}\n`.repeat(22);
+    const key = `-----BEGIN PRIVATE KEY-----\n${body}-----END PRIVATE KEY-----`;
+
+    for (let gap = 0; gap < 1200; gap += 1) {
+      const value = sanitizeAnalyticsText(
+        `${key} ${"x".repeat(gap)} ${secret} done`,
+      );
+
+      expect(value).not.toContain(part);
+    }
+  });
 });
 
 describe("request-scoped analytics context", () => {

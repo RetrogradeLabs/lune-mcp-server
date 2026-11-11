@@ -215,6 +215,42 @@ describe("resolveConferenceArg via search_papers", () => {
     expect(calls.some((call) => call.url === "evidence/gather")).toBe(false);
   });
 
+  it.each([
+    ["AAAI ;\tCVPR /  ICCV", '["AAAI","CVPR","ICCV"]'],
+    ["ACL \n OR\tEMNLP", '["ACL","EMNLP"]'],
+    ["  ACL,EMNLP  ", '["ACL","EMNLP"]'],
+  ])(
+    "splits the packed item %j whatever spacing surrounds its separators",
+    async (item, names) => {
+      const { ky, calls } = routedKy({
+        get: { conferences: PACKED_CONFERENCES },
+        post: { search: { results: [] } },
+      });
+
+      const result = await callPaperTool(ky, "search_papers", {
+        query: "x",
+        venues: [item],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain(`pass each as its own item: ${names}.`);
+      expect(calls.some((call) => call.url === "search")).toBe(false);
+    },
+  );
+
+  it("forwards an unmatched name with its spacing as sent", async () => {
+    const { ky, calls } = routedKy({
+      get: { conferences: PACKED_CONFERENCES },
+      post: { search: { results: [] } },
+    });
+
+    const item = "Proceedings  of ICML ,\tLong   Papers";
+
+    await callPaperTool(ky, "search_papers", { query: "x", venues: [item] });
+
+    expect(jsonBodyOf(callTo(calls, "search")).venues).toEqual([item]);
+  });
+
   it("passes a comma-bearing name through when its parts are not all venues", async () => {
     const { ky, calls } = routedKy({
       get: { conferences: PACKED_CONFERENCES },

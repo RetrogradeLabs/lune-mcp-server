@@ -133,7 +133,8 @@
           },
           "conference": {
             "description": "Filter by conference short name, e.g. \"CCS\", \"NeurIPS\".",
-            "type": "string"
+            "type": "string",
+            "maxLength": 200
           },
           "year": {
             "type": "integer",
@@ -173,10 +174,12 @@
           },
           "venues": {
             "description": "Restrict to these conference short names (e.g. [\"NeurIPS\", \"ICML\"]).",
+            "maxItems": 64,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 200
             }
           },
           "detail": {
@@ -349,7 +352,8 @@
           },
           "conference": {
             "description": "Shared across every query: filter to this conference short name, e.g. \"CCS\", \"NeurIPS\".",
-            "type": "string"
+            "type": "string",
+            "maxLength": 200
           },
           "year": {
             "description": "Shared across every query: restrict to a single publication year.",
@@ -371,10 +375,12 @@
           },
           "venues": {
             "description": "Shared across every query: restrict to these conference short names (e.g. [\"NeurIPS\", \"ICML\"]).",
+            "maxItems": 64,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 200
             }
           },
           "limit": {
@@ -597,6 +603,7 @@
           "paper_id": {
             "type": "string",
             "minLength": 1,
+            "maxLength": 200,
             "description": "A corpus paper UUID, from a search_papers / search_papers_many / search_related_papers / get_paper_citations result."
           },
           "format": {
@@ -635,6 +642,7 @@
           "paper_id": {
             "type": "string",
             "minLength": 1,
+            "maxLength": 200,
             "description": "A corpus paper UUID, taken from a `search_papers` or `search_related_papers` result."
           },
           "direction": {
@@ -830,6 +838,7 @@
           "conference": {
             "type": "string",
             "minLength": 1,
+            "maxLength": 200,
             "description": "Conference short name, e.g. \"NeurIPS\", \"CCS\", \"ICLR\"."
           },
           "year": {
@@ -951,6 +960,7 @@
           "paper_id": {
             "type": "string",
             "minLength": 1,
+            "maxLength": 200,
             "description": "A corpus paper UUID (from a paper search) to find neighbors for."
           },
           "limit": {
@@ -1217,7 +1227,8 @@
           },
           "conference": {
             "description": "Restrict the evidence search to this conference short name, e.g. \"CCS\", \"NeurIPS\". Shared across every claim.",
-            "type": "string"
+            "type": "string",
+            "maxLength": 200
           },
           "year": {
             "description": "Restrict the evidence search to a single publication year.",
@@ -1239,10 +1250,12 @@
           },
           "venues": {
             "description": "Restrict the evidence search to these conference short names (e.g. [\"NeurIPS\", \"ICML\"]). Shared across every claim.",
+            "maxItems": 64,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 200
             }
           }
         },
@@ -1385,7 +1398,8 @@
           },
           "conference": {
             "description": "Filter to this conference short name, e.g. \"NeurIPS\".",
-            "type": "string"
+            "type": "string",
+            "maxLength": 200
           },
           "year": {
             "type": "integer",
@@ -1404,10 +1418,12 @@
           },
           "venues": {
             "description": "Restrict to these conference short names.",
+            "maxItems": 64,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "maxLength": 200
             }
           }
         },
@@ -1756,6 +1772,7 @@
           "doc_id": {
             "type": "string",
             "minLength": 1,
+            "maxLength": 200,
             "description": "Guidance document UUID, from a `search_research_guidance` hit. NOT a corpus paper_id (those come from `search_papers`)."
           }
         },

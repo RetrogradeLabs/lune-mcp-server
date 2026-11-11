@@ -21,11 +21,7 @@ import type { z } from "zod";
 import { httpErrorToToolResult } from "../errors.js";
 import type { JsonValue } from "../json.js";
 import type { ImageContentBlock } from "../tool-result.js";
-import {
-  FigureSearchInput,
-  PaperFiguresInput,
-  pathSegmentId,
-} from "./figures.schemas.js";
+import { FigureSearchInput, PaperFiguresInput } from "./figures.schemas.js";
 import { cachedJson } from "../api/cached-fetch.js";
 import { GetPaperFiguresOutput, SearchFiguresOutput } from "./_outputs.js";
 import {
@@ -188,12 +184,11 @@ async function handlePaperFigures(
   args: JsonValue,
 ): Promise<ToolCallResult> {
   const input = PaperFiguresInput.parse(args);
-  const paperId = pathSegmentId("paper_id").parse(input.paper_id);
 
   const raw = await cachedJson(
     api,
     "get",
-    `papers/${encodeURIComponent(paperId)}/figures`,
+    `papers/${encodeURIComponent(input.paper_id)}/figures`,
   );
 
   // SAFETY: as above, GetPaperFiguresOutput admits only JSON values.

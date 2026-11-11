@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export { pathSegmentId } from "./papers.schemas.js";
+import { NAME_MAX_LENGTH, pathSegmentId } from "./papers.schemas.js";
 
 /**
  * The rhetorical roles a figure can play. Mirrors the API's own `FigureRole`
@@ -42,7 +42,7 @@ export const FigureSearchInput = z.object({
         "side), `results_plot`, `data_schema`, `algorithm`, `concept`.",
     ),
   venues: z
-    .array(z.string())
+    .array(z.string().max(NAME_MAX_LENGTH))
     .max(20)
     .optional()
     .describe(
@@ -96,10 +96,7 @@ export const FigureSearchInput = z.object({
 });
 
 export const PaperFiguresInput = z.object({
-  paper_id: z
-    .string()
-    .min(1)
-    .describe(
-      "A corpus paper UUID, from `search_papers` or `search_figure_references`.",
-    ),
+  paper_id: pathSegmentId(
+    "A corpus paper UUID, from `search_papers` or `search_figure_references`.",
+  ),
 });
