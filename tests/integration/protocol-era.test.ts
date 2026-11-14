@@ -351,9 +351,15 @@ describe("per-request attribution and the analytics context", () => {
       params?: JsonObject;
       clientInfo?: { name: string; version: string } | null;
       era?: "modern" | "legacy";
+      meta?: JsonObject;
     } = {},
   ): Promise<number> {
-    const { params = {}, clientInfo = CLAUDE_CODE, era = "modern" } = opts;
+    const {
+      params = {},
+      clientInfo = CLAUDE_CODE,
+      era = "modern",
+      meta = {},
+    } = opts;
 
     const envelope =
       clientInfo === null
@@ -391,7 +397,10 @@ describe("per-request attribution and the analytics context", () => {
         jsonrpc: "2.0",
         id,
         method,
-        params: era === "modern" ? { ...params, _meta: envelope } : params,
+        params:
+          era === "modern"
+            ? { ...params, _meta: { ...envelope, ...meta } }
+            : { ...params, _meta: meta },
       }),
     });
 
@@ -460,6 +469,21 @@ describe("per-request attribution and the analytics context", () => {
     if (!props) throw new Error("analytics recorder saw no tool call event");
     expect(props.$session_id).toEqual(expect.any(String));
     expect(props.$session_id).not.toBe("client-supplied-session");
+  });
+
+  it("reports the model Codex names in its turn metadata, and none otherwise", async () => {
+    await call(6, "tools/call", {
+      ...searchCall("codex model"),
+      clientInfo: { name: "codex-mcp-client", version: "0.169.0" },
+      meta: { "x-codex-turn-metadata": { model: "gpt-5.5-codex" } },
+    });
+    expect(properties("$mcp_tool_call")).toMatchObject({
+      $mcp_llm_model: "gpt-5.5-codex",
+      $mcp_llm_model_source: "client_metadata",
+    });
+
+    await call(7, "tools/call", searchCall("no model"));
+    expect(properties("$mcp_tool_call")?.$mcp_llm_model).toBeUndefined();
   });
 
   it("does not leak one client's identity into the next request", async () => {

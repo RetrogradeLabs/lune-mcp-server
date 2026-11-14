@@ -274,6 +274,25 @@ export function clientInfoFromEnvelope(
   return { name, version: envelopeText(info?.version) ?? "0" };
 }
 
+// Codex names the model it runs on in each request's `_meta`, the one client
+// metadata PostHog reads for `$mcp_llm_model`; other clients send none.
+const CODEX_TURN_META_KEY = "x-codex-turn-metadata";
+
+/** The calling model when its client reports one. Unverified: analytics only. */
+export function llmModelProperties(meta: JsonValue | undefined): JsonObject {
+  const turn = isJsonObject(meta) ? meta[CODEX_TURN_META_KEY] : undefined;
+
+  const model =
+    isJsonObject(turn) && isJsonString(turn.model) ? turn.model.trim() : "";
+
+  if (!model || model.toLowerCase() === "unknown") return {};
+
+  return {
+    $mcp_llm_model: sanitizeAnalyticsText(model, 100),
+    $mcp_llm_model_source: "client_metadata",
+  };
+}
+
 /**
  * Stamp the client identity a 2026-07-28 request carries onto `server`, so the
  * `X-Lune-Client` header and the PostHog client properties both see it. A legacy

@@ -15,6 +15,7 @@ import {
   attributeFromEnvelope,
   captureMcp,
   clientHeaderFor,
+  llmModelProperties,
   type McpAnalyticsContext,
   type McpServerLike,
 } from "../analytics.js";
@@ -641,6 +642,11 @@ export function registerAllTools(
       const api = taggedClient(ctx);
       const started = Date.now();
 
+      // SAFETY: the transport decoded `_meta` as JSON; the reader narrows it.
+      const model = llmModelProperties(
+        req.params._meta as JsonValue | undefined,
+      );
+
       try {
         const { callable } = await releases();
         const sourceWasSupplied = Object.hasOwn(args, "source");
@@ -663,6 +669,7 @@ export function registerAllTools(
             $mcp_tool_name: name,
             $mcp_duration_ms: Date.now() - started,
             $mcp_is_error: result.isError === true,
+            ...model,
           };
 
           if (result.isError === true) {
@@ -685,6 +692,7 @@ export function registerAllTools(
             $mcp_duration_ms: Date.now() - started,
             $mcp_is_error: true,
             $mcp_error_type: "protocol_error",
+            ...model,
           });
         }
 

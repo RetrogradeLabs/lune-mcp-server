@@ -26,6 +26,7 @@ import {
   flushAnalytics,
   initAnalytics as initAnalyticsWithDelivery,
   resetAnalyticsForTests,
+  llmModelProperties,
   sanitizeAnalyticsText,
   setServerClientInfo,
   setServerInfo,
@@ -249,6 +250,33 @@ describe("captureMcp wire shape", () => {
     expect(props.$mcp_intent).toBe(
       "Email [email redacted], token=[redacted], Authorization: [redacted]",
     );
+  });
+});
+
+describe("llmModelProperties", () => {
+  it("reads the model Codex reports in its turn metadata", () => {
+    expect(
+      llmModelProperties({
+        "x-codex-turn-metadata": { model: " gpt-5.5-codex ", effort: "high" },
+      }),
+    ).toEqual({
+      $mcp_llm_model: "gpt-5.5-codex",
+      $mcp_llm_model_source: "client_metadata",
+    });
+  });
+
+  it.each([
+    ["no metadata", undefined],
+    ["metadata without Codex's key", { progressToken: 3 }],
+    ["a non-object turn", { "x-codex-turn-metadata": "gpt-5.5" }],
+    ["a non-string model", { "x-codex-turn-metadata": { model: 5 } }],
+    ["a blank model", { "x-codex-turn-metadata": { model: "  " } }],
+    [
+      "the unknown placeholder",
+      { "x-codex-turn-metadata": { model: "Unknown" } },
+    ],
+  ])("reports no model for %s", (_case, meta) => {
+    expect(llmModelProperties(meta)).toEqual({});
   });
 });
 
