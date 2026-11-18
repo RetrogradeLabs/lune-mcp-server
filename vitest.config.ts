@@ -3,6 +3,9 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     env: {
+      // Unstubbed calls would reach production's API; Fetch refuses port 9
+      // before connecting, where a closed port can hang instead of refusing.
+      LUNE_API_BASE_URL: "http://127.0.0.1:9",
       MCP_ALLOWED_ORIGINS:
         '["https://claude.ai","https://chatgpt.com","http://localhost:3000"]',
       LUNE_POSTHOG_HOST: "https://analytics.example.test",
