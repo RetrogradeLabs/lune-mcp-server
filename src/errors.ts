@@ -664,9 +664,11 @@ export function mapHttpError(
 }
 
 const STATUS_ERROR_TYPES = new Map([
+  [400, "validation"],
   [401, "permission"],
   [403, "permission"],
   [404, "not_found"],
+  [408, "timeout"],
   [422, "validation"],
   [429, "rate_limited"],
 ]);
@@ -870,6 +872,16 @@ export function isUnconfirmedDelivery(cause: unknown): boolean {
   }
 
   return isRetryableTransportError(cause);
+}
+
+/** The footer an unconfirmed delivery's reply ends with, so analytics files it
+ *  under the gateway status or transport failure it was (`errorFacts`). */
+export function unconfirmedDeliveryFooter(cause: unknown): string {
+  if (!isKyHttpError(cause)) return "error_type=timeout";
+
+  const { status } = cause.response;
+
+  return `http_status=${status} error_type=${errorType({ status })}`;
 }
 
 /**

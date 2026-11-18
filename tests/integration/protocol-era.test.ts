@@ -37,7 +37,7 @@ import {
   initAnalytics,
   resetAnalyticsForTests,
 } from "../../src/analytics.js";
-import { isJsonString, type JsonObject } from "../../src/json.js";
+import { isJsonObject, isJsonString, type JsonObject } from "../../src/json.js";
 import { jsonRpcObject } from "../support/http.js";
 import {
   jsonNumber,
@@ -353,7 +353,7 @@ describe("per-request attribution and the analytics context", () => {
       era?: "modern" | "legacy";
       meta?: JsonObject;
     } = {},
-  ): Promise<number> {
+  ): Promise<{ status: number; text: string }> {
     const {
       params = {},
       clientInfo = CLAUDE_CODE,
@@ -404,10 +404,10 @@ describe("per-request attribution and the analytics context", () => {
       }),
     });
 
-    await res.text();
+    const text = await res.text();
     await flushAnalytics(2000);
 
-    return res.status;
+    return { status: res.status, text };
   }
 
   const searchCall = (query: string) => ({
@@ -451,7 +451,12 @@ describe("per-request attribution and the analytics context", () => {
   it("carries the request's analytics context all the way to a tool call event", async () => {
     // The context is entered at the Express layer and must survive the adapter,
     // the per-request instance and the await chain. Dropping it is silent.
-    const status = await call(1, "tools/call", searchCall("analytics context"));
+    const { status } = await call(
+      1,
+      "tools/call",
+      searchCall("analytics context"),
+    );
+
     expect(status).toBe(200);
 
     const event = recorder.events.find((e) => e.event === "$mcp_tool_call");
@@ -473,7 +478,10 @@ describe("per-request attribution and the analytics context", () => {
 
   it("reports the model Codex names in its turn metadata, and none otherwise", async () => {
     await call(6, "tools/call", {
-      ...searchCall("codex model"),
+      params: {
+        name: "search_papers",
+        arguments: { query: "codex model", llm_model: "claude-opus-5-5" },
+      },
       clientInfo: { name: "codex-mcp-client", version: "0.169.0" },
       meta: { "x-codex-turn-metadata": { model: "gpt-5.5-codex" } },
     });
@@ -484,6 +492,60 @@ describe("per-request attribution and the analytics context", () => {
 
     await call(7, "tools/call", searchCall("no model"));
     expect(properties("$mcp_tool_call")?.$mcp_llm_model).toBeUndefined();
+  });
+
+  it("asks the entry tools, and only them, which model is calling", async () => {
+    const { text } = await call(8, "tools/list");
+
+    const asking = jsonObjects(resultOf(text).tools, "tools")
+      .filter((tool) => {
+        const schema = jsonObject(tool.inputSchema, "inputSchema");
+
+        return (
+          isJsonObject(schema.properties) && "llm_model" in schema.properties
+        );
+      })
+      .map((tool) => jsonString(tool.name, "tool.name"))
+      .sort((a, b) => a.localeCompare(b));
+
+    expect(asking).toEqual([
+      "search_papers",
+      "search_papers_many",
+      "search_research_guidance",
+    ]);
+
+    const searchPapers = jsonObjects(resultOf(text).tools, "tools").find(
+      (tool) => tool.name === "search_papers",
+    );
+
+    const { properties } = jsonObject(searchPapers?.inputSchema, "inputSchema");
+
+    // No length or pattern: a client validating arguments must accept any ID
+    // it is sent, a 101-character Bedrock ARN included.
+    expect(
+      jsonObject(jsonObject(properties, "properties").llm_model, "llm_model"),
+    ).toEqual({ type: "string", description: expect.any(String) });
+  });
+
+  it("records the model an agent names, and keeps it out of the tool's arguments", async () => {
+    await call(9, "tools/call", {
+      params: {
+        name: "get_paper_fulltext",
+        arguments: {
+          paper_id: "3f0d3b3e-0f4a-4c1a-9f2b-1c2d3e4f5a6b",
+          llm_model: "claude-opus-5-5",
+        },
+      },
+    });
+
+    // Never offered here, still taken off: on the strict schema it would fail
+    // validation, so the dead API port's dropped connection proves it was not.
+    expect(properties("$mcp_tool_call")).toMatchObject({
+      $mcp_llm_model: "claude-opus-5-5",
+      $mcp_llm_model_source: "self_reported",
+      $mcp_is_error: true,
+      $mcp_error_type: "timeout",
+    });
   });
 
   it("does not leak one client's identity into the next request", async () => {
@@ -571,7 +633,7 @@ describe("the analytics context handed to each per-request server", () => {
   async function listedTools(analytics: {
     captureAllowed: boolean;
     suppressAnalytics?: boolean;
-  }): Promise<string[]> {
+  }): Promise<JsonObject[]> {
     const app = buildHttpApp({
       credentialProbe: async () => ({
         status: "valid",
@@ -602,23 +664,36 @@ describe("the analytics context handed to each per-request server", () => {
         }),
       });
 
-      const body = await res.text();
-      const tools = jsonObjects(resultOf(body).tools, "tools");
-
-      return tools.map((tool) => jsonString(tool.name, "tool.name"));
+      return jsonObjects(resultOf(await res.text()).tools, "tools");
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   }
 
-  it("withholds request_capability from a principal who opted out of capture", async () => {
-    expect(
-      await listedTools({ suppressAnalytics: true, captureAllowed: false }),
-    ).not.toContain("request_capability");
+  const names = (tools: JsonObject[]) =>
+    tools.map((tool) => jsonString(tool.name, "tool.name"));
+
+  const askingForModel = (tools: JsonObject[]) =>
+    tools.filter((tool) => {
+      const schema = jsonObject(tool.inputSchema, "inputSchema");
+
+      return (
+        isJsonObject(schema.properties) && "llm_model" in schema.properties
+      );
+    });
+
+  it("asks nothing for analytics of a principal who opted out of capture", async () => {
+    const tools = await listedTools({
+      suppressAnalytics: true,
+      captureAllowed: false,
+    });
+
+    expect(names(tools)).not.toContain("request_capability");
+    expect(askingForModel(tools)).toEqual([]);
   });
 
   it("keeps offering it to a principal who allows capture", async () => {
-    expect(await listedTools({ captureAllowed: true })).toContain(
+    expect(names(await listedTools({ captureAllowed: true }))).toContain(
       "request_capability",
     );
   });
@@ -627,7 +702,9 @@ describe("the analytics context handed to each per-request server", () => {
     // `analytics_capture_allowed` also goes false when the shared daily PostHog
     // budget runs out, and a telemetry quota must not move the tool surface.
     expect(
-      await listedTools({ suppressAnalytics: false, captureAllowed: false }),
+      names(
+        await listedTools({ suppressAnalytics: false, captureAllowed: false }),
+      ),
     ).toContain("request_capability");
   });
 });

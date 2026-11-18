@@ -278,19 +278,51 @@ export function clientInfoFromEnvelope(
 // metadata PostHog reads for `$mcp_llm_model`; other clients send none.
 const CODEX_TURN_META_KEY = "x-codex-turn-metadata";
 
-/** The calling model when its client reports one. Unverified: analytics only. */
-export function llmModelProperties(meta: JsonValue | undefined): JsonObject {
+/** The argument the hosted entry tools offer for an agent to name its model
+ *  (PostHog's self-report convention). Analytics only, never a tool input. */
+export const LLM_MODEL_ARGUMENT = "llm_model";
+
+/** A model ID as one token, Vertex's `@<version>` included. A path (an ARN, a
+ *  resource name, `provider/model`) records nothing: its last segment can be a
+ *  customer's own label, the rest an account or project. Prose fails too. */
+const MODEL_ID = /^(?=.{1,100}$)[\w.:[\]-]+(?:@[\w-]+)?$/;
+
+function modelName(value: JsonValue | undefined): string | undefined {
+  const model = isJsonString(value) ? value.trim() : "";
+
+  if (!MODEL_ID.test(model) || model.toLowerCase() === "unknown") {
+    return undefined;
+  }
+
+  return sanitizeAnalyticsText(model, 100);
+}
+
+/**
+ * The calling model, for analytics only: neither source is verified.
+ *
+ * - Codex's turn metadata names it: `client_metadata`, which wins.
+ * - Otherwise the agent's own `llm_model` argument: `self_reported`.
+ * - Neither, or a blank or `unknown` name: nothing.
+ */
+export function llmModelProperties(
+  meta: JsonValue | undefined,
+  reported?: JsonValue,
+): JsonObject {
   const turn = isJsonObject(meta) ? meta[CODEX_TURN_META_KEY] : undefined;
+  const fromClient = modelName(isJsonObject(turn) ? turn.model : undefined);
 
-  const model =
-    isJsonObject(turn) && isJsonString(turn.model) ? turn.model.trim() : "";
+  if (fromClient) {
+    return {
+      $mcp_llm_model: fromClient,
+      $mcp_llm_model_source: "client_metadata",
+    };
+  }
 
-  if (!model || model.toLowerCase() === "unknown") return {};
+  const fromAgent = modelName(reported);
 
-  return {
-    $mcp_llm_model: sanitizeAnalyticsText(model, 100),
-    $mcp_llm_model_source: "client_metadata",
-  };
+  return fromAgent
+    ? { $mcp_llm_model: fromAgent, $mcp_llm_model_source: "self_reported" }
+    : {};
 }
 
 /**

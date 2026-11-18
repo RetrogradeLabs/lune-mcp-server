@@ -99,6 +99,11 @@ export const ALWAYS_LOAD_META = {
   "anthropic/alwaysLoad": true,
 } satisfies JsonObject;
 
+/** Whether a tool is one of the entry tools `ALWAYS_LOAD_META` marks. */
+export function isEntryTool(meta: JsonObject | undefined): boolean {
+  return meta?.["anthropic/alwaysLoad"] === true;
+}
+
 /** Directory review refuses comparisons with alternatives and "prefer this"
  *  instructions in anything we expose; see the MCP server design notes. */
 export const COMPARATIVE_WORDING =

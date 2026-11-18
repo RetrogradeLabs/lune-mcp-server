@@ -45,6 +45,7 @@ import {
 import { listPrompts } from "../../src/prompts.js";
 import { registerResources } from "../../src/resources.js";
 import { TOOL_RESPONSE_CACHE } from "../../src/cache.js";
+import { LLM_MODEL_ARGUMENT } from "../../src/analytics.js";
 import { GatherEvidenceOutput } from "../../src/tools/_outputs.js";
 
 beforeEach(async () => {
@@ -108,6 +109,16 @@ describe("getAllToolDefinitions", () => {
       expect(d.title.length).toBeGreaterThan(0);
       expect(d.annotations).toBeTypeOf("object");
     }
+  });
+
+  it("leaves llm_model to the hosted server, which offers and strips it", () => {
+    const defining = listToolsResponse(true, FIGURES_RELEASED).tools.filter(
+      ({ inputSchema }) =>
+        isJsonObject(inputSchema.properties) &&
+        Object.hasOwn(inputSchema.properties, LLM_MODEL_ARGUMENT),
+    );
+
+    expect(defining).toEqual([]);
   });
 
   it("declares the API authorization scope for every gated tool", () => {
@@ -582,17 +593,38 @@ describe("dispatchToolCall", () => {
     },
   );
 
-  it("does not ask for a resend when Lune never confirmed the feedback", async () => {
-    const result = await dispatchToolCall(
-      erroringKy(504, {}),
-      "send_feedback",
-      { category: "helpful", message: "it found the paper" },
-    );
+  it.each([
+    [
+      "a gateway timeout",
+      () => erroringKy(504, {}),
+      "\nhttp_status=504 error_type=api_5xx",
+    ],
+    [
+      "a dropped connection",
+      () =>
+        ky.create({
+          prefix: "https://api.example.test/",
+          retry: 0,
+          fetch: () => Promise.reject(new TypeError("fetch failed")),
+        }),
+      "\nerror_type=timeout",
+    ],
+  ])(
+    "does not ask for a resend after %s, and names the failure",
+    async (_case, api, footer) => {
+      const result = await dispatchToolCall(api(), "send_feedback", {
+        category: "helpful",
+        message: "it found the paper",
+      });
 
-    expect(result.isError).toBe(true);
-    expect(toolText(result)).toContain("did not confirm the feedback arrived");
-    expect(toolText(result)).not.toMatch(/retry/i);
-  });
+      expect(result.isError).toBe(true);
+      expect(toolText(result)).toContain(
+        "did not confirm the feedback arrived",
+      );
+      expect(toolText(result)).not.toMatch(/retry/i);
+      expect(toolText(result).endsWith(footer)).toBe(true);
+    },
+  );
 
   it("lets an agent leave training consent out of a send", () => {
     const listed = listToolsResponse(false).tools.find(

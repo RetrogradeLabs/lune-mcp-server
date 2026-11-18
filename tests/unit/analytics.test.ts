@@ -278,6 +278,61 @@ describe("llmModelProperties", () => {
   ])("reports no model for %s", (_case, meta) => {
     expect(llmModelProperties(meta)).toEqual({});
   });
+
+  it("falls back to the model the agent names itself", () => {
+    expect(llmModelProperties(undefined, " claude-opus-5-5 ")).toEqual({
+      $mcp_llm_model: "claude-opus-5-5",
+      $mcp_llm_model_source: "self_reported",
+    });
+  });
+
+  it("prefers Codex's metadata to the agent's own word", () => {
+    expect(
+      llmModelProperties(
+        { "x-codex-turn-metadata": { model: "gpt-5.5-codex" } },
+        "claude-opus-5-5",
+      ),
+    ).toEqual({
+      $mcp_llm_model: "gpt-5.5-codex",
+      $mcp_llm_model_source: "client_metadata",
+    });
+  });
+
+  it.each([
+    ["a blank name", "  "],
+    ["the unknown placeholder", "unknown"],
+    ["a non-string name", 4],
+    ["prose", "summarising the thesis draft"],
+    ["an address", "jane@example.com"],
+    ["a provider path", "anthropic/claude-sonnet-4.5"],
+    ["a gateway alias", "custom/acme-legal-bot"],
+    [
+      "an ARN",
+      "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    ],
+  ])("reports no model for an agent sending %s", (_case, reported) => {
+    expect(llmModelProperties(undefined, reported)).toEqual({});
+  });
+
+  it.each([
+    "us.anthropic.claude-sonnet-4-5-v1:0",
+    "claude-opus-4-7[1m]",
+    "claude-sonnet-4-5@20250929",
+    "gemini-1.5-pro@002",
+    "llama3.1:8b",
+  ])("records %s as its provider spells it", (id) => {
+    expect(llmModelProperties(undefined, id)).toEqual({
+      $mcp_llm_model: id,
+      $mcp_llm_model_source: "self_reported",
+    });
+  });
+
+  it("records a model ID of up to 100 characters whole, and none longer", () => {
+    const longest = `${"a".repeat(96)}@002`;
+
+    expect(llmModelProperties(undefined, longest).$mcp_llm_model).toBe(longest);
+    expect(llmModelProperties(undefined, `a${longest}`)).toEqual({});
+  });
 });
 
 describe("sanitizeAnalyticsText", () => {
@@ -685,8 +740,14 @@ describe("clientInfoFromEnvelope (2026-07-28 client attribution)", () => {
       },
     };
 
+    // A per-caller path: the shared `conferences` read carries no one's signal.
     await handler("tools/call")(
-      { params: { name: "list_conferences", arguments: {} } },
+      {
+        params: {
+          name: "get_paper_fulltext",
+          arguments: { paper_id: "3f0d3b3e-0f4a-4c1a-9f2b-1c2d3e4f5a6b" },
+        },
+      },
       ctx,
     );
     expect(stamped[0]).toMatchObject({
@@ -1203,12 +1264,205 @@ describe("request_capability (analytics-gated roadmap intake)", () => {
       },
     });
     const properties = eventProperties("$mcp_tool_call");
-    expect(properties.$mcp_is_error).toBe(true);
+    // The caller's own mistake: recorded in full, not counted as Lune failing.
+    expect(properties.$mcp_is_error).toBe(false);
     expect(properties.$mcp_error_type).toBe("validation");
     expect(properties.$mcp_error_status).toBe("422");
     expect(properties.$mcp_error_message).toContain(
       "fields.0.name: field name 'model_dump' is reserved",
     );
+  });
+
+  it.each([
+    [
+      "a quota refusal",
+      402,
+      { error: "out_of_credits", reason: "out_of_capacity" },
+      "quota_no_capacity",
+      false,
+    ],
+    ["an API outage", 503, { error: "metering_unavailable" }, "api_5xx", true],
+    [
+      "a request the API refuses as invalid",
+      400,
+      { detail: "source='workspace' requires a workspace-scoped credential" },
+      "validation",
+      false,
+    ],
+    [
+      "the API running out of time to read this server's request",
+      408,
+      { error: "request_timeout" },
+      "timeout",
+      true,
+    ],
+    [
+      "a refusal whose message echoes footer-like text",
+      404,
+      { detail: "No paper named 'x http_status=500 error_type=internal'" },
+      "not_found",
+      false,
+    ],
+    [
+      "a status the API names no reason for",
+      405,
+      { detail: "Method Not Allowed" },
+      "api_4xx",
+      true,
+    ],
+  ])(
+    "counts %s as Lune failing only when Lune failed",
+    async (_case, status, body, errorType, isError) => {
+      vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+      initAnalytics();
+      const { server, handler } = createFakeServer();
+
+      const answering = (): KyInstance =>
+        ky.create({
+          prefix: "https://api.example.test/",
+          retry: 0,
+          fetch: async () =>
+            new Response(JSON.stringify(body), {
+              status,
+              headers: { "content-type": "application/json" },
+            }),
+        });
+
+      registerAllTools(
+        server,
+        () => answering(),
+        () => ({
+          identity: { distinctId: "credential:deadbeef", personless: true },
+        }),
+      );
+      await handler("tools/call")({
+        params: { name: "list_conferences", arguments: {} },
+      });
+
+      const properties = eventProperties("$mcp_tool_call");
+      expect(properties.$mcp_is_error).toBe(isError);
+      expect(properties.$mcp_error_type).toBe(errorType);
+      expect(properties.$mcp_error_status).toBe(String(status));
+    },
+  );
+
+  it("counts an exception inside Lune as Lune failing, without its message", async () => {
+    vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+    initAnalytics();
+    const { server, handler } = createFakeServer();
+    registerAllTools(
+      server,
+      () => fakeKy(),
+      () => ({
+        identity: { distinctId: "credential:x", personless: true },
+      }),
+      async () => {
+        throw new Error("release store down");
+      },
+    );
+
+    await expect(
+      handler("tools/call")({
+        params: { name: "list_conferences", arguments: {} },
+      }),
+    ).rejects.toThrow("release store down");
+
+    const properties = eventProperties("$mcp_tool_call");
+    expect(properties.$mcp_is_error).toBe(true);
+    expect(properties.$mcp_error_type).toBe("internal");
+    expect(properties.$mcp_error_message).toBeUndefined();
+  });
+
+  it("counts arguments the tool's schema refuses as the caller's error", async () => {
+    vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+    initAnalytics();
+    const { server, handler } = createFakeServer();
+    registerAllTools(
+      server,
+      () => fakeKy(),
+      () => ({
+        identity: { distinctId: "credential:x", personless: true },
+      }),
+    );
+
+    await handler("tools/call")({
+      params: { name: "search_papers", arguments: { query: "" } },
+    });
+
+    const properties = eventProperties("$mcp_tool_call");
+    expect(properties.$mcp_is_error).toBe(false);
+    expect(properties.$mcp_error_type).toBe("validation");
+    expect(properties.$mcp_error_status).toBeUndefined();
+  });
+
+  it("counts a call its client cancelled as cancelled, not as Lune failing", async () => {
+    vi.stubEnv("LUNE_POSTHOG_KEY", "phc_test");
+    initAnalytics();
+    const { server, handler } = createFakeServer();
+    const controller = new AbortController();
+    const cancelled = new Error("client cancelled");
+
+    // The client cancels while the request is in flight, and fetch fails with
+    // the abort's reason, as undici does.
+    const cancelling = (): KyInstance =>
+      ky.create({
+        prefix: "https://api.example.test/",
+        retry: 0,
+        fetch: (input) => {
+          const request = input instanceof Request ? input : new Request(input);
+
+          return new Promise<Response>((_resolve, reject) => {
+            request.signal.addEventListener(
+              "abort",
+              () => {
+                reject(cancelled);
+              },
+              { once: true },
+            );
+            controller.abort(cancelled);
+          });
+        },
+      });
+
+    registerAllTools(
+      server,
+      () => cancelling(),
+      () => ({
+        identity: { distinctId: "credential:x", personless: true },
+      }),
+    );
+
+    await expect(
+      handler("tools/call")(
+        {
+          params: {
+            name: "get_paper_fulltext",
+            arguments: { paper_id: "3f0d3b3e-0f4a-4c1a-9f2b-1c2d3e4f5a6b" },
+          },
+        },
+        { mcpReq: { signal: controller.signal } },
+      ),
+    ).rejects.toThrow("client cancelled");
+
+    const properties = eventProperties("$mcp_tool_call");
+    expect(properties.$mcp_is_error).toBe(false);
+    expect(properties.$mcp_error_type).toBe("cancelled");
+  });
+
+  it("leaves llm_model to the schema where nothing offers it (stdio)", async () => {
+    const { server, handler } = createFakeServer();
+    registerAllTools(server, () => fakeKy());
+
+    const result = await handler<ToolCallResult>("tools/call")({
+      params: {
+        name: "list_conferences",
+        arguments: { llm_model: "claude-opus-5-5" },
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("llm_model");
+    expect(result.content[0]!.text).toContain("error_type=validation");
   });
 
   it("records output contract drift as a model-readable tool error", async () => {
@@ -1264,7 +1518,9 @@ describe("request_capability (analytics-gated roadmap intake)", () => {
       }),
     ).rejects.toThrow(/unknown tool/i);
     const properties = eventProperties("$mcp_tool_call");
-    expect(properties.$mcp_error_type).toBe("protocol_error");
+    // Naming a tool the caller cannot see is the caller's error, not Lune's.
+    expect(properties.$mcp_is_error).toBe(false);
+    expect(properties.$mcp_error_type).toBe("unknown_tool");
     expect(properties.$mcp_error_message).toBeUndefined();
     expect(properties.$mcp_tool_name).toBe("[email redacted]");
   });

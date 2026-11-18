@@ -15,6 +15,7 @@ import {
   attributeFromEnvelope,
   captureMcp,
   clientHeaderFor,
+  LLM_MODEL_ARGUMENT,
   llmModelProperties,
   type McpAnalyticsContext,
   type McpServerLike,
@@ -46,6 +47,7 @@ import {
 import { wireContent } from "../tool-result.js";
 import {
   invalidArguments,
+  isEntryTool,
   type ToolCallResult,
   type ToolDef,
 } from "./_shared.js";
@@ -259,6 +261,31 @@ function toolListEntry(t: ToolDef, includeWorkspace: boolean): ToolListEntry {
   return entry;
 }
 
+/** Offered by the hosted entry tools (see `llmModelProperties`), with no length
+ *  or pattern: a client that validates arguments would refuse the whole call. */
+const LLM_MODEL_PROPERTY = {
+  type: "string",
+  description:
+    "Optional: your exact model ID, if you know it, and nothing else. Lune " +
+    "uses it only to count calls by model; it never changes the result.",
+} satisfies JsonObject;
+
+/** An entry tool's listing with `llm_model`, the one way to learn the model
+ *  from clients that send none in their metadata. Hosted only. */
+function withModelArgument(entry: ToolListEntry): ToolListEntry {
+  const { properties } = entry.inputSchema;
+
+  if (!isEntryTool(entry._meta) || !isJsonObject(properties)) return entry;
+
+  return {
+    ...entry,
+    inputSchema: {
+      ...entry.inputSchema,
+      properties: { ...properties, [LLM_MODEL_ARGUMENT]: LLM_MODEL_PROPERTY },
+    },
+  };
+}
+
 /** One `tools/list` entry. Optional keys are absent, never undefined, because the
  *  MCP spec distinguishes an omitted field from a present null. */
 type ToolListEntry = {
@@ -402,10 +429,45 @@ export const REQUEST_CAPABILITY_DEF = {
 };
 
 type ErrorFacts = {
+  $mcp_is_error: boolean;
   $mcp_error_type: string;
   $mcp_error_message: string;
   $mcp_error_status?: string;
 };
+
+/** Refusals Lune means to give and the caller's own errors; `quota_*` too. */
+const NOT_LUNE_FAILURES = new Set([
+  "permission",
+  "not_found",
+  "validation",
+  "rate_limited",
+  "unknown_tool",
+  "cancelled",
+]);
+
+/**
+ * Whether an unsuccessful call is Lune's failure, the only kind `$mcp_is_error`
+ * counts: PostHog's MCP error rate is the share of calls carrying it, and
+ * PostHog's own server leaves it off an auth refusal for the same reason.
+ *
+ * - Not Lune's: a refusal Lune means to give (quota 402, rate limit 429,
+ *   permission 401/403, not found 404), the caller's own error (arguments the
+ *   tool's schema or the API refuses, 400/422; a tool the caller cannot see),
+ *   or a call its client cancelled.
+ * - Lune's: everything else. That includes a status the API names no reason
+ *   for: this server builds every API request, so an unexpected 405 or 413
+ *   means the two disagree, as a 408 or a 5xx means Lune was too slow or down.
+ *
+ * Both keep their `$mcp_error_*` facts, so refusals stay countable on their own.
+ */
+function isLuneFailure(errorType: string): boolean {
+  return !errorType.startsWith("quota_") && !NOT_LUNE_FAILURES.has(errorType);
+}
+
+/** The footer every error result ends with, `[http_status=<n> ]error_type=<t>`.
+ *  Read only there: the prose above it can echo the caller's own text. */
+const ERROR_FOOTER =
+  /(?:^|\s)(?:http_status=(\d{3}) )?error_type=([a-z0-9_]+)$/;
 
 /**
  * The two failure facts PostHog's MCP views read off an errored call
@@ -418,17 +480,33 @@ type ErrorFacts = {
  */
 function errorFacts(result: ToolCallResult): ErrorFacts {
   const text = result.content.map((c) => c.text).join("\n");
-  const status = /(?:^|\s)http_status=(\d{3})(?:\s|$)/.exec(text)?.[1];
-  const errorType = /(?:^|\s)error_type=([a-z0-9_]+)(?:\s|$)/.exec(text)?.[1];
+  const footer = ERROR_FOOTER.exec(text);
+
+  const status = footer?.[1];
+  const type = footer?.[2] ?? "tool_error";
 
   const facts: ErrorFacts = {
-    $mcp_error_type: errorType ?? "tool_error",
+    $mcp_is_error: isLuneFailure(type),
+    $mcp_error_type: type,
     $mcp_error_message: text,
   };
 
   if (status) facts.$mcp_error_status = status;
 
   return facts;
+}
+
+/** What a call that threw records. A client cancelling aborts the request's
+ *  signal, which fails its upstream fetch with the abort's own reason. */
+function thrownErrorType(cause: unknown, ctx?: ServerContext): string {
+  const signal = ctx?.mcpReq.signal;
+
+  if (signal?.aborted === true) return "cancelled";
+
+  return cause instanceof ProtocolError &&
+    cause.code === ProtocolErrorCode.InvalidParams
+    ? "unknown_tool"
+    : "internal";
 }
 
 function onTheWire(result: ToolCallResult): CallToolResult {
@@ -513,9 +591,15 @@ export function registerAllTools(
         return response as ListToolsResult;
       }
 
-      const tools = capabilityIntakeOpen()
-        ? [...response.tools, REQUEST_CAPABILITY_DEF]
+      // Both are asks for analytics, made only of a principal confirmed not to
+      // have opted out of capture.
+      const asking = capabilityIntakeOpen();
+
+      const entries = asking
+        ? response.tools.map(withModelArgument)
         : response.tools;
+
+      const tools = asking ? [...entries, REQUEST_CAPABILITY_DEF] : entries;
 
       // Fires per REQUEST (the HTTP handler builds a server per request), so a
       // de-dup flag here is dead code; repeat lists spend the analytics budget.
@@ -631,7 +715,13 @@ export function registerAllTools(
       const name = req.params.name;
       // SAFETY: transport decoded arguments as JSON; dispatchToolCall validates
       // the tool schema before handlers see them.
-      const args = (req.params.arguments ?? {}) as JsonObject;
+      const sent = (req.params.arguments ?? {}) as JsonObject;
+      const hosted = analyticsEnabled();
+
+      // Taken off every tool's arguments, not only the entry tools' that offer
+      // it, since an agent may repeat it on a later call.
+      const { [LLM_MODEL_ARGUMENT]: reportedModel, ...withoutModel } = sent;
+      const args = hosted ? withoutModel : sent;
 
       // An opted-out principal naming the hidden tool falls through to
       // dispatch, which answers "Unknown tool" as for any unlisted name.
@@ -645,6 +735,7 @@ export function registerAllTools(
       // SAFETY: the transport decoded `_meta` as JSON; the reader narrows it.
       const model = llmModelProperties(
         req.params._meta as JsonValue | undefined,
+        hosted ? reportedModel : undefined,
       );
 
       try {
@@ -668,13 +759,11 @@ export function registerAllTools(
           const properties: JsonObject = {
             $mcp_tool_name: name,
             $mcp_duration_ms: Date.now() - started,
-            $mcp_is_error: result.isError === true,
+            ...(result.isError === true
+              ? errorFacts(result)
+              : { $mcp_is_error: false }),
             ...model,
           };
-
-          if (result.isError === true) {
-            Object.assign(properties, errorFacts(result));
-          }
 
           captureMcp(
             "$mcp_tool_call",
@@ -687,11 +776,13 @@ export function registerAllTools(
         return onTheWire(result);
       } catch (e) {
         if (analyticsEnabled()) {
+          const type = thrownErrorType(e, ctx);
+
           captureMcp("$mcp_tool_call", server, analyticsContext?.(), {
             $mcp_tool_name: name,
             $mcp_duration_ms: Date.now() - started,
-            $mcp_is_error: true,
-            $mcp_error_type: "protocol_error",
+            $mcp_is_error: isLuneFailure(type),
+            $mcp_error_type: type,
             ...model,
           });
         }

@@ -197,10 +197,14 @@ export async function cachedJson<T extends JsonValue = JsonValue>(
       return racy as T;
     }
 
+    // Shared by every caller that joins, so it carries no caller's signal; only
+    // `undefined` drops it, since ky's option merge keeps it over a `null`.
+    const shared = { ...kyOpts, signal: undefined };
+
     const resp =
       method === "get"
-        ? await api.get(path, kyOpts)
-        : await api.post(path, kyOpts);
+        ? await api.get(path, shared)
+        : await api.post(path, shared);
 
     const body: T = await resp.json();
 

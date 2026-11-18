@@ -8,6 +8,7 @@
  * and the single-flight racy-recheck path.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import ky from "ky";
 import { createFakeKy, jsonReply } from "../support/fake-ky.js";
 import type { FakeReply } from "../support/fake-ky.js";
 import type { JsonValue } from "../../src/json.js";
@@ -549,5 +550,67 @@ describe("cachedJson: per-principal safety", () => {
 
     expect(out.results).toEqual(["FRESH"]);
     expect(f.postCalls).toBe(1);
+  });
+});
+
+describe("cachedJson: a shared request outlives its caller", () => {
+  it("still answers the callers who joined when the one who started it cancels", async () => {
+    const leader = new AbortController();
+    let answer = (): void => undefined;
+    let sent = (): void => undefined;
+
+    const answered = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+
+    const inFlight = new Promise<void>((resolve) => {
+      sent = resolve;
+    });
+
+    // Fails as fetch does once its request's signal aborts, else answers on cue.
+    const fetch = (input: Request | URL | string): Promise<Response> => {
+      const request = input instanceof Request ? input : new Request(input);
+
+      sent();
+
+      return new Promise<Response>((resolve, reject) => {
+        request.signal.addEventListener(
+          "abort",
+          () => {
+            reject(new Error("aborted"));
+          },
+          { once: true },
+        );
+        void answered.then(() => {
+          resolve(
+            new Response("[]", {
+              headers: { "content-type": "application/json" },
+            }),
+          );
+        });
+      });
+    };
+
+    const api = ky.create({
+      prefix: "https://api.example.test/",
+      retry: 0,
+      fetch,
+    });
+
+    const started = cachedJson(
+      api.extend({ signal: leader.signal }),
+      "get",
+      "conferences",
+    );
+
+    const joined = cachedJson(api, "get", "conferences");
+
+    await inFlight;
+    leader.abort();
+    answer();
+
+    const [, outcome] = await Promise.allSettled([started, joined]);
+
+    expect(outcome).toEqual({ status: "fulfilled", value: [] });
   });
 });

@@ -1,6 +1,10 @@
 import { z } from "zod";
 import type { KyInstance } from "ky";
-import { httpErrorToToolResult, isUnconfirmedDelivery } from "../errors.js";
+import {
+  httpErrorToToolResult,
+  isUnconfirmedDelivery,
+  unconfirmedDeliveryFooter,
+} from "../errors.js";
 import { isJsonObject, type JsonValue } from "../json.js";
 import {
   plainText,
@@ -111,7 +115,8 @@ export async function callFeedbackTool(
       return {
         ...plainText(
           "Lune did not confirm the feedback arrived, and it may already be " +
-            "stored. Tell the user, and do not send it again unless they ask.",
+            "stored. Tell the user, and do not send it again unless they ask.\n" +
+            unconfirmedDeliveryFooter(e),
         ),
         isError: true,
       };
